@@ -1,6 +1,6 @@
 /**
  * @name 小蜜蜂影院
- * @version 1.1.1
+ * @version 1.1.2
  * @description OmniBox Spider for xmfyy.com
  * @downloadURL https://raw.githubusercontent.com/Silent1566/OmniBox-Spider/main/影视/采集/xmfyy.js
  */
@@ -23,11 +23,11 @@ function parseCards(html){
   const re=/<a[^>]+href="\/detail\/(\d+)\.html"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"[^>]*alt="([^"]*)"/g;
   let m;
   while((m=re.exec(html))){
-    cards.push({vod_id:m[1],vod_name:m[3]||"未知",vod_pic:m[2],vod_remarks:""});
+    cards.push({vod_id:m[1],vod_name:(m[3]||"未知").replace(/封面图片/g,"").trim(),vod_pic:m[2],vod_remarks:""});
   }
   if(cards.length===0){
     const re2=/<a[^>]+href="\/detail\/(\d+)\.html"[^>]*>\s*<img[^>]+src="([^"]+)"[^>]*>\s*([^<]+)/g;
-    while((m=re2.exec(html))) cards.push({vod_id:m[1],vod_name:m[3].trim(),vod_pic:m[2],vod_remarks:""});
+    while((m=re2.exec(html))) cards.push({vod_id:m[1],vod_name:m[3].trim().replace(/封面图片/g,"").trim(),vod_pic:m[2],vod_remarks:""});
   }
   return cards;
 }
@@ -73,7 +73,8 @@ async function detail(params,context){
   log("info","detail id="+id);
   const html=await fetchHtml(SITE+"/detail/"+id+".html");
   const titleM=html.match(/<h1[^>]*>([^<]+)<\/h1>/)||html.match(/《([^》]+)》/);
-  const title=titleM?titleM[1].trim():"未知";
+  let title=titleM?titleM[1].trim():"未知";
+  title=title.replace(/封面图片/g,"").trim();
   const picM=html.match(/<img[^>]+class="[^"]*poster[^"]*"[^>]+src="([^"]+)"/)||html.match(/<img[^>]+src="([^"]+)"[^>]*alt="[^"]*封面/)||html.match(/poster[^>]*src="([^"]+)"/)||html.match(/<img[^>]+src="([^"]+)"[^>]*width="200"/);
   const pic=picM?picM[1]:"";
   const actorM=html.match(/"actor"\s*:\s*"([^"]+)"/)||html.match(/主演[：:]\s*([^\n<]+)/);
