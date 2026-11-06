@@ -1,14 +1,17 @@
 /**
  * @name 吃瓜
- * @version 1.2.1
- * @description 吃瓜 (chigua.com / 51cg)：修复卡片封面提取正则 (覆盖 z-bg-loader-url / x-bg-loader-url 等自定义属性)、内置多域名容灾与动态跳转解析、自适应 Node.js http/https 回退机制、Mirages文章列表解析与 DPlayer m3u8 双码率提取
+ * @version 1.3.0
+ * @description 吃瓜 (chigua.com / 51cg)：修复封面（CDN 图片为 AES-128-CBC 加密的密文，脚本内解密还原为 data:image；详情页改取 itemprop="image" 主图）、内置多域名容灾与动态跳转解析、自适应 Node.js http/https 回退机制、Mirages文章列表解析与 DPlayer m3u8 双码率提取
  * @downloadURL https://raw.githubusercontent.com/omnibox-spider/main/影视/采集/吃瓜.js
- * @dependencies []
+ * @dependencies crypto
  *
  * 【环境变量】
  *  SITE_API                  主站点基础地址，默认 https://chigua.com
  *  CHIGUA_MIRRORS            备用镜像域名列表，逗号分隔
  *  CHIGUA_UA                 自定义 User-Agent（可选）
+ *  CHIGUA_COVER_TIMEOUT      封面二进制抓取/解密超时毫秒，默认 8000
+ *  CHIGUA_COVER_CONCURRENCY  封面并发数，默认 6
+ *  CHIGUA_COVER_DISABLE      设为 1 关闭封面解密（回退原始 URL，仅排障用）
  */
 
 let OmniBox;
@@ -37,11 +40,22 @@ try {
 
 const https = require('https');
 const http = require('http');
+const zlib = require('zlib');
+const crypto = require('crypto');
 
 const SITE_API = (process.env.SITE_API || 'https://chigua.com').replace(/\/+$/, '');
 const USER_AGENT =
   process.env.CHIGUA_UA ||
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+// 站点 CDN 图片是 AES-128-CBC 加密后的密文（Content-Type: binary/octet-stream），
+// 前端 image.20261027.002.min.js 的 decryptjs 用固定 key/iv 解密后再渲染。
+// 参数来自前端混淆字符码：key=f5d965df75336270, iv=97b60394abc2fbe1（CBC + Pkcs7）。
+const COVER_AES_KEY = Buffer.from('f5d965df75336270', 'latin1');
+const COVER_AES_IV = Buffer.from('97b60394abc2fbe1', 'latin1');
+const COVER_TIMEOUT = Number(process.env.CHIGUA_COVER_TIMEOUT || 8000);
+const COVER_CONCURRENCY = Number(process.env.CHIGUA_COVER_CONCURRENCY || 6);
+const COVER_DISABLE = process.env.CHIGUA_COVER_DISABLE === '1';
 
 // 初始种子镜像池（包含直连域名与官方实时反代节点）
 const INITIAL_MIRRORS = (() => {
@@ -131,6 +145,140 @@ function requestViaNode(urlStr, options = {}, redirectCount = 0) {
     req.on('error', reject);
     req.end();
   });
+}
+
+/**
+ * 二进制抓取：保留原始 Buffer，不能 toString('utf-8')，否则 AES 密文会被破坏。
+ * 带重定向跟随与 gzip/deflate/br 解压。
+ */
+function fetchBinary(urlStr, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirectCount > 4) return reject(new Error(`封面重定向过多: ${urlStr}`));
+    let u;
+    try { u = new URL(urlStr); } catch (e) { return reject(e); }
+    const isHttps = u.protocol === 'https:';
+    const client = isHttps ? https : http;
+    const req = client.request(
+      {
+        protocol: u.protocol,
+        hostname: u.hostname,
+        port: u.port || (isHttps ? 443 : 80),
+        path: u.pathname + u.search,
+        method: 'GET',
+        headers: {
+          'User-Agent': USER_AGENT,
+          Referer: `${u.origin}/`,
+          Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+          'Accept-Language': 'zh-CN,zh;q=0.9',
+          'Accept-Encoding': 'gzip, deflate, br',
+        },
+        timeout: COVER_TIMEOUT,
+      },
+      (res) => {
+        if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+          res.resume();
+          const nextUrl = new URL(res.headers.location, u.href).href;
+          return resolve(fetchBinary(nextUrl, redirectCount + 1));
+        }
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const raw = Buffer.concat(chunks);
+          const encoding = (res.headers['content-encoding'] || '').toLowerCase();
+          const finish = (buf) => resolve({ statusCode: res.statusCode || 200, body: buf });
+          if (encoding === 'gzip') zlib.gunzip(raw, (e, x) => finish(e ? raw : x));
+          else if (encoding === 'deflate') zlib.inflate(raw, (e, x) => finish(e ? raw : x));
+          else if (encoding === 'br') zlib.brotliDecompress(raw, (e, x) => finish(e ? raw : x));
+          else finish(raw);
+        });
+      }
+    );
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('封面请求超时')));
+    req.end();
+  });
+}
+
+/** 与前端 is_cdnimg 一致：只有这些路径下的图被加密，需要解密 */
+function isCdnImg(url) {
+  if (typeof url !== 'string' || !url) return false;
+  return ['/xiao/', '/upload/upload/', '/upload_01/', '/uploads/'].some((seg) => url.includes(seg));
+}
+
+/** 探测图片真实类型（解密后），返回 mime；无法识别返回空 */
+function sniffImageType(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 4) return '';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.slice(0, 3).toString('ascii') === 'GIF') return 'image/gif';
+  if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return '';
+}
+
+/** AES-CBC 解密密文二进制，还原为真实图片 base64 */
+function decryptCoverBytes(raw) {
+  // 已是普通图片则原样返回
+  const plainType = sniffImageType(raw);
+  if (plainType) return { mime: plainType, body: raw };
+  try {
+    const decipher = crypto.createDecipheriv('aes-128-cbc', COVER_AES_KEY, COVER_AES_IV);
+    const out = Buffer.concat([decipher.update(raw), decipher.final()]);
+    const mime = sniffImageType(out);
+    if (mime) return { mime, body: out };
+  } catch (e) {
+    // 解密失败（可能是非加密图或算法变更），交给调用方回退
+  }
+  return null;
+}
+
+const coverCache = new Map();
+
+/** 解析单张封面：加密图 -> 解密 -> data URI；非加密图/失败则回退原 URL */
+async function resolveCover(url) {
+  if (!url || COVER_DISABLE) return url || '';
+  if (coverCache.has(url)) return coverCache.get(url);
+  // 非 CDN 图片无需解密，直接返回（前端也是原样直出）
+  if (!isCdnImg(url)) {
+    coverCache.set(url, url);
+    return url;
+  }
+  try {
+    const res = await fetchBinary(url);
+    if (res.statusCode !== 200 || !res.body || !res.body.length) {
+      coverCache.set(url, url);
+      return url;
+    }
+    const decoded = decryptCoverBytes(res.body);
+    if (!decoded) {
+      coverCache.set(url, url);
+      return url;
+    }
+    const dataUri = `data:${decoded.mime};base64,${decoded.body.toString('base64')}`;
+    coverCache.set(url, dataUri);
+    return dataUri;
+  } catch (e) {
+    await OmniBox.log('info', `[cover] 抓取/解密失败 ${url}: ${e.message}`);
+    coverCache.set(url, url);
+    return url;
+  }
+}
+
+/** 限并发批量解析封面，失败不阻塞列表主链路 */
+async function resolveCovers(list) {
+  if (COVER_DISABLE || !Array.isArray(list) || !list.length) return list;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < list.length) {
+      const idx = cursor++;
+      const item = list[idx];
+      if (item && item.vod_pic) {
+        try { item.vod_pic = await resolveCover(item.vod_pic); } catch (_) {}
+      }
+    }
+  };
+  const n = Math.min(COVER_CONCURRENCY, list.length);
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return list;
 }
 
 /**
@@ -309,7 +457,9 @@ async function home(params, context) {
   try {
     await OmniBox.log('info', `[home] context.from=${context?.from || 'web'}`);
     const html = await fetchHtmlWithFailover('/');
-    const list = parseListFromHtml(html, currentActiveBase);
+    const list = await resolveCovers(parseListFromHtml(html, currentActiveBase));
+    const coverOk = list.filter((x) => x.vod_pic && x.vod_pic.startsWith('data:')).length;
+    await OmniBox.log('info', `[home] got ${list.length} 条，封面已解密 ${coverOk}/${list.length}`);
 
     const classes = [...DEFAULT_CLASSES];
     const catRegex = /href=["'](?:https?:\/\/[^"']*)?\/category\/([a-zA-Z0-9_\-]+)\/?["'][^>]*>([^<]+)<\/a>/gi;
@@ -358,7 +508,8 @@ async function category(params, context) {
     }
 
     const html = await fetchHtmlWithFailover(path);
-    const list = parseListFromHtml(html, currentActiveBase);
+    const list = await resolveCovers(parseListFromHtml(html, currentActiveBase));
+    await OmniBox.log('info', `[category] got ${list.length} 条，封面已解密 ${list.filter((x) => x.vod_pic && x.vod_pic.startsWith('data:')).length}/${list.length}`);
 
     let pagecount = Number(page);
     const pageMatches = html.match(/\/page\/(\d+)\/?/g) || [];
@@ -398,16 +549,24 @@ async function detail(params, context) {
       title = titleM[1].replace(/<[^>]+>/g, '').trim();
     }
 
-    // 详情页封面
+    // 详情页封面：真实主图在 <meta itemprop="image" content=".../upload_01/xiao/...">，
+    // og:image 是 social-default.jpg 占位图，旧的通用属性正则还会命中 icon-black.png 图标，都不能用。
     let pic = '';
-    const picM =
-      html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i) ||
-      html.match(/(?:[a-z0-9_-]*(?:bg|image|thumb|loader|original|src)[a-z0-9_-]*)=["']\s*([^"'\s>]+\.(?:jpg|jpeg|png|webp|gif)[^"'\s>]*)/i);
-    if (picM) {
-      pic = picM[1];
+    const itemImage = html.match(/<meta[^>]+itemprop=["']image["'][^>]+content=["']([^"']+)["']/i) ||
+      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+itemprop=["']image["']/i);
+    if (itemImage && itemImage[1]) {
+      pic = itemImage[1];
+    } else {
+      // 兜底：详情页里第一条 CDN 加密图（排除广告 /hc237/、图标、占位图）
+      const cdn = html.match(/https?:\/\/[^"'\s>]+\/(?:upload_01|xiao|uploads)\/[^"'\s>]+\.(?:jpe?g|png|webp|gif)[^"'\s>]*/i);
+      if (cdn) pic = cdn[0];
+    }
+    if (pic) {
       if (pic.startsWith('//')) pic = 'https:' + pic;
       else if (pic.startsWith('/')) pic = currentActiveBase + pic;
+      pic = await resolveCover(pic);
     }
+    if (pic) await OmniBox.log('info', `[detail] 封面=${pic.slice(0, 40)}`);
 
     let content = '';
     const descM =
@@ -528,7 +687,8 @@ async function search(params, context) {
       html = await fetchHtmlWithFailover(queryPath);
     }
 
-    const list = parseListFromHtml(html, currentActiveBase);
+    const list = await resolveCovers(parseListFromHtml(html, currentActiveBase));
+    await OmniBox.log('info', `[search] kw=${keyword} got ${list.length} 条，封面已解密 ${list.filter((x) => x.vod_pic && x.vod_pic.startsWith('data:')).length}/${list.length}`);
 
     return {
       page: Number(page),
