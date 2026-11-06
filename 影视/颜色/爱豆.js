@@ -1,9 +1,8 @@
 /**
  * @name 爱豆 (aida5)
- * @version 1.6.0
- * @description 爱豆 (w18.aida5.buzz)：AES-CBC+md5 签名接口逆向；修复封面（vodPic 为整段字节反转的 JPEG，脚本内反转并转 data:image/jpeg）与播放（失效的 vodPlayServer 改回主站 /api/m3u8/ 真实 m3u8）；/awsapi 的 POST 走原生 node https；跟随重定向、自动解压 gzip/br、镜像容灾
+ * @version 1.6.1
+ * @description 爱豆 (w18.aida5.buzz)：AES-CBC+md5 签名接口逆向；修复封面（vodPic 为整段字节反转的 JPEG，脚本内反转并转 data:image/jpeg）与播放（失效的 vodPlayServer 改回主站 /api/m3u8/ 真实 m3u8）；/awsapi 的 POST 走原生 node https；跟随重定向、自动解压 gzip/br、镜像容灾；修复分类/搜索返回 page、limit 为字符串导致宿主 Go 结构体解析失败（改为数值）
  * @downloadURL https://w18.aida5.buzz/
- * @indexs 1
  * @dependencies crypto
  *
  * 【环境变量】
@@ -362,9 +361,11 @@ function wrapList(page, pagecount, total, limit, list, extra = {}) {
   return {
     code: 1,
     msg: '数据列表',
-    page: String(p),
+    // 宿主 Go 结构体 SpiderCategoryResponse 的 page / limit 均为 int，
+    // 这里必须是数值，输出字符串会导致 json: cannot unmarshal string into ... of type int。
+    page: p,
     pagecount: pc,
-    limit: String(l),
+    limit: l,
     total: t,
     list,
     ...extra,
