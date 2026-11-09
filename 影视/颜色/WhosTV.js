@@ -2,12 +2,12 @@
 // @author OmniBox
 // @description 站点：whos.tv（AV 影片百科 + 在线播放，影片库 34 万部，详情路径 /videos/{番号}，分页 /videos/page-N）。HTML 路由受 Cloudflare 托管挑战保护，本源采用「直连优先 + Reader 通道兜底」抓页面，视频流则完全直连（HLS，无需 Cookie/Referer）。支持首页、分类（排序/标签/演员）、详情、搜索、播放。
 // @dependencies []
-// @version 2.0.1
+// @version 2.1.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/WhosTV.js
 
 /**
  * ============================================================================
- * whos.tv OmniBox 源 v2.0.0
+ * whos.tv OmniBox 源 v2.1.0
  *
  * ⚠️ v1.0.0 的方向是错的：当时只找到社区资源帖接口（磁力/网盘），
  * 误判站点为「资源帖站」。实际站点主体是 **AV 影片库**：
@@ -53,11 +53,18 @@
  *    /tags/{name}                     标签
  *    <source src="…m3u8">             真实播放地址（raw HTML 里就有）
  *
- * 5. 环境变量
+ * 5. 封面（v2.1.0）
+ *    列表页封面已从 <img src> 改为 <div data-cover-src="{XOR密文}">，
+ *    密文需按 lazy-cover.js 算法解密（末 2 位 hex 作 key，逐字节异或）。
+ *    若列表卡仍未取到封面（模板改版 / 解密失败），会自动回源详情页，
+ *    从详情页 og:image（同为 images/av/{hash}.jpg）取封面补上。
+ *
+ * 6. 环境变量
  *    WHOSTV_HOST           站点域名
  *    WHOSTV_READER         页面兜底通道；默认 https://r.jina.ai（留空则只用直连）
  *    WHOSTV_DIRECT_FIRST   1=先试直连再回退 reader（默认 1）；0=直接用 reader
  *    WHOSTV_PROXY_URL      出口代理（HTTP CONNECT / SOCKS5），作用于页面抓取
+ *    WHOSTV_COVER_FILL     列表缺封面时回源详情的最大补图条数（默认 12，0=关闭）
  * ============================================================================
  */
 
@@ -491,9 +498,27 @@ function parseVideoCards(html) {
 }
 
 function mapCard(code, chunk) {
+  // 封面两种形态：
+  // 1. 旧版：<img src="https://v.hersav.me/images/av/{hash}.jpg">
+  // 2. 新版：<div data-cover-src="{XOR 密文}">（前端 lazy-cover.js 解密后再换成 img）
+  //    站点已切到第 2 种，必须解密，否则列表页封面全空。
+  let pic = "";
+  let hash = "";
   const imageMatch = chunk.match(/https:\/\/[^"'\s]+\/images\/av\/([a-f0-9]{32})\.(?:jpg|jpeg|png|webp)/i);
-  const hash = imageMatch ? imageMatch[1] : "";
-  const pic = imageMatch ? imageMatch[0] : "";
+  if (imageMatch) {
+    pic = imageMatch[0];
+    hash = imageMatch[1];
+  } else {
+    const encMatch = chunk.match(/data-cover-src="([0-9a-f]+)"/i);
+    if (encMatch) {
+      const decoded = coolDecrypt(encMatch[1]);
+      const hashMatch = decoded.match(/\/images\/av\/([a-f0-9]{32})\.(?:jpg|jpeg|png|webp)/i);
+      if (hashMatch) {
+        pic = decoded;
+        hash = hashMatch[1];
+      }
+    }
+  }
 
   const titleMatch = chunk.match(/alt="([^"]{2,})"/i);
   const ratingMatch = chunk.match(/lucide--star[\s\S]{0,220}?<span[^>]*>\s*([\d.]+)\s*<\/span>/i);
@@ -566,6 +591,47 @@ function parseRankCards(html) {
     });
   }
   return cards;
+}
+
+/**
+ * 列表卡片偶尔拿不到封面（模板改版 / data-cover-src 缺失 / 解密失败）。
+ * 按用户要求：这类条目回源详情页，从详情页的 og:image / images/av/{hash} 取封面。
+ * 限并发 + 只补前 N 条，避免把 reader 通道打爆。
+ */
+async function fillMissingCovers(items, { concurrency = 3, maxFill = 12 } = {}) {
+  const missing = (items || []).filter((item) => !item.vod_pic);
+  if (!missing.length) return items;
+
+  const targets = missing.slice(0, maxFill);
+  logInfo(`列表缺封面 ${missing.length} 条，回源详情补 ${targets.length} 条`);
+
+  const queue = targets.slice();
+  const filled = new Map();
+
+  async function worker() {
+    while (queue.length) {
+      const item = queue.shift();
+      if (!item) continue;
+      try {
+        const detail = await fetchVideoDetail(item.vod_id);
+        if (detail && detail.pic) {
+          filled.set(item.vod_id, detail.pic);
+        }
+      } catch (error) {
+        logInfo(`补封面失败 ${item.vod_id}: ${error.message}`);
+      }
+    }
+  }
+
+  const workers = [];
+  for (let i = 0; i < Math.min(concurrency, targets.length); i += 1) workers.push(worker());
+  await Promise.all(workers);
+
+  if (!filled.size) return items;
+  logInfo(`补封面成功 ${filled.size}/${targets.length}`);
+  return items.map((item) => (
+    item.vod_pic ? item : Object.assign({}, item, { vod_pic: filled.get(item.vod_id) || "" })
+  ));
 }
 
 function toVodList(items) {
@@ -720,11 +786,12 @@ async function home(params, context) {
   logInfo(`home 入口 from=${(context && context.from) || "web"}`);
   try {
     const { list } = await fetchListPage({ page: 1, sort: "newest" });
-    logInfo(`home 结果 list=${list.length}`);
+    const withCovers = await fillMissingCovers(list);
+    logInfo(`home 结果 list=${withCovers.length} 有封面=${withCovers.filter((i) => i.vod_pic).length}`);
     return {
       class: CLASS_LIST,
       filters: buildFilters(),
-      list: toVodList(list),
+      list: toVodList(withCovers),
     };
   } catch (error) {
     logError("home 失败", error);
@@ -765,7 +832,8 @@ async function category(params, context) {
       // 排行榜单页无分页，本地切片
       const start = (page - 1) * PAGE_SIZE;
       list = list.slice(start, start + PAGE_SIZE);
-      logInfo(`category(rank) 结果 list=${list.length}`);
+      list = await fillMissingCovers(list);
+      logInfo(`category(rank) 结果 list=${list.length} 有封面=${list.filter((i) => i.vod_pic).length}`);
       return {
         page,
         pagecount: Math.max(1, Math.ceil((list.length || PAGE_SIZE) / PAGE_SIZE)),
@@ -781,21 +849,23 @@ async function category(params, context) {
         : `${HOST}/tags/${encodeURIComponent(tag)}`;
       const html = await fetchPage(tagPath, { ttl: LIST_CACHE_TTL, cacheName: "tag" });
       const list = parseVideoCards(html);
-      logInfo(`category(tag) 结果 tag=${tag} list=${list.length}`);
+      const withCovers = await fillMissingCovers(list);
+      logInfo(`category(tag) 结果 tag=${tag} list=${withCovers.length} 有封面=${withCovers.filter((i) => i.vod_pic).length}`);
       return {
         page,
         pagecount: list.length >= PAGE_SIZE ? page + 1 : page,
         total: (page - 1) * PAGE_SIZE + list.length,
-        list: toVodList(list),
+        list: toVodList(withCovers),
       };
     }
 
     const result = await fetchListPage({ page, sort });
+    result.list = await fillMissingCovers(result.list);
     // 站点共 28424 页，pagecount 给一个足够大的值让宿主能继续翻页
     const pagecount = Math.max(page, page + (result.list.length >= PAGE_SIZE ? 1 : 0)) > page
       ? page + 1
       : page;
-    logInfo(`category 结果 list=${result.list.length} pagecount=${pagecount}`);
+    logInfo(`category 结果 list=${result.list.length} 有封面=${result.list.filter((i) => i.vod_pic).length} pagecount=${pagecount}`);
     return {
       page,
       pagecount,
@@ -935,12 +1005,13 @@ async function search(params, context) {
     const slice = matched.slice(start, start + PAGE_SIZE);
     const pagecount = Math.max(1, Math.ceil(matched.length / PAGE_SIZE));
 
-    logInfo(`search 结果 keyword=${keyword} total=${matched.length} list=${slice.length}`);
+    const withCovers = await fillMissingCovers(slice);
+    logInfo(`search 结果 keyword=${keyword} total=${matched.length} list=${withCovers.length} 有封面=${withCovers.filter((i) => i.vod_pic).length}`);
     return {
       page,
       pagecount: matched.length ? pagecount : page,
       total: matched.length,
-      list: toVodList(slice),
+      list: toVodList(withCovers),
     };
   } catch (error) {
     logError(`search 失败 keyword=${keyword}`, error);

@@ -105,7 +105,7 @@ function makeRequest({ directWorks = false } = {}) {
 
 test("WhosTV declares annotations and OM format", () => {
   assert.match(source, /\/\/ @name 🔞WhosTV/);
-  assert.match(source, /\/\/ @version 2\.0\.1/);
+  assert.match(source, /\/\/ @version 2\.1\.0/);
   assert.match(source, /@downloadURL .*影视\/颜色\/WhosTV\.js/);
   assert.match(source, /module\.exports = \{ home, category, detail, search, play \}/);
   assert.match(source, /runner\.run\(module\.exports\)/);
@@ -142,6 +142,13 @@ test("WhosTV home parses cards with code/title/cover", async () => {
   assert.ok(
     first.vod_pic.startsWith("https://v.hersav.me/images/av/"),
     `封面应来自 v.hersav.me，实际 ${first.vod_pic}`,
+  );
+  // v2.0.1：列表封面改为 data-cover-src 密文，必须解密后全部有图
+  const withPic = result.list.filter((item) => item.vod_pic);
+  assert.equal(
+    withPic.length,
+    result.list.length,
+    `列表应全部有封面，实际 ${withPic.length}/${result.list.length}`,
   );
   assert.equal(result.list.map((i) => i.vod_id).indexOf("page-2"), -1, "不应混入分页链接");
 });
@@ -245,4 +252,40 @@ test("WhosTV coolDecrypt recovers XOR-encoded cover", () => {
     out += String.fromCharCode(parseInt(body.substr(i, 2), 16) ^ key);
   }
   assert.match(out, /^https:\/\/v\.hersav\.me\/images\/av\/[a-f0-9]{32}\.jpg$/);
+});
+
+test("WhosTV backfills covers from detail page when list card lacks one", async () => {
+  const { request } = makeRequest();
+  const wrapped = async (url, options = {}) => {
+    const res = await request(url, options);
+    const u = String(url);
+    // 抹掉列表页上的 data-cover-src 与 img src，模拟模板改版导致列表无封面
+    if (/\/videos(\?|$)/.test(u) || /\/videos\/page-/.test(u)) {
+      const body = String(res.body || "")
+        .replace(/data-cover-src="[0-9a-f]+"/g, "")
+        .replace(/https:\/\/v\.hersav\.me\/images\/av\/[a-f0-9]{32}\.(jpg|jpeg|png|webp)/g, "");
+      return { statusCode: res.statusCode, headers: res.headers, body };
+    }
+    return res;
+  };
+
+  const { spider, logs } = loadSpider(wrapped);
+  const result = await spider.home({}, {});
+
+  const withPic = result.list.filter((item) => item.vod_pic);
+  assert.equal(
+    withPic.length,
+    result.list.length,
+    `列表无图时应从详情页补齐，实际 ${withPic.length}/${result.list.length}`,
+  );
+  assert.ok(withPic.every((item) => item.vod_pic.startsWith("https://v.hersav.me/images/av/")));
+  assert.ok(logs.some((l) => l.indexOf("列表缺封面") >= 0), "应记录补图动作");
+});
+
+test("WhosTV rank page covers are decrypted", async () => {
+  const { request } = makeRequest();
+  const { spider } = loadSpider(request);
+  const rank = await spider.category({ categoryId: "rank:video", page: 1 }, {});
+  const withPic = rank.list.filter((item) => item.vod_pic);
+  assert.equal(withPic.length, rank.list.length, `排行榜应全部有封面，实际 ${withPic.length}/${rank.list.length}`);
 });
