@@ -2,7 +2,7 @@
 // @author @lucky_TJQ
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios,cheerio
-// @version 1.0.1
+// @version 1.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/奈飞工厂.js
 // @indexs 1
 
@@ -252,6 +252,91 @@ function buildCacheKey(prefix, raw) {
   if (text.length <= 120) return `${prefix}:${text}`;
   const hash = crypto.createHash('sha1').update(text).digest('hex').slice(0, 32);
   return `${prefix}:h${hash}`;
+}
+
+/**
+ * 递归解包图片代理链
+ *
+ * 实测站点存在两层嵌套：
+ *   image.baidu.com/search/down?url=https://images.weserv.nl/?url=https://lz.sinaimg.cn/xxx.jpg
+ * 其中百度代理对 webp 源图返回 HTTP 200 但 Content-Length: 0（空 body），
+ * weserv 对 sinaimg 返回 400 Domain blocked，而最内层源图直连是 200。
+ * 所以遇到代理套代理时，一路剥到最后那个真实图床地址。
+ *
+ * 网页端浏览器有兜底占位可以忍，OK影视这类客户端图片库拿不到字节时
+ * 就只能渲染标题文字，这就是「网页有封面、App 只有文字」的直接原因。
+ */
+const PIC_PROXY_PATTERNS = [
+  /^https?:\/\/image\.baidu\.com\/search\/down/i,
+  /^https?:\/\/images?\.weserv\.nl\//i,
+  /^https?:\/\/wsrv\.nl\//i,
+];
+
+function isPicProxy(url) {
+  const value = String(url || '');
+  return PIC_PROXY_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+function unwrapPicProxyOnce(url) {
+  const value = String(url || '').trim();
+  if (!value) return '';
+  const take = (raw) => {
+    let decoded = String(raw || '').trim();
+    try {
+      decoded = decodeURIComponent(raw);
+    } catch (_) {
+      decoded = String(raw || '').trim();
+    }
+    decoded = decoded.trim();
+    if (/^ssl:/i.test(decoded)) decoded = `https://${decoded.slice(4)}`;
+    else if (decoded.startsWith('//')) decoded = `https:${decoded}`;
+    else if (!/^https?:\/\//i.test(decoded)) decoded = `https://${decoded}`;
+    return /^https?:\/\//i.test(decoded) ? decoded : '';
+  };
+  try {
+    const parsed = new URL(value);
+    const inner = parsed.searchParams.get('url');
+    if (inner) {
+      const result = take(inner);
+      if (result) return result;
+    }
+  } catch (_) {
+    /* fall through */
+  }
+  const match = value.match(/[?&]url=([^&]+)/i);
+  if (match) {
+    const result = take(match[1]);
+    if (result) return result;
+  }
+  return '';
+}
+
+/** 剥掉所有代理层，最多 4 层，防环 */
+function unwrapPicProxy(url) {
+  let current = String(url || '').trim();
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (!isPicProxy(current)) break;
+    const next = unwrapPicProxyOnce(current);
+    if (!next || next === current) break;
+    current = next;
+  }
+  return current;
+}
+
+/** 统一的封面清洗入口：解代理 → 补协议 → 过滤占位图 */
+function normalizePic(url) {
+  const raw = unescapeBackslashes(String(url || '')).trim();
+  if (!raw) return '';
+  if (isPlaceholderImage(raw)) return '';
+
+  const unwrapped = unwrapPicProxy(raw);
+  let value = unwrapped || raw;
+
+  if (isPlaceholderImage(value)) return '';
+  if (value.startsWith('//')) value = `https:${value}`;
+  if (/^http:\/\//i.test(value)) value = `https://${value.slice(7)}`;
+  if (/^https:\/\//i.test(value)) return value;
+  return absolutize(value);
 }
 
 async function getCachedText(key) {
@@ -558,7 +643,7 @@ function pickCardImage($, element) {
   for (const candidate of candidates) {
     const value = String(candidate || '').trim();
     if (isPlaceholderImage(value)) continue;
-    return absolutize(value);
+    return normalizePic(value);
   }
   return '';
 }
@@ -609,7 +694,7 @@ function parseBanner(html) {
     banner.push({
       title,
       subtitle: stripTags($item.find('.slid-e-type').first().text() || ''),
-      backgroundImage: absolutize(background),
+      backgroundImage: normalizePic(background),
       genre: stripTags($item.find('.slid-e-type').first().text() || ''),
       description: stripTags($item.find('.slide-info').first().text() || ''),
       vod_id: vodId,
@@ -639,7 +724,7 @@ function parseSearchCards(html) {
     for (const candidate of candidates) {
       const value = String(candidate || '').trim();
       if (isPlaceholderImage(value)) continue;
-      pic = absolutize(value);
+      pic = normalizePic(value);
       break;
     }
 
@@ -696,7 +781,7 @@ function pickDetailImage($) {
   for (const candidate of candidates) {
     const value = String(candidate || '').trim();
     if (isPlaceholderImage(value)) continue;
-    return absolutize(value);
+    return normalizePic(value);
   }
   return '';
 }
@@ -1130,11 +1215,11 @@ async function requestCategoryList(typeId, page, filters) {
   const list = (payload.list || [])
     .map((item) => {
       const vodId = String(item.vod_id || extractVodId(item.url || ''));
-      const pic = unescapeBackslashes(String(item.vod_pic || ''));
+      const pic = normalizePic(item.vod_pic || item.vod_pic_thumb || '');
       return {
         vod_id: vodId,
         vod_name: stripTags(item.vod_name || ''),
-        vod_pic: pic ? absolutize(pic) : '',
+        vod_pic: pic,
         vod_remarks: stripTags(item.vod_remarks || ''),
         type_name: stripTags(item.vod_tag || '').slice(0, 20),
         vod_year: stripTags(String(item.vod_year || '')),
@@ -1230,7 +1315,7 @@ async function search(params, context) {
           .map((item) => ({
             vod_id: String(item.id || ''),
             vod_name: stripTags(item.name || ''),
-            vod_pic: item.pic ? absolutize(unescapeBackslashes(String(item.pic))) : '',
+            vod_pic: normalizePic(item.pic),
             vod_remarks: '',
           }))
           .filter((item) => item.vod_id && item.vod_name);
