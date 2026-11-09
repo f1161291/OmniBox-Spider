@@ -50,7 +50,7 @@ const files = {
 };
 
 test("metadata points to the migrated 4K-AV site", () => {
-  assert.equal(source.match(/^\/\/ @version (.+)$/m)?.[1], "1.0.2");
+  assert.equal(source.match(/^\/\/ @version (.+)$/m)?.[1], "1.0.3");
   assert.equal(source.match(/^\/\/ @description (.+)$/m)?.[1], "4k-av.com：支持首页、分类、搜索、详情与直链播放，站点请求使用苹果 Safari UA");
   assert.match(source, /const BASE_URL = "https:\/\/4k-av\.com";/);
   assert.doesNotMatch(source, /4kmp\.com|\/s\?k=/);

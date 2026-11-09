@@ -1,8 +1,8 @@
 // @name 360影视
 // @author 梦
 // @description 360影视 OmniBox 源；解析接口通过全局环境变量 PARSE_APIS 配置，按顺序循环尝试
-// @version 1.0.3
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/解析/movie360.js
+// @version 1.0.4
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/解析/movie360.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");

@@ -2,8 +2,8 @@
 // @author 梦
 // @description 刮削：已接入，弹幕：未接入，嗅探：直接返回 play.modujx11.com 直链
 // @dependencies cheerio
-// @version 1.0.9
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/openclaw/影视/采集/威尔伯TV.js
+// @version 1.0.10
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/威尔伯TV.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");

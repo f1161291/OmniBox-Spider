@@ -2,8 +2,8 @@
 // @author openclaw
 // @description 飞牛私有媒体库源，支持多站点、媒体库分类、目录展开、电影/剧集详情、原画/转码/外挂字幕
 // @dependencies: axios
-// @version 1.1.0
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/流媒体/飞牛.js
+// @version 1.1.1
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/流媒体/飞牛.js
 
 const axios = require("axios");
 const http = require("http");

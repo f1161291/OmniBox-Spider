@@ -1,8 +1,8 @@
 // @name 网盘分享
 // @author lampon
 // @description 
-// @version 1.0.0
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/定时任务/网盘分享.js
+// @version 1.0.1
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/定时任务/网盘分享.js
 // @dependencies: crypto
 
 /**

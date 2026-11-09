@@ -73,7 +73,7 @@ function loadSpider({ firstStatus = 200 } = {}) {
 }
 
 test("metadata upgrades knvod API and challenge handling", () => {
-  assert.equal(source.match(/@version\s+([^\n*]+)/)?.[1].trim(), "1.0.2");
+  assert.equal(source.match(/@version\s+([^\n*]+)/)?.[1].trim(), "1.0.3");
   assert.match(source, /index\.php\/api\/vod/);
   assert.match(source, /siteCookies/);
   assert.match(source, /statusCode === 403 \|\| statusCode === 429/);

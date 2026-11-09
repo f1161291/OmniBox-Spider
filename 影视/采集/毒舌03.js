@@ -2,8 +2,8 @@
 // @author 梦
 // @description 影视站：https://www.dushe03.com/ ，支持首页、分类、详情、搜索与播放
 // @dependencies cheerio
-// @version 1.0.8
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/毒舌03.js
+// @version 1.0.9
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/毒舌03.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");

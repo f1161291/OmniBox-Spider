@@ -1,8 +1,8 @@
 // @name 耐视点播
 // @author 梦
 // @description 页面解析：https://nsvod.me，支持首页、分类、搜索、详情与播放页解析
-// @version 1.0.3
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/耐视点播.js
+// @version 1.0.4
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/耐视点播.js
 // @dependencies cheerio
 
 const OmniBox = require("omnibox_sdk");

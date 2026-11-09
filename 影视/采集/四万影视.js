@@ -1,8 +1,8 @@
 // @name 四万影视
 // @author 梦
 // @description 站点接口源：直接走 40000.me 的 /api/maccms，支持分类、详情、搜索、播放
-// @version 1.2.1
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/四万影视.js
+// @version 1.2.2
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/四万影视.js
 // @dependencies axios
 
 const axios = require("axios");

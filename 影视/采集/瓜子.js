@@ -1,9 +1,9 @@
 // @name 瓜子APP
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
-// @version 1.1.0
+// @version 1.1.1
 // @dependencies: axios, crypto
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/瓜子.js
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/瓜子.js
 
 /**
  * ============================================================================

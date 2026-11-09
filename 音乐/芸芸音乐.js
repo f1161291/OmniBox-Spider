@@ -1,9 +1,9 @@
 // @name 芸芸音乐[听]
-// @version 1.0.2
+// @version 1.0.3
 // @author Silent1566
 // @origin repo.tvshare.cn/api/files/download/[REDACTED]
 // @push 0
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/音乐/芸芸音乐.js
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/音乐/芸芸音乐.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");

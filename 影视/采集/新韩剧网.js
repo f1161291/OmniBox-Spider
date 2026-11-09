@@ -2,8 +2,8 @@
 // @author Monica
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: cheerio, crypto-js
-// @version 1.1.2
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/新韩剧网.js
+// @version 1.1.3
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/新韩剧网.js
 
 const OmniBox = require("omnibox_sdk");
 const cheerio = require("cheerio");

@@ -2,8 +2,8 @@
 // @push 1
 // @author lampon
 // @description 推送脚本
-// @version 1.0.6
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/模板/JavaScript/推送脚本.js
+// @version 1.0.7
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/模板/JavaScript/推送脚本.js
 
 const OmniBox = require("omnibox_sdk");
 

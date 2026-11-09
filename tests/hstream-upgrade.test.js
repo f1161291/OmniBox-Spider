@@ -130,7 +130,7 @@ function makeRequest() {
 
 test("HStream source declares header annotations and om format", () => {
   assert.match(source, /\/\/ @name 🔞HStream/);
-  assert.match(source, /\/\/ @version 1\.2\.0/);
+  assert.match(source, /\/\/ @version 1\.2\.1/);
   assert.match(source, /@downloadURL .*影视\/颜色\/HStream\.js/);
   assert.match(source, /module\.exports = \{ home, category, detail, search, play \}/);
   assert.match(source, /runner\.run\(module\.exports\)/);

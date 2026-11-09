@@ -2,8 +2,8 @@
 // @author OmniBox
 // @description 站点：hstream.moe（英文/日文双语标题，HD/4K 英语字幕动漫）。支持首页、分类、详情、搜索、播放；播放走站点 /player/api 会话鉴权，输出 720P 直连 mp4 以及 1080P/2160P DASH 备用线路。
 // @dependencies cheerio
-// @version 1.2.0
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/颜色/HStream.js
+// @version 1.2.1
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/HStream.js
 
 /**
  * ============================================================================

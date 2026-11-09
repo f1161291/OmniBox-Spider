@@ -2,8 +2,8 @@
 // @author 梦
 // @description 刮削：已接入，弹幕：未接入，嗅探：按官方 POST 播放接口直链优先（失败时页面回退）
 // @dependencies cheerio
-// @version 1.2.5
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/FKTV.js
+// @version 1.2.6
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/FKTV.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");

@@ -2,8 +2,8 @@
 // @author OmniBox
 // @description YouTube影视源，支持分组分类、二级筛选、搜索、播放列表与视频播放
 // @dependencies: axios
-// @version 1.1.1
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/流媒体/YouTube.js
+// @version 1.1.2
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/流媒体/YouTube.js
 
 const axios = require("axios");
 const OmniBox = require("omnibox_sdk");

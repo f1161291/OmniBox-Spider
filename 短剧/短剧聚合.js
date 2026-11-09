@@ -2,8 +2,8 @@
 // @author 
 // @description
 // @dependencies: axios, crypto-js
-// @version 1.0.4
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/短剧/短剧聚合.js
+// @version 1.0.5
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/短剧聚合.js
 
 /**
  * ============================================================================

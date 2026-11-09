@@ -1,8 +1,8 @@
 // @name APP电影
 // @author OmniBox
 // @description 站点：app.movie（MacCMS blueghost 模板，裸域 302 → www.appmovie.art）；首页 / 分类四维筛选 / 搜索 / 详情多线路 / 播放直链
-// @version 1.1.0
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/APP电影.js
+// @version 1.1.1
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/解析/app-movie.js
 // @dependencies: cheerio
 
 /**

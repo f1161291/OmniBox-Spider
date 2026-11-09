@@ -1,5 +1,5 @@
 // @name 采集站模板
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/模板/JavaScript/采集站模板.js
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/模板/JavaScript/采集站模板.js
 /**
  * OmniBox 采集站直接爬虫脚本
  *

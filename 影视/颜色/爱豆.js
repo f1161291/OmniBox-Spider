@@ -1,8 +1,8 @@
 /**
  * @name 爱豆 (aida5)
- * @version 1.6.1
+ * @version 1.6.2
  * @description 爱豆 (w18.aida5.buzz)：AES-CBC+md5 签名接口逆向；修复封面（vodPic 为整段字节反转的 JPEG，脚本内反转并转 data:image/jpeg）与播放（失效的 vodPlayServer 改回主站 /api/m3u8/ 真实 m3u8）；/awsapi 的 POST 走原生 node https；跟随重定向、自动解压 gzip/br、镜像容灾；修复分类/搜索返回 page、limit 为字符串导致宿主 Go 结构体解析失败（改为数值）
- * @downloadURL https://w18.aida5.buzz/
+ * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/爱豆.js
  * @dependencies crypto
  *
  * 【环境变量】

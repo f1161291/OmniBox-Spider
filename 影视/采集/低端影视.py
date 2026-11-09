@@ -2,8 +2,8 @@
 # @name 低端影视
 # @author 梦
 # @description 影视站：https://ddys.io ，Python版，支持首页分类、分类列表、搜索、详情与播放
-# @version 1.0.11
-# @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/低端影视.py
+# @version 1.0.12
+# @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/低端影视.py
 # @dependencies requests,lxml
 
 import concurrent.futures

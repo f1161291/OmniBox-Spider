@@ -72,7 +72,7 @@ function makeRequest({ firstHomeRedirect = false } = {}) {
 
 test("HDmoli uses the new domain and follows HTTP redirects", async () => {
   assert.match(source, /const BASE_URL = \(process\.env\.HDMOLI_HOST \|\| "https:\/\/www\.hdmoli\.me"\)/);
-  assert.match(source, /@version 1\.0\.8/);
+  assert.match(source, /@version 1\.0\.9/);
   assert.match(source, /\[301, 302, 303, 307, 308\]\.includes\(statusCode\)/);
 
   const { request, requests } = makeRequest({ firstHomeRedirect: true });

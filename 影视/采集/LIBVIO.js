@@ -2,8 +2,8 @@
 // @author 梦
 // @description 刮削：已接入，弹幕：已接入，播放记录：已接入，嗅探：不需要（直链优先，支持网盘线路展开）
 // @dependencies
-// @version 1.5.7
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/LIBVIO.js
+// @version 1.5.8
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/LIBVIO.js
 
 const http = require("http");
 const https = require("https");

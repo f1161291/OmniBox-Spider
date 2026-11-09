@@ -2,8 +2,8 @@
 // @author
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio
-// @version 1.2.20
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/木偶.js
+// @version 1.2.21
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/木偶.js
 
 // 引入 OmniBox SDK
 const OmniBox = require("omnibox_sdk");

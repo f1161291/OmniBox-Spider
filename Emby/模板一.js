@@ -2,8 +2,8 @@
 // @author
 // @description 直连 Emby 接口，TVBox T4 结构输出（刮削：不支持，弹幕：不支持，嗅探：不支持）
 // @dependencies: axios
-// @version 1.0.1
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/Emby/模板一.js
+// @version 1.0.2
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/Emby/模板一.js
 
 /**
  * ============================================================================

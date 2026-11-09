@@ -2,8 +2,8 @@
 // @author 梦
 // @description 刮削：支持，弹幕：暂不支持，嗅探：支持，CF：支持 FlareSolverr / cf_clearance 自动缓存
 // @dependencies: axios, cheerio
-// @version 1.0.0
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/%E5%BD%B1%E8%A7%86/%E9%87%87%E9%9B%86/%E5%94%90%E4%BA%BA%E8%A1%97%E5%BD%B1%E9%99%A2.js
+// @version 1.0.1
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/唐人街影院.js
 
 const OmniBox = require('omnibox_sdk');
 const cheerio = require('cheerio');

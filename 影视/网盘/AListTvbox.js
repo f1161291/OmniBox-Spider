@@ -2,8 +2,8 @@
 // @author @sifanss
 // @description 必填参数：BASE_URL，XIAOYA_TOKEN。刮削：支持，弹幕：支持，播放记录：支持
 // @dependencies: axios
-// @version 1.1.2
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/AListTvbox.js
+// @version 1.1.3
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/AListTvbox.js
 
 // 引入 OmniBox SDK
 const OmniBox = require("omnibox_sdk");

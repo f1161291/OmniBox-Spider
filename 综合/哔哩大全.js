@@ -2,8 +2,8 @@
 // @author 
 // @description 弹幕：支持
 // @dependencies: axios, crypto
-// @version 1.2.1
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/综合/哔哩大全.js
+// @version 1.2.2
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/综合/哔哩大全.js
 
 /**
  * 哔哩大全 - OmniBox 爬虫脚本（模板化版本）

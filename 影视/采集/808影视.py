@@ -2,8 +2,8 @@
 # @name 808影视
 # @author OmniBox-Spider
 # @description 影视站：https://www.ztzssz.com，支持首页、分类筛选、搜索、详情与直链播放
-# @version 1.0.0
-# @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/808影视.py
+# @version 1.0.1
+# @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/808影视.py
 # @dependencies lxml
 
 import base64

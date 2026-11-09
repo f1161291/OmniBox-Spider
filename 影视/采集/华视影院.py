@@ -2,8 +2,8 @@
 # @name 华视影院
 # @author 梦
 # @description 影视站：https://huavod.com ，Python版；首页返回站点推荐卡片，搜索需验证码校验，支持详情与播放解析
-# @version 1.0.28
-# @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/华视影院.py
+# @version 1.0.29
+# @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/华视影院.py
 
 import json
 import os

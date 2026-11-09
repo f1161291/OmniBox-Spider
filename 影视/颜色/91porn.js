@@ -1,8 +1,8 @@
 /**
  * @name 91porn
- * @version 1.5.0
+ * @version 1.5.1
  * @description 91porn.com 采集源（OmniBox Spider，多基址容灾：主站 + 91p618 镜像；列表封面/标题反混淆真值回填）
- * @downloadURL https://raw.githubusercontent.com/omnibox-spider/main/影视/采集/91porn.js
+ * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91porn.js
  * @dependencies []
  */
 

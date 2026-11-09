@@ -2,7 +2,7 @@
 # @name 红果短剧
 # @author opencode
 # @description 红果短剧官网（hongguoduanju.com）：分类同步/筛选/真实分页搜索/详情/播放；固定 1080P 单线路，CENC 解密经同目录《红果短剧-代理.py》/内置流服务（跨机播放可选配 HG_PROXY_BASE=http://IP:10008）
-# @version 1.8.2
+# @version 1.8.3
 # @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.py
 # @dependencies requests
 from __future__ import annotations

@@ -2,8 +2,8 @@
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, crypto
-// @version 1.0.5
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/哇哇影视.js
+// @version 1.0.6
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/哇哇影视.js
 
 const crypto = require('crypto');
 const axios = require('axios');

@@ -2,8 +2,8 @@
 // @author 梦
 // @description 4k-av.com：支持首页、分类、搜索、详情与直链播放，站点请求使用苹果 Safari UA
 // @dependencies cheerio
-// @version 1.0.2
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/4KMP.js
+// @version 1.0.3
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/4KMP.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");

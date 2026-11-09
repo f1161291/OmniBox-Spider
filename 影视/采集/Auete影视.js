@@ -1,8 +1,8 @@
 // @name Auete影视
 // @author 梦
 // @description 刮削：不支持，弹幕：不支持，嗅探：不支持，支持站内直链播放
-// @version 1.0.2
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/Auete影视.js
+// @version 1.0.3
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/Auete影视.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");

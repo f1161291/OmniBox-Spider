@@ -2,8 +2,8 @@
 // @author 梦
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios
-// @version 1.1.1
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/%E5%8A%A8%E6%BC%AB/girigiri%E7%88%B1%E5%8A%A8%E6%BC%AB.js
+// @version 1.1.2
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/动漫/girigiri爱动漫.js
 
 /**
  * ============================================================================

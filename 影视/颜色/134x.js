@@ -1,6 +1,6 @@
 /**
  * @name 134X
- * @version 1.2.0
+ * @version 1.2.1
  * @description 134x.com 采集源（OmniBox Spider，X/Twitter 长视频聚合）
  // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/134x.js
  * @dependencies []

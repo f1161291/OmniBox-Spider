@@ -2,8 +2,8 @@
 // @author https://github.com/hjdhnx/drpy-node/blob/main/spider/js/%E7%9F%AD%E5%89%A7%E7%BD%91%5B%E7%9B%98%5D.js
 // @description 刮削：不支持，弹幕：不支持，嗅探：不支持（网盘直连）
 // @dependencies: axios, cheerio
-// @version 1.0.1
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/短剧/短剧网.js
+// @version 1.0.2
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/短剧网.js
 
 /**
  * ============================================================================

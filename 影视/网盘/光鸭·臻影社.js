@@ -1,8 +1,8 @@
 // @name 光鸭·臻影社
 // @author 梦
 // @description 网盘资源站：https://www.guangya.net ，支持首页、分类、搜索、详情、分类筛选排序、评论解锁与每日自动签到；Cookie 支持环境变量配置；可选使用光鸭云盘授权播放
-// @version 1.3.2
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/光鸭·臻影社.js
+// @version 1.3.3
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/光鸭·臻影社.js
 // @dependencies axios,cheerio
 
 const axios = require("axios");

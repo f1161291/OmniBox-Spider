@@ -1,8 +1,8 @@
 // @name 影视大全
 // @author 梦
 // @description 影视站：https://www.iysdq.tv ，支持首页、分类、搜索、详情与播放解析
-// @version 1.0.2
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/影视大全.js
+// @version 1.0.3
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/影视大全.js
 // @dependencies cheerio
 
 const OmniBox = require("omnibox_sdk");

@@ -1,8 +1,8 @@
 /**
  * @name 小蜜蜂影院
- * @version 1.1.2
+ * @version 1.1.3
  * @description OmniBox Spider for xmfyy.com
- * @downloadURL https://raw.githubusercontent.com/Silent1566/OmniBox-Spider/main/影视/采集/xmfyy.js
+ * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/解析/小蜜蜂影视.js
  */
 
 const OmniBox = (function(){try{return require('omnibox_sdk');}catch(_){return {log(l,m){console.log(`[${l}] ${m}`);}};}})();

@@ -2,8 +2,8 @@
 // @author @Tao_XG
 // @description 刮削：支持，弹幕：支持，嗅探：支持。站点：zmi.kdns.fr（MacCMS mxone 模板，主推 115 分享）
 // @dependencies: axios, cheerio
-// @version 1.0.3
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/蜗牛4K.js
+// @version 1.0.4
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/蜗牛4K.js
 
 // 引入 OmniBox SDK
 const OmniBox = require("omnibox_sdk");

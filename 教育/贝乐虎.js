@@ -2,8 +2,8 @@
 // @author 
 // @description 刮削：不支持，弹幕：不支持，嗅探：不支持
 // @dependencies: axios
-// @version 1.0.4
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/教育/贝乐虎.js
+// @version 1.0.5
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/教育/贝乐虎.js
 
 /**
  * ============================================================================

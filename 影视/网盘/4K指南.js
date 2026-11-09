@@ -1,8 +1,8 @@
 // @name 4K指南
 // @author 梦
 // @description 网盘资源站：https://4kzn.cc ，支持首页、分类、详情、搜索、网盘播放、刮削、弹幕、播放记录
-// @version 1.2.3
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/4K指南.js
+// @version 1.2.4
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/4K指南.js
 // @dependencies cheerio
 
 const OmniBox = require("omnibox_sdk");

@@ -2,8 +2,8 @@
 // @author OpenClaw Bingbu + 梦
 // @description 刮削：支持，弹幕：支持，嗅探：支持，观看记录：支持，广告：菠菜
 // @dependencies: axios
-// @version 1.1.1
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/爱奇艺资源站.js
+// @version 1.1.2
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/爱奇艺资源站.js
 
 /**
  * ============================================================================

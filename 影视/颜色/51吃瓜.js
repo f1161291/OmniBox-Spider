@@ -1,8 +1,8 @@
 /**
  * @name 吃瓜
- * @version 1.3.0
+ * @version 1.3.1
  * @description 吃瓜 (chigua.com / 51cg)：修复封面（CDN 图片为 AES-128-CBC 加密的密文，脚本内解密还原为 data:image；详情页改取 itemprop="image" 主图）、内置多域名容灾与动态跳转解析、自适应 Node.js http/https 回退机制、Mirages文章列表解析与 DPlayer m3u8 双码率提取
- * @downloadURL https://raw.githubusercontent.com/f1161291/omnibox-spider/main/影视/颜色/51吃瓜.js
+ * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/51吃瓜.js
  * @dependencies crypto
  *
  * 【环境变量】

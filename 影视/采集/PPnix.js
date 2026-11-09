@@ -2,8 +2,8 @@
 // @author 梦
 // @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox，优先返回已重写的内联 m3u8 以规避代理链路问题
 // @dependencies: axios, cheerio
-// @version 1.7.4
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/PPnix.js
+// @version 1.7.5
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/PPnix.js
 
 const OmniBox = require("omnibox_sdk");
 const cheerio = require("cheerio");
