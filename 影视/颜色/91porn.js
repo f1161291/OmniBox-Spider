@@ -1,7 +1,7 @@
 /**
  * @name 91porn
- * @version 1.5.1
- * @description 91porn.com 采集源（OmniBox Spider，多基址容灾：主站 + 91p618 镜像；列表封面/标题反混淆真值回填）
+ * @version 1.6.0
+ * @description 91porn.com 采集源（OmniBox Spider，多基址容灾：主站 + 91p618 镜像；列表封面/标题反混淆真值回填；修复高清分类/搜索分页/作者解析/无效视频/直链规范）
  * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91porn.js
  * @dependencies []
  */
@@ -83,7 +83,7 @@ function httpRequest(urlStr, options = {}, redirectCount = 0) {
         }
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
-        res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf-8'), _host: u.host }));
+        res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf-8'), _host: u.host, finalUrl: u.href }));
       }
     );
     req.on('error', reject);
@@ -102,13 +102,18 @@ async function fetchWithFailover(path, options = {}) {
     try {
       const res = await httpRequest(`${host}${path}`, options);
       // 视为失败的响应：5xx、403（Cloudflare 拦截/封禁）、空体
-      if (res.statusCode >= 500 || res.statusCode === 403 || !res.body) {
-        logE(`[failover] ${host}${path} -> HTTP ${res.statusCode}${!res.body ? ' 空体' : ''}, 切下一个`);
-        lastErr = new Error(`HTTP ${res.statusCode}`);
+      // 失败判定：5xx / 403（Cloudflare 拦截或封禁）/ 200 但响应体过小（被截断或空壳）。
+      // 注意：不能把「!res.body」直接判死——站点个别分类页会返回极短但合法的页面，
+      // 一律重试会把正常空列表误当成故障，导致无谓切基址。
+      const bodyLen = String(res.body || '').length;
+      const tooSmall = res.statusCode === 200 && bodyLen < 512;
+      if (res.statusCode >= 500 || res.statusCode === 403 || res.statusCode < 200 || tooSmall) {
+        logE(`[failover] ${host}${path} -> HTTP ${res.statusCode}${tooSmall ? ` 响应体过小(${bodyLen}B)` : ''}, 切下一个`);
+        lastErr = new Error(`HTTP ${res.statusCode}${tooSmall ? ' body too small' : ''}`);
         continue;
       }
       if (idx !== PREFERRED) { PREFERRED = idx; logI(`[failover] 切换优选基址 -> ${host}`); }
-      return { ...res, host };
+      return { ...res, host, finalUrl: res.finalUrl || `${host}${path}` };
     } catch (e) {
       logE(`[failover] ${host}${path} -> ${e.message}, 切下一个`);
       lastErr = e;
@@ -147,6 +152,38 @@ function extractDetailStat(html, label) {
   if (!uaM) return '';
   const m = uaM[1].match(new RegExp(label + '\\s*[:：]\\s*<span[^>]*>([\\s\\S]*?)<\\/span>', 'i'));
   return m ? cleanText(m[1]) : '';
+}
+
+// 从详情页提取「作者」（只认主信息区那一次出现）。
+// 站点在相关推荐区里也重复输出「作者:」，因此先截断到主信息区窗口再匹配。
+function extractAuthor(html) {
+  const text = String(html || '');
+  const firstIdx = text.search(/作者\s*[:：]/);
+  if (firstIdx < 0) return '';
+  // 主信息区作者紧跟在标题/添加时间附近；向后取 1200 字符足够覆盖 A/B/C 三种形态，
+  // 且远小于到第一个推荐卡的距离（实测 >4KB）。
+  const window = text.slice(firstIdx, firstIdx + 1200);
+
+  // A) <span class="title-yakov"> ... <span class="title">名字< ...
+  const a = window.match(/<span[^>]*class=["']title["'][^>]*>\s*([^<]{1,40})</i);
+  if (a) {
+    const name = cleanText(a[1]);
+    if (name && !/^\d+(\s*小时|\s*分钟|\s*天|\s*秒)?\s*前?$/.test(name)) return name;
+  }
+
+  // B) 作者:</span> 名字 <br>
+  const b = window.match(/作者\s*[:：]?\s*<\/span>\s*([^<\n\r]{1,40})/i);
+  if (b) {
+    const name = cleanText(b[1]);
+    // 过滤掉「添加时间/热度/收藏」等相邻字段被误吞的情况
+    if (name && !/^(添加时间|热度|收藏|留言|积分)/.test(name) && !/^\d+\s*(小时|分钟|天|秒)/.test(name)) {
+      return name.replace(/\s*(小时|分钟)?\s*前$/, '').trim();
+    }
+  }
+
+  // C) 旧 ASCII 名
+  const c = window.match(/作者[\s\S]{0,400}?<span[^>]*class=["']title["'][^>]*>\s*([A-Za-z0-9_.\-]{2,40})/i);
+  return c ? c[1] : '';
 }
 
 // 91porn 2026-11-04 起在详情页尾部挂「title loader」反混淆：
@@ -293,6 +330,27 @@ async function enrichListTitles(list, tag) {
   return list;
 }
 
+// 解析站点分页元信息：页面上有「视频 457 - 480 的 149753」。
+// 实测硬上限 20 页：page>=21 一律回落成 457-480（站点把深页重置为末页），
+// 因此必须用这里的 total 自己算 pagecount，不能写死 99。
+const PAGE_SIZE = 24;
+function parsePageMeta(html, isSearch) {
+  const text = String(html || '');
+  // 视频列表：「视频 457 - 480 的 149753」
+  // 搜索页  ：「搜索结果 1 - 24 的 6332」
+  const m = text.match(/(?:搜索结果|视频)\s*(\d+)\s*-\s*(\d+)\s*的\s*(\d+)/);
+  if (!m) return { from: 0, to: 0, total: 0, pageSize: PAGE_SIZE, maxPage: 0 };
+  const from = parseInt(m[1], 10) || 0;
+  const to = parseInt(m[2], 10) || 0;
+  const total = parseInt(m[3], 10) || 0;
+  const pageSize = to > from ? (to - from + 1) : PAGE_SIZE;
+  const naturalMax = Math.max(1, Math.ceil(total / pageSize) || 1);
+  // 实测：视频列表 page>=21 会被站点重置为末页(457-480)，只能翻 20 页；
+  // 搜索页没有这个限制（page=100 正常返回 2377-2400），故不钳制。
+  const maxPage = isSearch ? naturalMax : Math.max(1, Math.min(naturalMax, 20));
+  return { from, to, total, pageSize, maxPage };
+}
+
 function parseList(html) {
   // 取列表里 CDN 封面基址（host 固定），用于按真值卡 ID 拼稳定封面。
   const hostM = html.match(THUMB_HOST_RE);
@@ -300,7 +358,9 @@ function parseList(html) {
   // 收集所有候选卡片：按 viewkey 分组（同一 viewkey 有真值卡 + 若干污染卡）。
   // 卡片形态：<a href="...viewkey=..."> ... id="playvthumb_<ID>" ... <img src=".../thumb/<ID2>.jpg"> ... <span class="video-title">TITLE</span> ... </a>
   const byVk = new Map();
-  const blockRe = /<a[^>]*href="[^"]*view_video\.php\?viewkey=([^"&]+)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+  // 链接有两种形态：普通区 view_video.php，高清分类区 view_video_hd.php（实测 hd 分类全是后者，
+  // 旧正则只认 view_video.php，导致「高清」分类永远 0 条）。统一用 view_video[_hd].php 匹配。
+  const blockRe = /<a[^>]*href="[^"]*view_video(?:_hd)?\.php\?viewkey=([^"&]+)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = blockRe.exec(html)) !== null) {
     const viewkey = m[1];
@@ -367,9 +427,31 @@ async function category(params) {
       path = `/v.php?category=${tid}&viewtype=basic&page=${page}`;
     }
     const res = await fetchWithFailover(path);
-    const list = await enrichListTitles(parseList(res.body), 'category');
-    logI(`[category] 命中 ${res.host} tid=${tid} page=${page} 返回 ${list.length} 条`);
-    return { page, pagecount: 99, limit: 20, total: list.length * 99, list };
+    let body = res.body;
+    let list = parseList(body);
+    // 站点偶发抖动会返回「页面正常但 0 条卡片」，同基址补抓一次再放弃
+    if (!list.length) {
+      logI(`[category] ${tid} page=${page} 首次 0 条，重试一次`);
+      await sleep(350);
+      const retry = await fetchWithFailover(path, { headers: { 'Accept-Language': 'zh-CN,zh;q=0.9' } });
+      body = retry.body;
+      list = parseList(body);
+    }
+    const meta = parsePageMeta(body);
+    // 站点 page>=21 会被重置为末页（457-480），钳制到有效区间，避免宿主无限翻页
+    const effPage = Math.min(page, meta.maxPage || page);
+    const enriched = await enrichListTitles(list, 'category');
+    if (effPage !== page) {
+      logI(`[category] 请求页 ${page} 超过站点上限，已钳制为第 ${effPage} 页（总 ${meta.total} 条）`);
+    }
+    logI(`[category] 命中 ${res.host} tid=${tid} page=${effPage} 返回 ${enriched.length} 条 total=${meta.total || '-'}`);
+    return {
+      page: effPage,
+      pagecount: meta.maxPage || effPage,
+      limit: meta.pageSize || PAGE_SIZE,
+      total: meta.total || 0,
+      list: enriched,
+    };
   } catch (e) {
     logE(`[category] 失败: ${e.message}`);
     return { page: 1, pagecount: 1, limit: 20, total: 0, list: [] };
@@ -387,6 +469,15 @@ async function detail(params) {
     });
     const host = res.host;
     const html = res.body;
+    // 不存在的 viewkey 会被站点 302 到 error.php?type=video_missing（HTTP 200 + 空壳页）。
+    // 这类页面没有 player_one / #useraction，原实现会返回一条「标题=viewkey、无封面无简介」的
+    // 空壳条目，宿主点进去才发现没内容。这里直接判定为无效视频返回空列表。
+    const isMissingVideo = /type=video_missing/i.test(String(res.finalUrl || ''))
+      || (!/id=["']player_one["']/i.test(html) && !/id=["']?useraction["']?/i.test(html));
+    if (isMissingVideo) {
+      logI(`[detail] 视频不存在或已删除 viewkey=${viewkey}（命中 error.php / 空壳页），返回空列表`);
+      return { list: [] };
+    }
     // 标题真值来源（实测修正，推翻旧注释「静态 <title> 是随机假值」的认知）：
     //   * 91porn 被打乱的是【列表页】；详情页 <title> / <video poster> 多次请求完全稳定、逐 viewkey 唯一，是权威真值。
     //   * title loader 反混淆配置时有时无，有配置时隐藏 <i> 的 data-* 解密值同样为真值，与 <title> 一致。
@@ -420,8 +511,13 @@ async function detail(params) {
     const favorites = extractDetailStat(html, '收藏');
     const dateM = html.match(/添加时间[\s\S]{0,200}?(\d{4}-\d{2}-\d{2})/i);
     const addDate = dateM ? dateM[1] : '';
-    const authorM = html.match(/作者[\s\S]{0,400}?<span[^>]*class=["']title["'][^>]*>\s*([A-Za-z0-9_.\-]+)/i);
-    const author = realMeta.author || (authorM ? authorM[1] : '');
+    // 作者解析（实测修正）：详情页有 3 类形态，且只有主信息区那处是真值，
+    // 后面的「相关推荐 / 本月热播」每张卡也带「作者:」字样，绝不能顺扫到它们。
+    //   A) 实心卡：作者: </span> <span class="title-yakov"> <a ...><span class="title">名字<a ...i></a>...
+    //   B) 纯文本：作者:</span> 名字 <br>
+    //   C) 旧 ASCII 名：作者: ... <span class="title">name
+    // 策略：先限定在主信息区（取第一次出现的「作者」前的窗口），并按 A→B→C 依次尝试。
+    const author = realMeta.author || extractAuthor(html);
     const descM = html.match(/<div[^>]*id=["']?v_desc["']?[^>]*>([\s\S]*?)<\/div>/i);
     const content = descM ? cleanDesc(descM[1]) : '';
     const remarksParts = [duration && `时长 ${duration}`, views && `热度 ${views}`, addDate].filter(Boolean);
@@ -462,15 +558,26 @@ async function search(params) {
   logI(`[search] 入口参数=${JSON.stringify(params || {})}`);
   try {
     const kw = String((params && (params.keyword || params.wd || params.key)) || '').trim();
-    if (!kw) return { list: [] };
+    if (!kw) return { page: 1, pagecount: 0, total: 0, limit: PAGE_SIZE, list: [] };
     const page = parseInt((params && (params.page || params.pg)) || '1', 10) || 1;
-    const res = await fetchWithFailover(`/search_result.php?search_id=${encodeURIComponent(kw)}&search_type=search_videos`);
+    // 实测修正：站点搜索支持 page 参数（page=100 能取到 2377-2400），
+    // 但原实现没带 page，导致宿主翻页时永远拿到第一页。
+    const path = `/search_result.php?search_id=${encodeURIComponent(kw)}&search_type=search_videos&page=${page}`;
+    const res = await fetchWithFailover(path);
+    const meta = parsePageMeta(res.body, true);
     const list = await enrichListTitles(parseList(res.body), 'search');
-    logI(`[search] 命中 ${res.host} "${kw}" 返回 ${list.length} 条`);
-    return { page, list };
+    // 搜索结果总数标记形如「搜索结果 1 - 24 的 6332」，与视频列表的「视频 1 - 24 的 N」不同
+    logI(`[search] 命中 ${res.host} "${kw}" page=${page} 返回 ${list.length} 条 total=${meta.total || '-'} pagecount=${meta.maxPage || '-'}`);
+    return {
+      page,
+      pagecount: meta.maxPage || page,
+      total: meta.total || 0,
+      limit: meta.pageSize || PAGE_SIZE,
+      list,
+    };
   } catch (e) {
     logE(`[search] 失败: ${e.message}`);
-    return { list: [] };
+    return { page: 1, pagecount: 0, total: 0, limit: PAGE_SIZE, list: [] };
   }
 }
 
@@ -494,8 +601,12 @@ function extractRealMp4List(html) {
     // 以及 la.btc620.com 等），用白名单容易漏掉 VIP 线路，故只剔除已知坏链。
     if (!/^https?:$/i.test(parsed.protocol) || !/\.mp4(\?|$)/i.test(u)) return;
     if (AD_URL_RE.test(u) || /ccm\.91p52\.com/i.test(parsed.hostname)) return;
-    seen.add(u);
-    list.push(u);
+    // 站点 btc620 线路会给出 host 后带双斜杠的地址（https://la.btc620.com//mp43/x.mp4）。
+    // Node/http 能容忍，但部分播放器/Kodi 解析会失败，统一规范成单斜杠。
+    const normalized = u.replace(/^(https?:\/\/[^/]+)\/{2,}/i, '$1/');
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    list.push(normalized);
   };
   // 1) 主路径：strencode2 百分号编码里的 <source src='...'>
   const re = /strencode2\(\s*["']([^"']+)["']\s*\)/gi;
