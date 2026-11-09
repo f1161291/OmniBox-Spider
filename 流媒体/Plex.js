@@ -2,8 +2,7 @@
 // @author Copilot
 // @description 直连 Plex 接口，填好 host 即可使用。支持多服务器、多库、剧集/电影播放、合集、plex.tv 自动发现
 // @dependencies: axios
-// @version 1.6.2
-// @indexs 影视
+// @version 1.6.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/流媒体/Plex.js
 
 /**

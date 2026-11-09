@@ -2,8 +2,7 @@
 // @author Copilot
 // @description 直连 Jellyfin/Emby 接口，填好服务器地址、账号密码即可使用。支持多服务器、多库、剧集/电影播放
 // @dependencies: axios
-// @version 1.3.2
-// @indexs 影视
+// @version 1.3.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/流媒体/Jellyfin.js
 
 /**

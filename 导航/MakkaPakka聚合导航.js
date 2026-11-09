@@ -1,9 +1,8 @@
 // @name MakkaPakka聚合导航
 // @author 梦
 // @description 基于 AstrBot Widget 通用桥接的 OmniBox 导航源，动态读取远端 Widget Metadata 与模块函数，支持顶部集中配置与详细外部请求日志
-// @indexs 1
 // @dependencies: cheerio
-// @version 1.1.4
+// @version 1.1.5
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/导航/MakkaPakka聚合导航.js
 
 const OmniBox = require("omnibox_sdk");

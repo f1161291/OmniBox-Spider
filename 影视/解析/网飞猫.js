@@ -1,10 +1,9 @@
 /**
  * @name 网飞猫
- * @version 1.1.1
+ * @version 1.1.2
  * @author omnibox-spider
  * @description 网飞猫（ncat22.com / ncat1.app）OmniBox Spider：cdndefend 850 JS 挑战动态解算 + 封面改用 RDUL 资源域名（主站 /vod1 图片 403）+ 前台 /channel /show /detail /play /search 全链路 + 实时搜索 t token + live 筛选 href + playSource 直链解析 + 三段式播放兜底 + 页面级缓存
  * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/解析/网飞猫.js
- * @indexs 1
  * @dependencies []
  */
 
