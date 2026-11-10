@@ -1,0 +1,1 @@
+window.RDUL = ["https://vres.test"];
