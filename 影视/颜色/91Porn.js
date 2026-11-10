@@ -1,14 +1,14 @@
 /**
  * @name 91porn
- * @version 1.6.0
- * @description 91porn.com 采集源（OmniBox Spider，多基址容灾：主站 + 91p618 镜像；列表封面/标题反混淆真值回填；修复高清分类/搜索分页/作者解析/无效视频/直链规范）
- * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91porn.js
+ * @version 2.2.0
+ * @description 91porn.com 采集源（OmniBox Spider，单主站优先+SITE_HOSTS 可选容灾；列表封面/标题反混淆真值回填；返回形状守卫；列表耗时预算；SDK/Node 双通道传输 + 网络自检 + HTTP/SOCKS5 代理隧道；会话 cookie jar + 403 预热重试（应对出口 IP 拦截）；修复高清分类/搜索分页/作者解析/无效视频/直链规范）
+ * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91Porn.js
  * @dependencies []
  */
 
 let OmniBox;
 try { OmniBox = require('omnibox_sdk'); }
-catch (_) { OmniBox = { log(l, m) { console.log(`[${l}] ${m}`); }, getCache() { return null; }, setCache() { return Promise.resolve(); }, deleteCache() { return Promise.resolve(); } }; }
+catch (_) { OmniBox = { log() { /* 无 SDK 时静默，绝不写 stdout */ }, getCache() { return null; }, setCache() { return Promise.resolve(); }, deleteCache() { return Promise.resolve(); } }; }
 let runner;
 try { runner = require('spider_runner'); }
 catch (_) { runner = { run() {} }; }
@@ -33,20 +33,33 @@ const NINETYONE_PROXY_BASE = (() => {
 // 推荐栏形态：c=uyklk&viewtype=&category=，与首页真实链接一致。
 const NINETYONE_PLAY_MODE = String(process.env.NINETYONE_PLAY_MODE || 'auto').trim().toLowerCase();
 
-// 站点基址容灾：主站 + 91p618.com 最终镜像落点（903.9p234.com）。
-// 91p618.com 本身只是 meta-refresh 跳板，不可直接请求，因此填其最终落点。
-// SITE_API 仍可单独覆盖主站；SITE_HOSTS 可用逗号自定义多个基址（会追加镜像为兜底）。
+// 站点基址：默认只用主站 91porn.com。
+// （v1.7.0 起移除第三方镜像站：镜像签发的播放直链与主站线路不一致，
+//   混用会让 play() 拿到镜像地址后播放器取流失败，反而制造问题。
+//   需要多基址容灾时可自行用 SITE_HOSTS 逗号配置。）
 const PRIMARY_API = (process.env.SITE_API || 'https://91porn.com').replace(/\/+$/, '');
-const MIRROR_API = 'https://903.9p234.com';
 const HOSTS = (() => {
   const fromEnv = String(process.env.SITE_HOSTS || PRIMARY_API)
     .split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
-  return Array.from(new Set([...fromEnv, MIRROR_API]));
+  return Array.from(new Set(fromEnv.length ? fromEnv : [PRIMARY_API]));
 })();
 let PREFERRED = 0; // 上次成功的基址下标，下次优先
 const PREFIX = '[91porn]';
-function logI(m) { try { OmniBox.log('info', `${PREFIX} ${m}`); } catch (_) {} }
-function logE(m) { try { OmniBox.log('error', `${PREFIX} ${m}`); } catch (_) {} }
+// 日志统一走「吞掉异常 + 不写 stdout」的实现：
+//   * 宿主通过 stdout 读脚本返回值，任何直接 console.log 都可能污染结果流，
+//     导致宿主报 json: cannot unmarshal string into Go value of type ...；
+//   * OmniBox.log 返回 Promise，未 await 时若 reject 会产生未处理拒绝，
+//     因此统一 Promise.resolve(...).catch() 兜住；
+//   * SDK 缺失时降级为 no-op（坚决不用 console.log）。
+function safeLog(level, m) {
+  try {
+    if (OmniBox && typeof OmniBox.log === 'function') {
+      Promise.resolve(OmniBox.log(level, `${PREFIX} ${m}`)).catch(() => {});
+    }
+  } catch (_) { /* ignore */ }
+}
+function logI(m) { safeLog('info', m); }
+function logE(m) { safeLog('error', m); }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const CATEGORIES = [
@@ -62,25 +75,236 @@ const CATEGORIES = [
   { type_id: 'hd', type_name: '高清' }
 ];
 
-function httpRequest(urlStr, options = {}, redirectCount = 0) {
+/**
+ * 传输通道选择：
+ *   宿主运行在受限出网环境时，脚本自建的 node https 可能被网络策略拦掉
+ *   （典型现象：请求 ~400ms 内被中断，宿主界面却显示「方法执行成功」但没数据）。
+ *   宿主的 OmniBox.request 走它自己的请求栈（可能带代理/白名单），成功率高得多。
+ *   NINETYONE_TRANSPORT:
+ *     auto（默认）= 先 SDK 再 node
+ *     sdk         = 只用宿主请求
+ *     node        = 只用 node https（旧行为）
+ */
+const TRANSPORT = String(process.env.NINETYONE_TRANSPORT || 'auto').trim().toLowerCase();
+const SDK_TIMEOUT = Number(process.env.NINETYONE_SDK_TIMEOUT || 20000);
+
+/**
+ * 出口代理（可选但强烈建议在「403 + 极短响应体」场景下配置）。
+ *
+ * 症状判据：请求 8ms 就返回 HTTP 403、响应体只有十几字节 → 这是 Cloudflare/防火墙
+ * 针对服务器出口 IP 的拦截，请求没进到应用层。换 UA / Cookie / Referer 都无效，
+ * 唯一解法是换出口 IP。支持 http(s) CONNECT 与 socks5（可带用户名密码）。
+ *
+ *   NINETYONE_PROXY_URL=http://127.0.0.1:7890
+ *   NINETYONE_PROXY_URL=socks5://user:pass@127.0.0.1:1080
+ * 也兼容通用变量 UPSTREAM_HTTP_PROXY_URL / HTTP_PROXY_URL。
+ */
+const PROXY_URL = String(
+  process.env.NINETYONE_PROXY_URL
+  || process.env.UPSTREAM_HTTP_PROXY_URL
+  || process.env.HTTP_PROXY_URL
+  || '',
+).trim();
+
+function sdkAvailable() {
+  return !!(OmniBox && typeof OmniBox.request === 'function');
+}
+
+async function sdkRequest(urlStr, options = {}, headers = {}) {
+  const res = await OmniBox.request(urlStr, {
+    method: options.method || 'GET',
+    headers,
+    body: options.body,
+    timeout: options.timeout || SDK_TIMEOUT,
+  });
+  const statusCode = Number((res && res.statusCode) || 0);
+  const rawHeaders = (res && res.headers) || {};
+  parseSetCookie(rawHeaders);
+  const body = String((res && res.body) || '');
+  // SDK 在不同实现下可能返回已解析对象，这里统一成字符串
+  return {
+    statusCode,
+    headers: rawHeaders,
+    body: typeof res?.body === 'string' ? body : (body || ''),
+    _host: (() => { try { return new URL(urlStr).host; } catch (_) { return ''; } })(),
+    finalUrl: String((res && (res.finalUrl || res.url)) || urlStr),
+  };
+}
+
+/* ---------------- 零依赖代理隧道：HTTP CONNECT / SOCKS5 ---------------- */
+
+function parseProxyUrl(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  const withScheme = /^[a-z0-9]+:\/\//i.test(text) ? text : `http://${text}`;
+  let u;
+  try { u = new URL(withScheme); } catch (_) { return null; }
+  const protocol = u.protocol.replace(':', '').toLowerCase();
+  const isSocks = protocol.indexOf('socks') === 0;
+  return {
+    protocol,
+    host: u.hostname,
+    port: Number(u.port || (isSocks ? 1080 : 7890)),
+    auth: (u.username || u.password)
+      ? { username: decodeURIComponent(u.username || ''), password: decodeURIComponent(u.password || '') }
+      : null,
+    isSocks,
+  };
+}
+
+function connectViaHttpProxy(proxy, host, port, timeout) {
+  const net = require('net');
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: proxy.host, port: proxy.port, timeout });
+    let settled = false;
+    const fail = (e) => { if (settled) return; settled = true; socket.destroy(); reject(e); };
+    socket.on('timeout', () => fail(Object.assign(new Error('代理连接超时'), { code: 'ETIMEDOUT' })));
+    socket.on('error', fail);
+    socket.on('connect', () => {
+      const lines = [`CONNECT ${host}:${port} HTTP/1.1`, `Host: ${host}:${port}`];
+      if (proxy.auth && proxy.auth.username) {
+        lines.push(`Proxy-Authorization: Basic ${Buffer.from(`${proxy.auth.username}:${proxy.auth.password}`).toString('base64')}`);
+      }
+      lines.push('Proxy-Connection: keep-alive', '', '');
+      socket.write(lines.join('\r\n'));
+    });
+    let buf = '';
+    const onData = (chunk) => {
+      buf += chunk.toString('latin1');
+      if (buf.indexOf('\r\n\r\n') < 0) return;
+      socket.removeListener('data', onData);
+      const statusLine = buf.slice(0, buf.indexOf('\r\n'));
+      const code = Number((statusLine.match(/\s(\d{3})\s?/) || [])[1] || 0);
+      if (code !== 200) return fail(new Error(`代理 CONNECT 失败: ${statusLine}`));
+      settled = true; socket.setTimeout(0); resolve(socket);
+    };
+    socket.on('data', onData);
+  });
+}
+
+function connectViaSocks5(proxy, host, port, timeout) {
+  const net = require('net');
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: proxy.host, port: proxy.port, timeout });
+    let stage = 'greeting';
+    let settled = false;
+    const fail = (e) => { if (settled) return; settled = true; socket.destroy(); reject(e); };
+    const buildConnect = () => {
+      const h = Buffer.from(host, 'utf8');
+      const p = Buffer.alloc(2); p.writeUInt16BE(port, 0);
+      return Buffer.concat([Buffer.from([0x05, 0x01, 0x00, 0x03, h.length]), h, p]);
+    };
+    socket.on('timeout', () => fail(Object.assign(new Error('SOCKS5 超时'), { code: 'ETIMEDOUT' })));
+    socket.on('error', fail);
+    socket.on('connect', () => {
+      const withAuth = !!(proxy.auth && proxy.auth.username);
+      socket.write(Buffer.from(withAuth ? [0x05, 0x02, 0x00, 0x02] : [0x05, 0x01, 0x00]));
+    });
+    const onData = (chunk) => {
+      if (stage === 'greeting') {
+        if (chunk[0] !== 0x05) return fail(new Error('SOCKS5 版本不匹配'));
+        if (chunk[1] === 0x02) {
+          const u = Buffer.from(proxy.auth.username, 'utf8');
+          const p = Buffer.from(proxy.auth.password, 'utf8');
+          stage = 'auth';
+          socket.write(Buffer.concat([Buffer.from([0x01, u.length]), u, Buffer.from([p.length]), p]));
+          return;
+        }
+        if (chunk[1] === 0x00) { stage = 'connect'; socket.write(buildConnect()); return; }
+        return fail(new Error(`SOCKS5 不支持认证 ${chunk[1]}`));
+      }
+      if (stage === 'auth') {
+        if (chunk[1] !== 0x00) return fail(new Error('SOCKS5 认证失败'));
+        stage = 'connect'; socket.write(buildConnect()); return;
+      }
+      if (stage === 'connect') {
+        if (chunk[1] !== 0x00) return fail(new Error(`SOCKS5 连接失败 code=${chunk[1]}`));
+        socket.removeListener('data', onData);
+        settled = true; socket.setTimeout(0); resolve(socket);
+      }
+    };
+    socket.on('data', onData);
+  });
+}
+
+/**
+ * 经代理发起请求（隧道内再起 TLS，SNI 必须是目标域名）。
+ */
+function proxyRequest(urlStr, options = {}, headers = {}, proxy = null) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(urlStr); } catch (e) { return reject(e); }
+    const isHttps = u.protocol === 'https:';
+    const targetHost = u.hostname;
+    const targetPort = Number(u.port || (isHttps ? 443 : 80));
+    const timeout = options.timeout || 15000;
+    const connect = proxy.isSocks ? connectViaSocks5 : connectViaHttpProxy;
+
+    connect(proxy, targetHost, targetPort, timeout).then((socket) => {
+      const http_ = require('http');
+      const https_ = require('https');
+      const tls_ = require('tls');
+      const reqOptions = {
+        host: targetHost,
+        port: targetPort,
+        path: `${u.pathname}${u.search}`,
+        method: options.method || 'GET',
+        headers: Object.assign({}, headers, { Host: u.host }),
+        timeout,
+        agent: false,
+      };
+      if (isHttps) {
+        const secure = tls_.connect({ socket, servername: targetHost });
+        reqOptions.createConnection = () => secure;
+      } else {
+        reqOptions.createConnection = () => socket;
+      }
+      const transport = isHttps ? https_ : http_;
+      const req = transport.request(reqOptions, (res) => {
+        if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+          res.resume();
+          return proxyRequest(new URL(res.headers.location, u.href).href, options, headers, proxy).then(resolve).catch(reject);
+        }
+        parseSetCookie(res.headers);
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve({
+          statusCode: res.statusCode,
+          headers: res.headers,
+          body: Buffer.concat(chunks).toString('utf-8'),
+          _host: u.host,
+          finalUrl: u.href,
+        }));
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('请求超时')); });
+      if (options.body) req.write(options.body);
+      req.end();
+    }).catch(reject);
+  });
+}
+
+function nodeRequest(urlStr, options = {}, headers = {}, redirectCount = 0) {
+  // 配了代理就走隧道（403 极短响应体这类 IP 级拦截只能靠换出口解决）
+  const proxy = parseProxyUrl(PROXY_URL);
+  if (proxy) {
+    logI(`[proxy] ${proxy.protocol}://${proxy.host}:${proxy.port} -> ${urlStr.slice(0, 60)}`);
+    return proxyRequest(urlStr, options, headers, proxy);
+  }
   return new Promise((resolve, reject) => {
     if (redirectCount > 5) return reject(new Error('重定向过多'));
     let u;
     try { u = new URL(urlStr); } catch (e) { return reject(e); }
     const isHttps = u.protocol === 'https:';
     const client = isHttps ? https : http;
-    const baseCookie = `language=${LANG}`;
-    const headers = Object.assign(
-      { 'User-Agent': USER_AGENT, Accept: '*/*', Cookie: COOKIE ? `${baseCookie}; ${COOKIE}` : baseCookie, 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
-      options.headers || {}
-    );
     const req = client.request(
       { protocol: u.protocol, hostname: u.hostname, port: u.port || (isHttps ? 443 : 80), path: u.pathname + u.search, method: options.method || 'GET', headers, timeout: options.timeout || 15000, rejectUnauthorized: false },
       (res) => {
         if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
           res.resume();
-          return httpRequest(new URL(res.headers.location, u.href).href, options, redirectCount + 1).then(resolve).catch(reject);
+          return nodeRequest(new URL(res.headers.location, u.href).href, options, headers, redirectCount + 1).then(resolve).catch(reject);
         }
+        parseSetCookie(res.headers);
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
         res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf-8'), _host: u.host, finalUrl: u.href }));
@@ -93,7 +317,160 @@ function httpRequest(urlStr, options = {}, redirectCount = 0) {
   });
 }
 
+/**
+ * 统一请求入口：按 TRANSPORT 决定用宿主请求还是 node 直连。
+ * auto 模式下先试 SDK（宿主网络策略通常更宽松），失败再回落 node，并记住哪条通道更可靠。
+ */
+let PREFERRED_TRANSPORT = '';
+
+/**
+ * 站点下发 CLIPSHARE / ga 等会话 cookie，首次访问才会给。
+ * 部分机房 IP 段（如部分美国 VPS）不带 cookie 连续裸请求会被 WAF 直接 403，
+ * 症状就是「403 + 十几字节响应体」。因此这里自己做 cookie jar：
+ *   1) 从响应 set-cookie 里自动累积；
+ *   2) 通过 SDK cache 持久化，跨请求复用；
+ *   3) 可在 NINETYONE_COOKIE 里手工追加/覆盖。
+ */
+const SESSION_COOKIE = new Map();   // name -> value
+let sessionCookieLoaded = false;
+
+function parseSetCookie(headers) {
+  const raw = (headers && (headers['set-cookie'] || headers['Set-Cookie'])) || [];
+  const arr = Array.isArray(raw) ? raw : [raw];
+  const picked = [];
+  for (const line of arr) {
+    const first = String(line || '').split(';')[0].trim();
+    const idx = first.indexOf('=');
+    if (idx <= 0) continue;
+    const name = first.slice(0, idx).trim();
+    const value = first.slice(idx + 1).trim();
+    if (!name || !value) continue;
+    SESSION_COOKIE.set(name, value);
+    picked.push(name);
+  }
+  if (picked.length) logI(`[cookie] 收到 ${picked.join(',')}`);
+  return picked;
+}
+
+const COOKIE_CACHE_KEY = '91porn:session-cookie';
+async function loadSessionCookie() {
+  if (sessionCookieLoaded) return;
+  sessionCookieLoaded = true;
+  try {
+    const raw = await OmniBox.getCache(COOKIE_CACHE_KEY);
+    if (!raw) return;
+    const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (obj && typeof obj === 'object') {
+      for (const [k, v] of Object.entries(obj)) {
+        if (k && v) SESSION_COOKIE.set(k, String(v));
+      }
+      logI(`[cookie] 载入缓存 session cookie ${SESSION_COOKIE.size} 个`);
+    }
+  } catch (_) { /* ignore */ }
+}
+async function saveSessionCookie() {
+  try {
+    const obj = {};
+    for (const [k, v] of SESSION_COOKIE.entries()) obj[k] = v;
+    await OmniBox.setCache(COOKIE_CACHE_KEY, JSON.stringify(obj), 6 * 3600);
+  } catch (_) { /* ignore */ }
+}
+
+function buildCookieHeader() {
+  const parts = [`language=${LANG}`];
+  for (const [k, v] of SESSION_COOKIE.entries()) {
+    if (k === 'language') continue;
+    parts.push(`${k}=${v}`);
+  }
+  if (COOKIE) parts.push(COOKIE);
+  return parts.join('; ');
+}
+
+function buildHeaders(extra) {
+  return Object.assign(
+    {
+      'User-Agent': USER_AGENT,
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      Cookie: buildCookieHeader(),
+    },
+    extra || {},
+  );
+}
+
+async function httpRequest(urlStr, options = {}) {
+  await loadSessionCookie();
+  const headers = buildHeaders(options.headers);
+  const order = (() => {
+    if (TRANSPORT === 'sdk') return ['sdk'];
+    if (TRANSPORT === 'node') return ['node'];
+    // auto：优先上次成功的通道
+    const all = [];
+    if (sdkAvailable()) all.push('sdk');
+    all.push('node');
+    if (PREFERRED_TRANSPORT) {
+      return all.slice().sort((a, b) => (a === PREFERRED_TRANSPORT ? -1 : b === PREFERRED_TRANSPORT ? 1 : 0));
+    }
+    return all;
+  })();
+
+  let lastErr = null;
+  for (const ch of order) {
+    try {
+      const res = ch === 'sdk'
+        ? await sdkRequest(urlStr, options, headers)
+        : await nodeRequest(urlStr, options, headers);
+      if (PREFERRED_TRANSPORT !== ch) {
+        PREFERRED_TRANSPORT = ch;
+        logI(`[transport] 采用 ${ch} 通道`);
+      }
+      if (SESSION_COOKIE.size) saveSessionCookie();
+      return res;
+    } catch (e) {
+      lastErr = e;
+      logE(`[transport] ${ch} 通道失败: ${(e && e.message) || e}`);
+    }
+  }
+  throw lastErr || new Error('无可用传输通道');
+}
+
 // 基址容灾：相对路径按 HOSTS 顺序尝试（优选基址优先），网络错误/403/5xx/空体自动切下一个。
+// 连通性自检：当所有基址都失败时，用一次最短请求判断是「DNS 失败 / TCP 被拒 /
+// 连接超时 / 被 RST」，把结论打成一条明确的错误日志，避免宿主只看到「方法执行成功但没数据」。
+async function diagnoseNetwork(host) {
+  const startedAt = Date.now();
+  try {
+    const res = await httpRequest(`${host}/index.php`, { timeout: 6000 });
+    return `可达 (HTTP ${res.statusCode}, ${Date.now() - startedAt}ms, ${String(res.body || '').length}B)`;
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    const code = String((e && e.code) || '');
+    let hint = msg;
+    if (/ENOTFOUND|EAI_AGAIN/i.test(code + msg)) hint = `DNS 解析失败 (${code || msg})`;
+    else if (/ECONNREFUSED/i.test(code + msg)) hint = `TCP 连接被拒 (ECONNREFUSED)`;
+    else if (/ETIMEDOUT|timeout|超时/i.test(code + msg)) hint = `连接/响应超时 (${Date.now() - startedAt}ms) —— 出口网络被阻断或过慢`;
+    else if (/ECONNRESET|socket hang up/i.test(code + msg)) hint = `连接被重置 (ECONNRESET) —— 出口被中间设备掐断`;
+    else if (/CERT|SSL|TLS/i.test(code + msg)) hint = `TLS 握手失败 (${code || msg})`;
+    return `不可达: ${hint}`;
+  }
+}
+
+/**
+ * WAF 补救：部分机房 IP 在「无 cookie 首次访问」时会直接 403（响应体极短）。
+ * 此时先请求站点根路径拿到 CLIPSHARE 等 cookie，再重试原路径，通常就能通过。
+ */
+async function warmupCookie(host) {
+  try {
+    const res = await httpRequest(`${host}/index.php`, { timeout: 12000 });
+    const got = SESSION_COOKIE.size;
+    logI(`[warmup] ${host} 预热结果 HTTP ${res.statusCode}，session cookie ${got} 个`);
+    return got > 0 && res.statusCode === 200;
+  } catch (e) {
+    logI(`[warmup] ${host} 预热失败: ${e.message}`);
+    return false;
+  }
+}
+
 async function fetchWithFailover(path, options = {}) {
   const order = [PREFERRED, ...HOSTS.map((_, i) => i).filter(i => i !== PREFERRED)];
   let lastErr;
@@ -107,6 +484,34 @@ async function fetchWithFailover(path, options = {}) {
       // 一律重试会把正常空列表误当成故障，导致无谓切基址。
       const bodyLen = String(res.body || '').length;
       const tooSmall = res.statusCode === 200 && bodyLen < 512;
+      // 403 + 极短响应体 + 极快返回 = 出口 IP 被 Cloudflare/防火墙拦截（请求没进应用层）。
+      // 这类情况换 UA/Cookie 都无效，只能换出口，因此单独打出可执行的处置建议。
+      const ipBlocked = res.statusCode === 403 && bodyLen < 200;
+      if (ipBlocked) {
+        logE(`[failover] ${host}${path} -> 403 且响应体仅 ${bodyLen}B`);
+        // 第一层补救：先用根路径建立会话 cookie，再重试原路径。
+        // 实测站点对「无 cookie 的陌生机房 IP」会直接短 403，建 cookie 后多数可恢复。
+        if (!options._cookieRetried) {
+          const warmed = await warmupCookie(host);
+          if (warmed) {
+            logI(`[failover] ${host} 已建立 session cookie，重试原路径 ${path}`);
+            try {
+              const retryRes = await httpRequest(`${host}${path}`, Object.assign({}, options, { _cookieRetried: true }));
+              const retryLen = String(retryRes.body || '').length;
+              if (retryRes.statusCode < 400 && retryLen >= 512) {
+                logI(`[failover] ${host}${path} 重试成功 HTTP ${retryRes.statusCode} ${retryLen}B`);
+                return { ...retryRes, host, finalUrl: retryRes.finalUrl || `${host}${path}` };
+              }
+              logE(`[failover] ${host}${path} 带 cookie 重试仍失败 HTTP ${retryRes.statusCode} ${retryLen}B`);
+            } catch (e2) {
+              logE(`[failover] ${host}${path} 带 cookie 重试异常: ${e2.message}`);
+            }
+          } else {
+            logE('[failover] 预热未取得 cookie，判定为出口 IP 被拦截');
+            logE('[failover] 换 UA/Cookie 无效，需换出口：设置 NINETYONE_PROXY_URL=http://127.0.0.1:7890（或 socks5://...）');
+          }
+        }
+      }
       if (res.statusCode >= 500 || res.statusCode === 403 || res.statusCode < 200 || tooSmall) {
         logE(`[failover] ${host}${path} -> HTTP ${res.statusCode}${tooSmall ? ` 响应体过小(${bodyLen}B)` : ''}, 切下一个`);
         lastErr = new Error(`HTTP ${res.statusCode}${tooSmall ? ' body too small' : ''}`);
@@ -119,6 +524,9 @@ async function fetchWithFailover(path, options = {}) {
       lastErr = e;
     }
   }
+  // 全部基址失败：跑一次自检，把根因写进日志（宿主界面只看得到「执行成功/失败」）
+  const diag = await diagnoseNetwork(HOSTS[0]);
+  logE(`[failover] 所有基址失败（已试 ${order.length} 个）。网络自检 → ${diag}`);
   throw lastErr || new Error('所有基址均不可用');
 }
 
@@ -301,19 +709,42 @@ function extractRealTitle(html) {
 }
 
 // 列表标题回填：限并发抓取详情页 <title>，命中缓存直接跳过；失败不阻塞、降级保留列表标题。
-async function enrichListTitles(list, tag) {
+// 列表标题回填：限并发抓详情页做「二次确认」。
+// 性能约束（实测）：24 条 × 抓详情 ≈ 5.9s，网络抖动时可拖到 41s。
+// 宿主对 home/category 有响应时间预期，超时会导致拿不到结果/解析异常。
+// 因此这里做三件事：
+//   1) 只补「缓存未命中」的条目，命中缓存零请求；
+//   2) 设置整体截止时间（默认 4s），到点立即返回已完成的回填结果，剩余走后台；
+//   3) 真值卡标题本身已正确，回填只是增强，绝不阻塞主流程。
+async function enrichListTitles(list, tag, opts) {
   if (!Array.isArray(list) || !list.length) return list;
+  const options = opts || {};
+  const budgetMs = Number.isFinite(options.budgetMs)
+    ? options.budgetMs
+    : Number(process.env.NINETYONE_ENRICH_BUDGET_MS || 4000);
   const queue = list.slice();
-  let ok = 0, cached = 0, failed = 0;
+  let ok = 0, cached = 0, failed = 0, skipped = 0;
+  const startedAt = Date.now();
+  const deadline = startedAt + Math.max(0, budgetMs);
+  // race 返回后 worker 仍会跑完当前请求；用 aborted 让它们尽快退出，避免后台继续压站点
+  let aborted = false;
+
   const worker = async () => {
     while (queue.length) {
+      // 到点或被中止就停，剩余条目保留真值卡标题（本来就是对的）
+      if (aborted || Date.now() > deadline) {
+        skipped += queue.length;
+        queue.length = 0;
+        return;
+      }
       const item = queue.shift();
       if (!item || !item.vod_id) continue;
       try {
         const hit = await getCachedRealTitle(item.vod_id);
         if (hit) { item.vod_name = hit; cached++; continue; }
         const res = await fetchWithFailover(`/view_video.php?viewkey=${item.vod_id}`, {
-          headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }
+          headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
+          timeout: Math.min(8000, Math.max(1500, deadline - Date.now())),
         });
         const real = extractRealTitle(res.body || '');
         if (real) {
@@ -325,8 +756,19 @@ async function enrichListTitles(list, tag) {
       } catch (e) { failed++; }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(ENRICH_CONCURRENCY, list.length) }, worker));
-  logI(`[${tag}][enrich] 标题回填 命中缓存=${cached} 新抓成功=${ok} 失败降级=${failed} 总数=${list.length}`);
+
+  const workers = Array.from(
+    { length: Math.min(ENRICH_CONCURRENCY, list.length) },
+    () => worker(),
+  );
+  const all = Promise.all(workers);
+  // 双保险：即使某个 worker 卡在网络超时上，也按预算硬切，不让渲染被拖死
+  await Promise.race([
+    all,
+    sleep(Math.max(0, deadline - Date.now())).then(() => { aborted = true; }),
+  ]);
+
+  logI(`[${tag}][enrich] 标题回填 用时=${Date.now() - startedAt}ms 命中缓存=${cached} 新抓成功=${ok} 失败降级=${failed} 超预算跳过=${skipped} 总数=${list.length}`);
   return list;
 }
 
@@ -401,19 +843,31 @@ function parseList(html) {
 }
 
 async function home(params) {
+  const T0 = Date.now();
   logI(`[home] 入口参数=${JSON.stringify(params || {})}`);
   try {
     const res = await fetchWithFailover(`/index.php`);
-    const list = await enrichListTitles(parseList(res.body), 'home');
-    logI(`[home] 命中 ${res.host} 返回 ${list.length} 条`);
+    logI(`[home] 取页完成 ${Date.now() - T0}ms 来源=${res.host}`);
+    // 首页首屏对延迟最敏感：真值卡标题本身已正确（实测与详情页 8/8 一致），
+    // 标题回填只是「二次确认」，默认关闭以免拖慢首屏。需要时用 NINETYONE_HOME_ENRICH_MS 开启。
+    const homeEnrichMs = Number(process.env.NINETYONE_HOME_ENRICH_MS || 0);
+    let list = parseList(res.body);
+    if (homeEnrichMs > 0) {
+      list = await enrichListTitles(list, 'home', { budgetMs: homeEnrichMs });
+    } else {
+      logI('[home] 标题回填已跳过（默认关闭，真值卡标题已正确）');
+    }
+    logI(`[home] 命中 ${res.host} 返回 ${list.length} 条 总耗时=${Date.now() - T0}ms`);
     return { class: CATEGORIES, list };
   } catch (e) {
-    logE(`[home] 失败: ${e.message}`);
+    logE(`[home] 失败(${Date.now() - T0}ms): ${e.message}`);
+    logE('[home] 返回空列表；若宿主界面显示「方法执行成功」但无数据，请看上面 failover 的自检结论');
     return { class: CATEGORIES, list: [] };
   }
 }
 
 async function category(params) {
+  const T0 = Date.now();
   logI(`[category] 入口参数=${JSON.stringify(params || {})}`);
   try {
     const tid = (params && (params.categoryId || params.type_id || params.tid)) || 'hot';
@@ -427,6 +881,7 @@ async function category(params) {
       path = `/v.php?category=${tid}&viewtype=basic&page=${page}`;
     }
     const res = await fetchWithFailover(path);
+    logI(`[category] 取页完成 ${Date.now() - T0}ms 来源=${res.host}`);
     let body = res.body;
     let list = parseList(body);
     // 站点偶发抖动会返回「页面正常但 0 条卡片」，同基址补抓一次再放弃
@@ -440,11 +895,14 @@ async function category(params) {
     const meta = parsePageMeta(body);
     // 站点 page>=21 会被重置为末页（457-480），钳制到有效区间，避免宿主无限翻页
     const effPage = Math.min(page, meta.maxPage || page);
-    const enriched = await enrichListTitles(list, 'category');
+    const categoryEnrichMs = Number(process.env.NINETYONE_CATEGORY_ENRICH_MS || 1200);
+    const enriched = categoryEnrichMs > 0
+      ? await enrichListTitles(list, 'category', { budgetMs: categoryEnrichMs })
+      : list;
     if (effPage !== page) {
       logI(`[category] 请求页 ${page} 超过站点上限，已钳制为第 ${effPage} 页（总 ${meta.total} 条）`);
     }
-    logI(`[category] 命中 ${res.host} tid=${tid} page=${effPage} 返回 ${enriched.length} 条 total=${meta.total || '-'}`);
+    logI(`[category] 命中 ${res.host} tid=${tid} page=${effPage} 返回 ${enriched.length} 条 total=${meta.total || '-'} 总耗时=${Date.now() - T0}ms`);
     return {
       page: effPage,
       pagecount: meta.maxPage || effPage,
@@ -453,7 +911,7 @@ async function category(params) {
       list: enriched,
     };
   } catch (e) {
-    logE(`[category] 失败: ${e.message}`);
+    logE(`[category] 失败(${Date.now() - T0}ms): ${e.message}`);
     return { page: 1, pagecount: 1, limit: 20, total: 0, list: [] };
   }
 }
@@ -565,7 +1023,9 @@ async function search(params) {
     const path = `/search_result.php?search_id=${encodeURIComponent(kw)}&search_type=search_videos&page=${page}`;
     const res = await fetchWithFailover(path);
     const meta = parsePageMeta(res.body, true);
-    const list = await enrichListTitles(parseList(res.body), 'search');
+    const searchEnrichMs = Number(process.env.NINETYONE_SEARCH_ENRICH_MS || 1500);
+    let list = parseList(res.body);
+    if (searchEnrichMs > 0) list = await enrichListTitles(list, 'search', { budgetMs: searchEnrichMs });
     // 搜索结果总数标记形如「搜索结果 1 - 24 的 6332」，与视频列表的「视频 1 - 24 的 N」不同
     logI(`[search] 命中 ${res.host} "${kw}" page=${page} 返回 ${list.length} 条 total=${meta.total || '-'} pagecount=${meta.maxPage || '-'}`);
     return {
@@ -647,7 +1107,11 @@ function probeMediaUrl(url, headers) {
           const code = res.statusCode;
           const ctype = String(res.headers['content-type'] || '');
           res.destroy();
-          done((code >= 200 && code < 300) && /video|mp4|octet-stream/i.test(ctype));
+          // 站点 CDN 偶尔回 application/octet-stream 甚至空 content-type，
+          // 只要 2xx 且不是 text/html 就算可用（text/html 通常是 403/404 的伪装页）。
+          const okStatus = code >= 200 && code < 300;
+          const notHtml = !/text\/html/i.test(ctype);
+          done(okStatus && notHtml);
         }
       );
       req.on('error', () => done(false));
@@ -669,20 +1133,38 @@ function buildSniffPageUrl(host, viewkey) {
 
 // 取播放页并解出 strencode2 里的真实 mp4；签名短时效，失败时带 cache-buster 重取一次。
 async function resolveRealMp4(viewkey) {
+  // 站点每次请求会随机二选一 CDN（btc620 / cdn77）。单条直链一旦在客户端侧不可达
+  // 就没有备用线路，因此这里最多取两轮页面，把两轮解出的不同 CDN 地址都攒起来，
+  // 让宿主/播放器有可切换的备用线路。
+  const picked = [];
+  const seenHost = new Set();
+  let lastRes = null;
+
   for (let attempt = 1; attempt <= 2; attempt++) {
+    if (attempt > 1 && picked.length >= 2) break;
     const path = `/view_video.php?viewkey=${viewkey}${attempt > 1 ? `&_r=${Date.now()}` : ''}`;
     try {
       const res = await fetchWithFailover(path, {
         headers: { 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' }
       });
+      if (!lastRes) lastRes = res;
       const urls = extractRealMp4List(res.body || '');
       logI(`[play][resolve] 第${attempt}次 命中 ${res.host} 解出 ${urls.length} 条真实直链`);
-      if (urls.length) return { urls, res };
+      for (const u of urls) {
+        let h = '';
+        try { h = new URL(u).hostname; } catch (_) { h = ''; }
+        // 同一 CDN 只收第一条，保证备用线路来自不同 CDN
+        if (h && seenHost.has(h)) continue;
+        if (h) seenHost.add(h);
+        picked.push(u);
+      }
     } catch (e) {
       logE(`[play][resolve] 第${attempt}次取页失败: ${e.message}`);
     }
   }
-  return { urls: [], res: null };
+
+  if (picked.length) logI(`[play][resolve] 合计可用直链 ${picked.length} 条（含 ${seenHost.size} 个 CDN）`);
+  return { urls: picked, res: lastRes };
 }
 
 async function play(params, context) {
@@ -705,7 +1187,10 @@ async function play(params, context) {
     const host = res ? res.host : (HOSTS[PREFERRED] || PRIMARY_API);
     const pageUrl = `${host}/view_video.php?viewkey=${viewkey}`;
     const sniffUrl = buildSniffPageUrl(host, viewkey);
-    const HEADER = { 'User-Agent': USER_AGENT, Referer: pageUrl, Origin: host, 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' };
+    // 播放器拉流只需要 UA + Referer；带上 Origin 会被部分播放器当作跨域请求拒绝，
+    // 而 CDN 侧实测并不校验 Origin，因此这里不再下发 Origin。
+    const PLAY_HEADER = { 'User-Agent': USER_AGENT, Referer: pageUrl };
+    const HEADER = PLAY_HEADER;
 
     // 真实直链探活：cdn77 / btc620 实测裸 HEAD 200 video/mp4、Range 206，不依赖 Referer。
     let healthy = [];
@@ -739,9 +1224,22 @@ async function play(params, context) {
 
     logI(`[play] ${viewkey} from=${from} mode=${mode} 真实直链 ${realUrls.length} 条 / 探活通过 ${healthy.length} 条 -> parse=0 直连, 首条host=${new URL(ordered[0]).hostname}`);
     ordered.forEach((u, i) => logI(`[play][url${i + 1}] ${new URL(u).hostname}${new URL(u).pathname}`));
+    // 全部是直链 → parse=0 由宿主直接播放。
+    // 注意：不能把「播放页」混进 parse=0 的 urls 里，宿主会把它当直链直接播必然失败；
+    // 多 CDN 容灾交给 ordered（多条直链依次给出，播放器/宿主可自行切换）。
+    if (!directUrls.length) {
+      // 没有任何可用直链时，退回嗅探模式（parse=1 只给播放页，由客户端嗅探）
+      logI(`[play] ${viewkey} 无可用直链，返回播放页交由客户端嗅探 parse=1`);
+      return {
+        urls: [{ name: '嗅探播放页', url: sniffUrl }],
+        header: Object.assign({}, PLAY_HEADER, { Referer: `${host}/index.php` }),
+        flag: '91porn',
+        parse: 1
+      };
+    }
     return {
       urls: directUrls,
-      header: HEADER,
+      header: PLAY_HEADER,
       flag: '91porn',
       parse: 0
     };
@@ -751,5 +1249,54 @@ async function play(params, context) {
   }
 }
 
-module.exports = { home, category, detail, search, play };
-runner.run(module.exports);
+/**
+ * 返回形状守卫：宿主用 Go 反序列化，若 handler 意外返回字符串 / null / undefined，
+ * 会直接报 `json: cannot unmarshal string into Go value of type models.XxxResponse`。
+ * 这里统一包一层：任何异常或非法返回都转成对应 handler 的「空骨架」。
+ */
+const EMPTY_SHAPES = {
+  home: () => ({ class: CATEGORIES, list: [] }),
+  category: () => ({ page: 1, pagecount: 0, limit: 20, total: 0, list: [] }),
+  detail: () => ({ list: [] }),
+  search: () => ({ page: 1, pagecount: 0, limit: 20, total: 0, list: [] }),
+  play: () => ({ urls: [], header: { 'User-Agent': USER_AGENT }, flag: '91porn', parse: 0 }),
+};
+
+function guard(method, fn) {
+  return async function guarded(params, context) {
+    let out;
+    try {
+      out = await fn(params, context);
+    } catch (e) {
+      logE(`[${method}] 未捕获异常: ${e && e.message}`);
+      return EMPTY_SHAPES[method]();
+    }
+    // 必须是普通对象；数组/字符串/null 全部回退到空骨架
+    if (!out || typeof out !== 'object' || Array.isArray(out)) {
+      logE(`[${method}] 返回值非法(type=${typeof out})，回退空骨架`);
+      return EMPTY_SHAPES[method]();
+    }
+    // 关键字段兜底，避免 Go 侧因字段类型不符报错
+    if (method === 'home' || method === 'category' || method === 'detail' || method === 'search') {
+      if (!Array.isArray(out.list)) out.list = [];
+    }
+    if (method === 'play') {
+      if (!Array.isArray(out.urls)) out.urls = [];
+      if (!out.header || typeof out.header !== 'object') out.header = { 'User-Agent': USER_AGENT };
+      if (typeof out.parse !== 'number') out.parse = 0;
+      if (typeof out.flag !== 'string') out.flag = '91porn';
+    }
+    return out;
+  };
+}
+
+const exported = {
+  home: guard('home', home),
+  category: guard('category', category),
+  detail: guard('detail', detail),
+  search: guard('search', search),
+  play: guard('play', play),
+};
+
+module.exports = exported;
+runner.run(exported);
