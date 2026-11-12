@@ -4,7 +4,7 @@
 // @name 红果短剧
 // @author OmniBox
 // @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型（完整 Argus 551/Ladon 签名 + gzip + player/v1）+ 内置 CENC Range 解密流服务；直接替代旧《红果短剧.py》+《红果短剧-代理.py》，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 1.3.2
+// @version 1.3.4
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -22,9 +22,7 @@ let OmniBox;
 try {
   OmniBox = require('omnibox_sdk');
 } catch (_) {
-  OmniBox = {
-    async log(level, message) { console.log(`[${level}] ${message}`); },
-  };
+  OmniBox = null;
 }
 let runner;
 try {
@@ -33,9 +31,15 @@ try {
   runner = { run() {} };
 }
 
-async function log(level, message) {
-  try { await OmniBox.log(level, message); } catch (_) { console.log(`[${level}] ${message}`); }
+// OmniBox runner 用 stdout 传递 JSON 响应。部分宿主/SDK 的 OmniBox.log 会把日志
+// 序列化成 JSON 字符串写进同一 stdout；异步日志落在 play() 返回之后时，Go 宿主
+// 会把这个字符串当成播放响应解析，报
+// "json: cannot unmarshal string into Go value of type map[string]interface {}"，
+// 表现为「下一集偶发失败」。本源统一把日志同步写 stderr，绝不使用 stdout。
+function log(level, message) {
+  try { process.stderr.write(`[${level}] ${message}\n`); } catch (_) { /* ignore */ }
 }
+const logStderr = log;
 
 // ---------------------------------------------------------------------------
 // 环境变量（沿用旧《红果短剧.py》/《红果短剧-代理.py》的命名，便于直接替换）
@@ -729,15 +733,15 @@ function md5sumV3(msg, countV2, orders, countV1) {
 }
 
 function getIv(iv, data) { for(let i=0;i<data.length;i++){ if((i&1)===0) iv=(iv>>>4)^iv^(iv<<6)^data[i]; else iv=~((iv>>>7)^iv^(data[i]|(iv<<12))); iv=u32(iv); } return iv; }
-function branch0Xor(data, base, di, tt03, rounds, x1,x2,x3,x4,x5,x6,x7,x8,x9,x10){ const d=data.slice(); for(let i=0;i<rounds;i++){const n0=di[(base+i)&127],n1=((d[x3]^d[x4])&d[x1])^d[x3],n2=rol32(d[x1],26)^rol32(d[x1],21)^rol32(d[x1],7),n3=tt03[(base+i)&63],n4=u32(n0+n1+n2+n3+d[x5]),n5=rol32(d[x2],30)^rol32(d[x2],19)^rol32(d[x2],10),n6=(d[x2]&d[x6])|((d[x2]|d[x6])&d[x7]),n7=n5+n6,o=d[x9]; if(globalThis.DEBUG_MEDUSA&&i===0)console.log('STEP0',n0,n1,n2,n3,n4,n5,n6,n7,o,d.slice()); d.unshift(d.pop()); d[x10]=u32(n7+n4); d[x8]=u32(o+n4); } return d; }
+function branch0Xor(data, base, di, tt03, rounds, x1,x2,x3,x4,x5,x6,x7,x8,x9,x10){ const d=data.slice(); for(let i=0;i<rounds;i++){const n0=di[(base+i)&127],n1=((d[x3]^d[x4])&d[x1])^d[x3],n2=rol32(d[x1],26)^rol32(d[x1],21)^rol32(d[x1],7),n3=tt03[(base+i)&63],n4=u32(n0+n1+n2+n3+d[x5]),n5=rol32(d[x2],30)^rol32(d[x2],19)^rol32(d[x2],10),n6=(d[x2]&d[x6])|((d[x2]|d[x6])&d[x7]),n7=n5+n6,o=d[x9]; if(globalThis.DEBUG_MEDUSA&&i===0)console.error('STEP0',n0,n1,n2,n3,n4,n5,n6,n7,o,d.slice()); d.unshift(d.pop()); d[x10]=u32(n7+n4); d[x8]=u32(o+n4); } return d; }
 function hashF13(querySm3, bodyMd5, ts, khronos){ const iv=getIv(getIv(getIv(0x20230928,querySm3),bodyMd5),ts), v0=((iv&15)*171)>>9, branch=(iv&15)-((v0*3)&255); if(branch===0)return branch0(v0,khronos,querySm3,bodyMd5,ts); if(branch===1)return branch1(v0,khronos,querySm3,bodyMd5,ts); if(branch===2)return branch2(iv,khronos,querySm3,bodyMd5,ts); throw new Error(`medusa branch ${branch}`); }
 
 function branch0(v0,khronos,q,b,t){
   const tt01=[0xc4a78580,0xb3c0fd39,0xc58c5686,0xc9aa3ba7,0xf5a7adf2,0x963c2ed1], iv1=tt01[v0], cv1=(iv1+khronos+1)&255, cv2=(iv1+khronos)>>>0;
   const tt02=[0xebb64faf,0x7aadcc2,0xcf3187bf,0xe01138ff,0x6d0bfcff,0x5a30a3be,0xb41ad638,0x34180eb8,0xf233eb6f,0xb1a584cc,0xccc30dc7,0x47d1db51,0xd55653de,0x70a84fa1,0x57473c12,0xf76f0288,0x2c077f0a,0xda0dcad0,0xfbb86f6c,0xfdc4cf00,0x688a020d,0xe676c6a6,0x8cd6338b,0x1a3c8d0e,0xcce8b06b,0x6ad0ed0b,0xa0522717,0xdc71ac83,0x2285db71,0xd5b4dda6,0x736f8650,0x6560306c,0x617ce2a6,0xe423417e,0xa40e143,0x544e4032,0x88dffb2a,0x716c1ae0,0x4c467a88,0x5b23bb3,0xe1d0b866,0xbaa3dcb8,0xae3374d3,0xc3381a50,0x1702f75b,0xfe6da368,0xf0b4cf48,0x4e0ffbb8,0x72aad10d,0x26c53a3d,0xf2bce0f6,0xb4557581,0x4a257fdd,0x8c3182a2,0xab0b3b86,0x3d5dfb14,0x4f103634,0xd37b52d7,0x444eff16,0xeb0a33d1,0x6ca86f6e,0x284ba7,0x8387cfa,0x5fb37586];
   const tt03=tt02.map(x=>ror32(x,(iv1+khronos+1)&255)); const n0=(cv2+2)&7, seed=[0xfa,0x45,0x61,0xd7], pad=Buffer.from(seed.map(x=>(x|x<<8)>>n0&255)); const count=cv2&255, init=[0x7aba4fc8,0x67166507,0x6403fa00,0x340f512f,984304912,3005047866,2874125293,2152413264].map(x=>ror32(x,count)); const data=Buffer.concat([q,b,t,pad,Buffer.from('00000000000001a0','hex')]); const di=[]; for(let i=0;i<data.length;i+=4)di.push(data.readUInt32BE(i)); let di0=di[0]; for(let i=0;i<112;i++){const d1=di[i+1],d14=di[i+14],r1=rol32(d1,14)^rol32(d1,25)^(d1>>>3),r2=rol32(d14,13)^rol32(d14,15)^(d14>>>10);di0=u32(di0+di[i+9]+r1+r2);di.push(di0);di0=d1;}
-  if (globalThis.DEBUG_MEDUSA) console.log('JSINIT', init.map(x=>x.toString(16)), 'JSDI', di.slice(0,20).map(x=>x.toString(16)), di[20].toString(16), di[50].toString(16), di[100].toString(16));
-  const args=[[101,5,7,6,3,2,1,0,5,4,3],[96,0,6,7,5,3,2,1,5,4,4],[96,7,6,2,1,4,0,5,4,3,5],[99,3,6,2,4,5,1,0,0,7,6],[96,0,5,6,7,3,1,2,5,4,4],[100,2,0,3,5,4,6,7,2,1,5]][v0]; const vj=branch0Xor(init,iv1,di,tt03,...args); if (globalThis.DEBUG_MEDUSA) console.log('JSVJ', vj.map(x=>x.toString(16))); const full=Buffer.alloc(32); for(let i=0;i<8;i++)full.writeUInt32BE(u32(vj[i]+init[i]),i*4); const ret=Buffer.alloc(20); for(let i=0;i<16;i++)ret[i]=full[i]^full[i+16]; if(globalThis.DEBUG_MEDUSA)console.log('JSFULL',full.toString('hex'),'JSRET',ret.subarray(0,16).toString('hex')); ret.writeUInt32LE(sumMd5(ret.subarray(0,16)),16); return ret;
+  if (globalThis.DEBUG_MEDUSA) console.error('JSINIT', init.map(x=>x.toString(16)), 'JSDI', di.slice(0,20).map(x=>x.toString(16)), di[20].toString(16), di[50].toString(16), di[100].toString(16));
+  const args=[[101,5,7,6,3,2,1,0,5,4,3],[96,0,6,7,5,3,2,1,5,4,4],[96,7,6,2,1,4,0,5,4,3,5],[99,3,6,2,4,5,1,0,0,7,6],[96,0,5,6,7,3,1,2,5,4,4],[100,2,0,3,5,4,6,7,2,1,5]][v0]; const vj=branch0Xor(init,iv1,di,tt03,...args); if (globalThis.DEBUG_MEDUSA) console.error('JSVJ', vj.map(x=>x.toString(16))); const full=Buffer.alloc(32); for(let i=0;i<8;i++)full.writeUInt32BE(u32(vj[i]+init[i]),i*4); const ret=Buffer.alloc(20); for(let i=0;i<16;i++)ret[i]=full[i]^full[i+16]; if(globalThis.DEBUG_MEDUSA)console.error('JSFULL',full.toString('hex'),'JSRET',ret.subarray(0,16).toString('hex')); ret.writeUInt32LE(sumMd5(ret.subarray(0,16)),16); return ret;
 }
 
 function r00(a,b,c,d,e,f,g,h,tt,table){let x=table(Number((a>>56n)*8n));if(tt>0n)x^=tt;x^=table(Number(((b>>45n)&2040n)+2048n));x^=table(Number(((c>>37n)&2040n)+4096n));x^=table(Number(((d>>29n)&2040n)+6144n));x^=table(Number(((e>>21n)&2040n)+8192n));x^=table(Number(((f>>13n)&2040n)+10240n));x^=table(Number((((g>>8n)&255n)*8n)+12288n));x^=table(Number(((h&255n)*8n)+14336n));return x;}
@@ -1457,9 +1461,9 @@ async function detail(params, context) {
                 const warmUrl = mediaEndpointUrl({ vid: v, q: '1080', hg: 'cenc', warm: '1' }, context);
                 await httpRequest(warmUrl, { method: 'HEAD', timeout: 15000 });
               }
-              await log('info', `[hg][prefetch] 详情预热完成 count=${warmVids.length} vids=${warmVids.slice(0, 3).join(',')}`);
+              logStderr('info', `[hg][prefetch] 详情预热完成 count=${warmVids.length} vids=${warmVids.slice(0, 3).join(',')}`);
             } catch (err) {
-              await log('info', `[hg][prefetch] 详情预热跳过: ${err.message || err}`);
+              logStderr('info', `[hg][prefetch] 详情预热跳过: ${err.message || err}`);
             }
           })();
         }
@@ -1895,7 +1899,7 @@ async function runSweep(reason) {
   const disk = sweepDiskFiles(now);
   const logInfo = sweepLogFile();
   const freedMB = (disk.freed / 1048576).toFixed(1);
-  await log('info',
+  logStderr('info',
     `[hg][sweep] ${reason} 清扫完成(间隔=${Math.round(HG_PROXY_SWEEP_MS / 3600000 * 10) / 10}h): ` +
     `home=${mem.home} series=${mem.series} model=${mem.models} ` +
     `sessions=${sessions.removed}删/${sessions.kept}留(活跃=${sessions.active}) prefix=${sessions.prefixes} ` +
@@ -1910,8 +1914,7 @@ function startSweepTimer() {
     runSweep('定时').catch(err => log('warn', `[hg][sweep] 清扫异常: ${err && err.message ? err.message : err}`));
   }, HG_PROXY_SWEEP_MS);
   if (_sweepTimer && typeof _sweepTimer.unref === 'function') _sweepTimer.unref();
-  log('info', `[hg][sweep] 已启动定时清扫: 每 ${Math.round(HG_PROXY_SWEEP_MS / 3600000 * 10) / 10} 小时一次, 日志上限=${HG_PROXY_LOG_MAX_MB}MB, 磁盘目录=${HG_PROXY_CACHE_DIR}`)
-    .catch(() => {});
+  logStderr('info', `[hg][sweep] 已启动定时清扫: 每 ${Math.round(HG_PROXY_SWEEP_MS / 3600000 * 10) / 10} 小时一次, 日志上限=${HG_PROXY_LOG_MAX_MB}MB, 磁盘目录=${HG_PROXY_CACHE_DIR}`);
 }
 
 function findBox(data, fourcc, start = 0) {
@@ -2411,8 +2414,8 @@ async function play(params, context) {
       const warmUrl = new URL(url);
       warmUrl.searchParams.set('warm', '1');
       httpRequest(warmUrl.toString(), { method: 'HEAD', timeout: 15000 })
-        .then(() => log('info', `[hg][warm] vid=${mediaParams.vid || mediaParams.sid} 预热完成`))
-        .catch((err) => log('info', `[hg][warm] 预热跳过: ${err.message || err}`));
+        .then(() => logStderr('info', `[hg][warm] vid=${mediaParams.vid || mediaParams.sid} 预热完成`))
+        .catch((err) => logStderr('info', `[hg][warm] 预热跳过: ${err.message || err}`));
     }
     await log('info', `[hg][play] vid=${token.kind === 'video' ? token.videoId : token.seriesId} 1080P 流地址 → ${url}`);
     return {
@@ -2486,13 +2489,16 @@ async function search(params, context) {
 
 module.exports = { home, category, detail, search, play };
 
-startSweepTimer();
+// runner 进程每次方法调用都会重新加载本模块，且生命周期极短：内存缓存随进程退出自然清空，
+// 在 runner 里启动定时器既无意义，又会在宿主读取 JSON 响应的窗口里产生顶层输出。
+// 6 小时定时清扫只在独立长驻的 --hg-stream 流服务进程中运行。
+if (IS_STREAM_PROCESS) startSweepTimer();
 
 if (IS_STREAM_PROCESS) {
   // 独立流服务进程：不进入 spider_runner，长驻提供 /media.mp4 与 /__hg_health
   const port = Number(process.argv[process.argv.indexOf('--hg-stream') + 1]) || HG_PROXY_PORT;
   startStreamServer(port).then(() => {
-    console.log(`[hg-stream] 监听 ${HG_PROXY_HOST}:${port}  健康检查=${HG1080_HEALTH_PATH}  播放=/media.mp4?vid=&q=`);
+    console.error(`[hg-stream] 监听 ${HG_PROXY_HOST}:${port}  健康检查=${HG1080_HEALTH_PATH}  播放=/media.mp4?vid=&q=`);
   }).catch((err) => {
     console.error(`[hg-stream] 启动失败: ${err && err.message ? err.message : err}`);
     process.exit(1);
