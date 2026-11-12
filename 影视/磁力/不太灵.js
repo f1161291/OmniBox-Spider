@@ -1,14 +1,31 @@
 // @name 不太灵
 // @author 梦
-// @description 资源网：详情与资源列表已接入；支持磁力/网盘资源展示
-// @dependencies cheerio
-// @version 1.2.7
+// @description 资源网：ge_js_validator JS cookie 挑战解算 + 磁力/电驴/种子/网盘资源展示 + legacy 播放字段兼容
+// @dependencies
+// @version 1.3.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/磁力/不太灵.js
 
-const OmniBox = require("omnibox_sdk");
-const runner = require("spider_runner");
+// 本地直接 require 调试时，SDK / runner 缺失不应导致脚本在入口阶段崩溃
+let OmniBox;
+try {
+  OmniBox = require("omnibox_sdk");
+} catch (_) {
+  OmniBox = {
+    log(level, message) {
+      console.log(`[${level}] ${message}`);
+    },
+  };
+}
 
-const BASE_URL = "https://web5.mukaku.com";
+let runner;
+try {
+  runner = require("spider_runner");
+} catch (_) {
+  runner = { run() {} };
+}
+
+// 站点地址支持环境变量覆盖，便于主域轮换时快速切换
+const BASE_URL = String(process.env.MUKAKU_HOST || "https://web5.mukaku.com").trim().replace(/\/+$/, "");
 const API_BASE = `${BASE_URL}/prod/api/v1`;
 const APP_ID = "83768d9ad4";
 const IDENTITY = "23734adac0301bccdcb107c4aa21f96c";
@@ -21,6 +38,45 @@ const MAGNET_PLAY_HEADERS = {
 const DRIVE_TYPE_CONFIG = (process.env.DRIVE_TYPE_CONFIG || "quark;uc;baidu;xunlei;ali;alipan;123pan;tianyi;115").split(';').map(t => t.trim().toLowerCase()).filter(Boolean);
 const SOURCE_NAMES_CONFIG = (process.env.SOURCE_NAMES_CONFIG || "本地代理;服务端代理;直连").split(';').map(s => s.trim()).filter(Boolean);
 const DRIVE_ORDER = (process.env.DRIVE_ORDER || "baidu;tianyi;quark;uc;115;xunlei;ali;123pan").split(';').map(s => s.trim().toLowerCase()).filter(Boolean);
+// ge_js_validator 是站点下发的 JS cookie 挑战：每次响应都会刷新 cookie，需要带着新值重试若干轮
+const MUKAKU_MAX_CHALLENGE_RETRY = Math.max(1, Math.min(30, Number(process.env.MUKAKU_MAX_CHALLENGE_RETRY || 20) || 20));
+const MUKAKU_COOKIE_CACHE_KEY = "mukaku:ge_js_validator_cookie";
+const MUKAKU_COOKIE_CACHE_TTL = Number(process.env.MUKAKU_COOKIE_CACHE_TTL || 300);
+
+let cachedValidatorCookie = "";
+
+function isValidatorChallenge(text) {
+  return /document\.cookie\s*=/i.test(text) && /ge_js_validator_/i.test(text);
+}
+
+function parseValidatorCookie(text) {
+  const match = String(text || "").match(/document\.cookie\s*=\s*["']([^"']*ge_js_validator_[^"';]+)/i);
+  return match ? match[1].trim() : "";
+}
+
+async function getCachedValidatorCookie() {
+  if (cachedValidatorCookie) return cachedValidatorCookie;
+  try {
+    if (typeof OmniBox.getCache === "function") {
+      const value = await OmniBox.getCache(MUKAKU_COOKIE_CACHE_KEY);
+      if (value) {
+        cachedValidatorCookie = String(value).trim();
+        return cachedValidatorCookie;
+      }
+    }
+  } catch (_) {}
+  return "";
+}
+
+async function setCachedValidatorCookie(cookie) {
+  if (!cookie) return;
+  cachedValidatorCookie = cookie;
+  try {
+    if (typeof OmniBox.setCache === "function") {
+      await OmniBox.setCache(MUKAKU_COOKIE_CACHE_KEY, cookie, MUKAKU_COOKIE_CACHE_TTL);
+    }
+  } catch (_) {}
+}
 
 module.exports = { home, category, detail, search, play };
 runner.run(module.exports);
@@ -32,25 +88,59 @@ async function requestApi(path, params = {}, options = {}) {
     ...Object.fromEntries(Object.entries(params).filter(([, v]) => v != null && v !== "")),
   }).toString();
   const url = `${API_BASE}/${path}?${qs}`;
-  await OmniBox.log("info", `[木卡库][api] ${url}`);
-  const res = await OmniBox.request(url, {
-    method: options.method || "GET",
-    headers: {
-      "User-Agent": UA,
-      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-      Referer: `${BASE_URL}/`,
-      ...(options.headers || {}),
-    },
-    timeout: options.timeout || 20000,
-  });
-  if (!res || Number(res.statusCode) !== 200) {
-    throw new Error(`HTTP ${res?.statusCode || "unknown"} @ ${url}`);
+
+  // 站点会在任意 API 上插入 ge_js_validator JS cookie 挑战页（HTTP 200 + HTML）。
+  // 每轮挑战都下发新 cookie，必须携带最新值重试到放行，不能直接 JSON.parse。
+  let cookie = await getCachedValidatorCookie();
+  let lastBody = "";
+  for (let attempt = 1; attempt <= MUKAKU_MAX_CHALLENGE_RETRY; attempt++) {
+    await OmniBox.log("info", `[不太灵][api] attempt=${attempt}, url=${url}, validator=${cookie ? "cached" : "none"}`);
+    const res = await OmniBox.request(url, {
+      method: options.method || "GET",
+      headers: {
+        "User-Agent": UA,
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        Referer: `${BASE_URL}/`,
+        ...(cookie ? { Cookie: cookie } : {}),
+        ...(options.headers || {}),
+      },
+      timeout: options.timeout || 20000,
+    });
+    if (!res || Number(res.statusCode) !== 200) {
+      throw new Error(`HTTP ${res?.statusCode || "unknown"} @ ${url}`);
+    }
+    const body = String(res.body || "");
+    lastBody = body;
+    if (isValidatorChallenge(body)) {
+      const nextCookie = parseValidatorCookie(body);
+      if (nextCookie) {
+        cookie = nextCookie;
+        await setCachedValidatorCookie(cookie);
+        await OmniBox.log("info", `[不太灵][api] 命中 ge_js_validator 挑战, attempt=${attempt}, cookiePreview=${cookie.slice(0, 64)}`);
+        continue;
+      }
+    }
+
+    let data;
+    try {
+      data = JSON.parse(body || "{}");
+    } catch (e) {
+      throw new Error(`响应非 JSON @ ${url}, bodyPreview=${body.slice(0, 120)}`);
+    }
+    if (data && data.code && Number(data.code) !== 200) {
+      throw new Error(data.message || `API code=${data.code}`);
+    }
+    await OmniBox.log("info", `[不太灵][api] 放行 path=${path}, attempt=${attempt}, bodyLen=${body.length}`);
+    return data;
   }
-  const data = JSON.parse(res.body || "{}");
-  if (data && data.code && Number(data.code) !== 200) {
-    throw new Error(data.message || `API code=${data.code}`);
-  }
-  return data;
+
+  // 放行失败时清掉可能已失效的缓存 cookie，避免后续请求继续复用旧值
+  cachedValidatorCookie = "";
+  try {
+    if (typeof OmniBox.deleteCache === "function") await OmniBox.deleteCache(MUKAKU_COOKIE_CACHE_KEY);
+  } catch (_) {}
+  await OmniBox.log("error", `[不太灵][api] ge_js_validator 挑战在 ${MUKAKU_MAX_CHALLENGE_RETRY} 轮内未放行 @ ${url}, bodyPreview=${lastBody.slice(0, 120)}`);
+  throw new Error(`ge_js_validator 挑战未放行 @ ${url}`);
 }
 
 function mapVideo(item) {
@@ -282,6 +372,41 @@ function buildSeedEpisode(item, fallbackTitle, extra = {}) {
   };
 }
 
+// 站点 ecca / all_seeds 既可能返回 { 分组名: [item] }，也可能直接返回 [item]；
+// 统一整理成可遍历的分组数组，避免数组形态被 Object.entries 当成索引而丢掉线路。
+function normalizeSeedGroups(value, fallbackName = "资源") {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value.length ? [{ name: fallbackName, items: value }] : [];
+  }
+  if (typeof value !== "object") return [];
+  return Object.entries(value)
+    .map(([name, items], idx) => ({ name: name || `${fallbackName}${idx + 1}`, items }))
+    .filter((group) => Array.isArray(group.items) && group.items.length);
+}
+
+// 兼容仍只消费传统 MacCMS 播放字段的端，避免 detail 有数据但前端不显示线路
+function buildLegacyPlayFields(playSources = []) {
+  const valid = (Array.isArray(playSources) ? playSources : []).filter(
+    (source) => source && Array.isArray(source.episodes) && source.episodes.length,
+  );
+  if (!valid.length) return { vod_play_from: "", vod_play_url: "", vod_play_list: [] };
+  return {
+    vod_play_from: valid.map((source) => String(source.name || "资源")).join("$$$"),
+    vod_play_url: valid
+      .map((source) =>
+        source.episodes
+          .map((ep) => `${String(ep?.name || "资源").replace(/[$#]/g, " ")}$${String(ep?.playId || "")}`)
+          .join("#"),
+      )
+      .join("$$$"),
+    vod_play_list: valid.map((source) => ({
+      name: String(source.name || "资源"),
+      episodes: source.episodes.map((ep) => ({ name: ep.name, playId: ep.playId })),
+    })),
+  };
+}
+
 function isVideoFile(file) {
   if (!file || typeof file !== "object") return false;
   const name = String(file.name || file.file_name || "").toLowerCase();
@@ -291,21 +416,40 @@ function isVideoFile(file) {
   return false;
 }
 
-async function getAllVideoFiles(shareURL, files) {
+// 网盘目录递归保护：若上游返回环形目录或超深目录，不能让 detail 被无限递归拖死
+const MAX_DRIVE_RECURSION_DEPTH = 8;
+const MAX_DRIVE_FILE_COUNT = 500;
+
+async function getAllVideoFiles(shareURL, files, depth = 0, visited = new Set(), state = { count: 0 }) {
   if (!Array.isArray(files) || !files.length) return [];
+  if (depth >= MAX_DRIVE_RECURSION_DEPTH) {
+    await OmniBox.log("warn", `[不太灵][detail] 网盘目录递归达到上限 depth=${depth}, shareURL=${shareURL}`);
+    return [];
+  }
   const out = [];
   for (const file of files) {
+    if (state.count >= MAX_DRIVE_FILE_COUNT) {
+      await OmniBox.log("warn", `[不太灵][detail] 网盘文件数达到上限 count=${state.count}, shareURL=${shareURL}`);
+      break;
+    }
     if (file?.file && isVideoFile(file)) {
       out.push(file);
+      state.count++;
     } else if (file?.dir) {
+      const fid = String(file?.fid || file?.file_id || "");
+      if (!fid || visited.has(fid)) {
+        await OmniBox.log("warn", `[不太灵][detail] 跳过重复/无效网盘子目录 fid=${fid || "empty"}, shareURL=${shareURL}`);
+        continue;
+      }
+      visited.add(fid);
       try {
-        const sub = await OmniBox.getDriveFileList(shareURL, file.fid);
+        const sub = await OmniBox.getDriveFileList(shareURL, fid);
         if (sub?.files && Array.isArray(sub.files)) {
-          const subVideos = await getAllVideoFiles(shareURL, sub.files);
+          const subVideos = await getAllVideoFiles(shareURL, sub.files, depth + 1, visited, state);
           out.push(...subVideos);
         }
       } catch (e) {
-        await OmniBox.log("warn", `[不太灵][detail] 读取网盘子目录失败 shareURL=${shareURL}, fid=${file?.fid || ""}, message=${e.message}`);
+        await OmniBox.log("warn", `[不太灵][detail] 读取网盘子目录失败 shareURL=${shareURL}, fid=${fid}, message=${e.message}`);
       }
     }
   }
@@ -314,6 +458,7 @@ async function getAllVideoFiles(shareURL, files) {
 
 async function home(params, context) {
   try {
+    await OmniBox.log("info", `[不太灵][home] params=${JSON.stringify(params || {})}, from=${context?.from || "web"}`);
     const data = await requestApi("getVideoList", { page: 1 });
     const list = (((data || {}).data || {}).data || []).map(mapVideo);
     return {
@@ -332,6 +477,7 @@ async function home(params, context) {
 
 async function category(params, context) {
   try {
+    await OmniBox.log("info", `[不太灵][category] params=${JSON.stringify(params || {})}, from=${context?.from || "web"}`);
     const page = Number(params.page || 1) || 1;
     const categoryId = String(params.categoryId || params.type_id || "recommend");
 
@@ -396,6 +542,7 @@ async function category(params, context) {
 async function detail(params, context) {
   try {
     const videoId = String(params.videoId || params.id || params.vod_id || "").trim();
+    await OmniBox.log("info", `[不太灵][detail] params=${JSON.stringify(params || {})}, from=${context?.from || "web"}, videoId=${videoId}`);
     if (!videoId) return { list: [] };
 
     const res = await requestApi("getVideoDetail", { id: videoId });
@@ -403,11 +550,10 @@ async function detail(params, context) {
     const playSources = [];
 
     // 磁力/电驴等资源：当前站点返回的多数是“单集磁力”，可按标题识别集数后作为真分集展示
-    const ecca = (v && typeof v.ecca === "object" && v.ecca) ? v.ecca : {};
-    for (const [group, items] of Object.entries(ecca)) {
-      if (!Array.isArray(items) || !items.length) continue;
-      const episodes = sortEpisodesByEpisodeNumber(items.map((item, idx) => buildSeedEpisode(item, `${v.title || '资源'}_${group}_${idx + 1}`, {
-        quality: group,
+    const eccaGroups = normalizeSeedGroups(v.ecca, "磁力资源");
+    for (const groupEntry of eccaGroups) {
+      const episodes = sortEpisodesByEpisodeNumber(groupEntry.items.map((item, idx) => buildSeedEpisode(item, `${v.title || "资源"}_${groupEntry.name}_${idx + 1}`, {
+        quality: groupEntry.name,
         vodName: v.title,
         pic: v.image,
         index: idx + 1,
@@ -415,35 +561,36 @@ async function detail(params, context) {
         simplePlayId: true,
       })));
       if (episodes.length) {
-        const prefix = getSeedSourcePrefix(episodes[0]?.seedType || 'magnet');
-        playSources.push({ name: `${prefix}·${group}`, episodes: episodes.map(({ seedType, episodeNumber, episodeRangeStart, episodeRangeEnd, ...rest }) => rest) });
+        const prefix = getSeedSourcePrefix(episodes[0]?.seedType || "magnet");
+        playSources.push({ name: `${prefix}·${groupEntry.name}`, episodes: episodes.map(({ seedType, episodeNumber, episodeRangeStart, episodeRangeEnd, ...rest }) => rest) });
       }
     }
 
-    // 兜底：如果 ecca 没给够，可从 all_seeds 再补一组
-    if (!playSources.length && Array.isArray(v.all_seeds) && v.all_seeds.length) {
-      const episodes = sortEpisodesByEpisodeNumber(v.all_seeds.map((item, idx) => buildSeedEpisode(item, `${v.title || '资源'}_${idx + 1}`, {
-        quality: item?.definition_group || item?.zqxd || "",
-        vodName: v.title,
-        pic: v.image,
-        index: idx + 1,
-        directPlayable: true,
-        simplePlayId: true,
-      })));
-      if (episodes.length) {
-        const prefix = getSeedSourcePrefix(episodes[0]?.seedType || 'magnet');
-        playSources.push({ name: `${prefix}资源`, episodes: episodes.map(({ seedType, episodeNumber, episodeRangeStart, episodeRangeEnd, ...rest }) => rest) });
+    // 兜底：如果 ecca 没给够，可从 all_seeds 再补一组（兼容数组 / 分组对象两种形态）
+    if (!playSources.length) {
+      for (const seedGroup of normalizeSeedGroups(v.all_seeds, "磁力资源")) {
+        const episodes = sortEpisodesByEpisodeNumber(seedGroup.items.map((item, idx) => buildSeedEpisode(item, `${v.title || "资源"}_${idx + 1}`, {
+          quality: item?.definition_group || item?.zqxd || "",
+          vodName: v.title,
+          pic: v.image,
+          index: idx + 1,
+          directPlayable: true,
+          simplePlayId: true,
+        })));
+        if (episodes.length) {
+          const prefix = getSeedSourcePrefix(episodes[0]?.seedType || "magnet");
+          playSources.push({ name: `${prefix}·${seedGroup.name}`, episodes: episodes.map(({ seedType, episodeNumber, episodeRangeStart, episodeRangeEnd, ...rest }) => rest) });
+        }
       }
     }
 
     // 网盘资源：按单个分享链接拆线路；展开失败则不显示该线路
-    const seeds = v.movies_online_seed || {};
+    const netdiskGroups = normalizeSeedGroups(v.movies_online_seed, "网盘");
     const netdiskCounters = {};
-    for (const [group, items] of Object.entries(seeds)) {
-      if (!Array.isArray(items) || !items.length) continue;
-
-      for (let idx = 0; idx < items.length; idx++) {
-        const item = items[idx];
+    for (const netdiskGroup of netdiskGroups) {
+      const group = netdiskGroup.name;
+      for (let idx = 0; idx < netdiskGroup.items.length; idx++) {
+        const item = netdiskGroup.items[idx];
         const shareURL = String(item?.link || "").trim();
         const seedType = normalizeSeedType(item?.type, shareURL);
         const episodes = [];
@@ -508,7 +655,7 @@ async function detail(params, context) {
     }
 
     const sortedPlaySources = sortPlaySourcesByDriveOrder(playSources);
-    await OmniBox.log("info", `[不太灵][detail] id=${videoId}, sources=${sortedPlaySources.length}, eccaGroups=${Object.keys(ecca).length}, netdiskGroups=${Object.keys(seeds).length}, order=${sortedPlaySources.map(s => s.name).join(' | ')}`);
+    await OmniBox.log("info", `[不太灵][detail] id=${videoId}, sources=${sortedPlaySources.length}, eccaGroups=${eccaGroups.length}, netdiskGroups=${netdiskGroups.length}, order=${sortedPlaySources.map(s => s.name).join(' | ')}`);
     return {
       list: [{
         vod_id: String(v.idcode || videoId),
@@ -524,6 +671,7 @@ async function detail(params, context) {
         vod_remarks: `豆瓣:${v.doub_score || "-"} IMDb:${v.IMDB_score || "-"}`,
         type_name: normalizeText(v.class || "") || (Array.isArray(v.biaoqian) ? v.biaoqian.filter(Boolean).join(" / ") : ""),
         vod_play_sources: sortedPlaySources.map(({ driveType, ...rest }) => rest),
+        ...buildLegacyPlayFields(sortedPlaySources.map(({ driveType, ...rest }) => rest)),
       }],
     };
   } catch (e) {
@@ -536,6 +684,7 @@ async function search(params, context) {
   const keyword = String(params.keyword || params.key || params.wd || "").trim();
   const page = Number(params.page || 1) || 1;
   try {
+    await OmniBox.log("info", `[不太灵][search] params=${JSON.stringify(params || {})}, from=${context?.from || "web"}, keyword=${keyword}, page=${page}`);
     const data = await requestApi("getVideoList", { sb: keyword, page, limit: 24 });
     const list = (((data || {}).data || {}).data || []).map(mapVideo);
     await OmniBox.log("info", `[不太灵][search] keyword=${keyword}, page=${page}, count=${list.length}`);
@@ -558,7 +707,8 @@ async function search(params, context) {
 
 async function play(params, context) {
   try {
-    const raw = String(params.playId || params.play_id || "").trim();
+    const raw = String(params.playId || params.play_id || params.id || "").trim();
+    await OmniBox.log("info", `[不太灵][play] params=${JSON.stringify(params || {})}, from=${context?.from || "web"}, playIdPreview=${raw.slice(0, 120)}`);
     if (!raw) return { parse: 0, urls: [] };
     let meta = {};
     try {
@@ -571,6 +721,20 @@ async function play(params, context) {
     const seedType = String(meta.seedType || normalizeSeedType("", link));
     const directPlayable = Boolean(meta.directPlayable ?? isDirectPlayableSeedType(seedType));
     await OmniBox.log("info", `[不太灵][play] type=${seedType}, directPlayable=${directPlayable}, link=${link}, shareURL=${meta.shareURL || ""}, fileId=${meta.fileId || ""}`);
+
+    // 磁力 / 电驴 / 种子直链：优先直接返回，不依赖任何网盘 SDK
+    if (/^(magnet:|ed2k:\/\/)/i.test(link) || /\.torrent($|\?)/i.test(link)) {
+      const playFlag = seedType === "magnet" ? "magnet" : seedType === "ed2k" ? "ed2k" : "torrent";
+      const name = meta.displayName || meta.title || getSeedSourcePrefix(playFlag) || "资源";
+      await OmniBox.log("info", `[不太灵][play] 返回种子直链 type=${playFlag}, name=${name}`);
+      return {
+        parse: 0,
+        url: link,
+        urls: [{ name, url: link }],
+        header: MAGNET_PLAY_HEADERS,
+        headers: MAGNET_PLAY_HEADERS,
+      };
+    }
 
     if (meta.shareURL && meta.fileId) {
       try {
@@ -601,7 +765,8 @@ async function play(params, context) {
           header,
           headers: header,
           parse: 0,
-          danmaku: playInfo.danmaku || []};
+          danmaku: playInfo.danmaku || [],
+        };
       } catch (e) {
         await OmniBox.log("warn", `[不太灵][play] 网盘播放解析失败 shareURL=${meta.shareURL}, fileId=${meta.fileId}, message=${e.message}`);
       }
@@ -616,13 +781,15 @@ async function play(params, context) {
         url: link,
         urls: [{ name: meta.displayName || meta.title || getSeedSourcePrefix(seedType) || "资源", url: link }],
         header,
-        headers: header};
+        headers: header,
+      };
     }
 
     return {
       parse: 1,
       url: link,
-      urls: [{ name: meta.title || "资源页", url: link }]};
+      urls: [{ name: meta.title || "资源页", url: link }],
+    };
   } catch (e) {
     await OmniBox.log("error", `[不太灵][play] ${e.message}`);
     return { parse: 0, urls: [] };
