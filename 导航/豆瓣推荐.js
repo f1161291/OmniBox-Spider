@@ -1,9 +1,9 @@
-// @name 豆瓣推荐
+// @name 豆瓣
 // @author lampon
 // @description 豆瓣推荐爬虫脚本
 // @version 1.0.10
-// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/导航/豆瓣推荐.js
-
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/导航/豆瓣.js
+// @indexs 1
 const OmniBox = require("omnibox_sdk");
 
 // 导出接口
