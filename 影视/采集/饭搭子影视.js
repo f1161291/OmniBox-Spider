@@ -1,5 +1,5 @@
 // @name 饭搭子影视
-// @version 1.0.4
+// @version 1.0.5
 // @author omnibox-spider
 // @description 饭搭子影视（fdzys.com）OmniBox Spider：官网 SSR 首页/分类/搜索/详情，播放页 player_aaaa 解直链，多线路自动探测 m3u8 + 首分片后自动选择最优线路；支持官方平台页面嗅探/parse=1 兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/饭搭子影视.js
@@ -21,6 +21,52 @@
 //  FDZYS_PROBE_TIMEOUT   单线路探测超时毫秒，默认 4000
 //  FDZYS_PROBE_CACHE_TTL 线路探测结果缓存秒数，默认 600；设 0 关闭
 //  FDZYS_PLAY_TTL        播放页解析结果缓存秒数，默认 180
+
+// OmniBox 宿主用 stdout 传递 JSON 响应；部分版本的 omnibox_sdk.log 会把日志
+// 序列化成 JSON 字符串写入同一 stdout，Go 宿主读 search/play 响应时先读到字符串，
+// 报 "cannot unmarshal string into Go value of type models.SpiderSearchResponse"。
+// 这里在模块加载最早期劫持 stdout：非对象/非数组的 JSON 字符串统一改走 stderr。
+const _origStdoutWrite = process.stdout.write.bind(process.stdout);
+const _origStderrWrite = process.stderr.write.bind(process.stderr);
+function _safeStderr(chunk, encoding, cb) {
+  try { return _origStderrWrite(chunk, encoding, cb); } catch (_) { return true; }
+}
+function _installStdoutGuard() {
+  if (process.stdout.__fdzysGuard || process.stdout.__omniStdoutGuard) return;
+  process.stdout.__fdzysGuard = true;
+  const state = { inJson: false, pending: "" };
+  const parseOk = (text) => { try { JSON.parse(text); return true; } catch (_) { return false; } };
+  const jsonStart = (text) => /^\{/.test(text) || /^\[\s*(?:\{|\[|"|-?\d|true|false|null|\])/.test(text);
+  process.stdout.write = function (chunk, encoding, cb) {
+    const text = String(chunk == null ? "" : chunk);
+    if (state.inJson) {
+      state.pending += text;
+      if (parseOk(state.pending.trim())) { state.pending = ""; state.inJson = false; }
+      return _origStdoutWrite(chunk, encoding, cb);
+    }
+    const trimmed = text.trim();
+    if (!trimmed) return _origStdoutWrite(chunk, encoding, cb);
+    let parsed;
+    let complete = false;
+    try { parsed = JSON.parse(trimmed); complete = true; } catch (_) {}
+    if (complete) {
+      // 完整 JSON：字符串/数字/布尔/null 是 SDK 日志，改走 stderr；对象/数组放行。
+      if (parsed === null || ["string", "number", "boolean"].includes(typeof parsed)) {
+        return _safeStderr(chunk, encoding, cb);
+      }
+      return _origStdoutWrite(chunk, encoding, cb);
+    }
+    if (jsonStart(trimmed)) {
+      // runner 分片写 JSON 响应：进入透传状态，后续分片全部放行。
+      state.inJson = true;
+      state.pending = text;
+      return _origStdoutWrite(chunk, encoding, cb);
+    }
+    // 其余纯文本统一视为日志，改走 stderr。
+    return _safeStderr(chunk, encoding, cb);
+  };
+}
+_installStdoutGuard();
 
 const OmniBox = (() => {
   try { return require("omnibox_sdk"); } catch (_) { return {}; }
@@ -1123,7 +1169,7 @@ async function play(params, context) {
   const flag = str(body.flag ?? "自动优选") || "自动优选";
   try {
     logI(`[play] 入口 playId=${rawId.slice(0, 180)} flag=${flag} from=${context?.from || "web"}`);
-    if (!rawId) throw new Error("playId 不能为空");
+    if (!rawId) throw new Error("playId 缺失");
     if (/^https?:\/\//i.test(rawId) && !rawId.includes(new URL(SITE).hostname)) {
       return { urls: [{ name: flag, url: rawId }], url: rawId, flag, header: playHeaders(), parse: isDirectMedia(rawId) ? 0 : 1, playUrl: "" };
     }
