@@ -1,5 +1,5 @@
 // @name 饭搭子影视
-// @version 1.0.2
+// @version 1.0.4
 // @author omnibox-spider
 // @description 饭搭子影视（fdzys.com）OmniBox Spider：官网 SSR 首页/分类/搜索/详情，播放页 player_aaaa 解直链，多线路自动探测 m3u8 + 首分片后自动选择最优线路；支持官方平台页面嗅探/parse=1 兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/饭搭子影视.js
@@ -10,6 +10,7 @@
 //  FDZYS_HOST            站点基址，默认 https://fdzys.com
 //  SITE_UA / FDZYS_UA    请求 UA；优先复用已有 SITE_UA
 //  FDZYS_COOKIE          可选站点 Cookie
+//  FDZYS_HTTP_MODE       请求通道 auto|sdk|native，默认 auto（优先 OmniBox.request，失败回退裸 HTTPS）
 //  FDZYS_TIMEOUT         普通页面请求超时毫秒，默认 15000
 //  FDZYS_CACHE_TTL       页面缓存秒数，默认 300
 //  FDZYS_DETAIL_TTL      详情/播放页缓存秒数，默认 600
@@ -47,6 +48,7 @@ const MAX_ROUTES = Math.max(1, Math.min(20, Number(process.env.FDZYS_MAX_ROUTES 
 const PROBE_LIMIT = Math.max(1, Math.min(8, Number(process.env.FDZYS_PROBE_LIMIT || 4) || 4));
 const PROBE_TIMEOUT = Math.max(1000, Number(process.env.FDZYS_PROBE_TIMEOUT || 4000) || 4000);
 const PROBE_CACHE_TTL = Math.max(0, Number(process.env.FDZYS_PROBE_CACHE_TTL || 600) || 0);
+const HTTP_MODE = String(process.env.FDZYS_HTTP_MODE || 'auto').trim().toLowerCase();
 
 // runner 用 stdout 传递 JSON 响应；日志全部写 stderr，避免异步日志污染下一集响应。
 function logI(message) {
@@ -86,6 +88,19 @@ function normalizeHost(value) {
 function absUrl(href, base = SITE) {
   try { return new URL(String(href || "").trim(), base).href; } catch (_) { return ""; }
 }
+function withTimeout(promise, ms, fallbackValue) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallbackValue), Math.max(500, ms));
+    Promise.resolve(promise).then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    }, () => {
+      clearTimeout(timer);
+      resolve(fallbackValue);
+    });
+  });
+}
+
 function sha1(value) {
   return crypto.createHash("sha1").update(String(value || "")).digest("hex");
 }
@@ -93,24 +108,32 @@ function cacheKey(prefix, raw) {
   return `fdzys:${prefix}:${sha1(raw).slice(0, 28)}`;
 }
 async function cacheGet(key) {
-  try {
-    if (OmniBox && typeof OmniBox.getCache === "function") {
-      const v = await OmniBox.getCache(key);
-      if (v != null) return typeof v === "string" ? JSON.parse(v) : v;
-    }
-  } catch (_) {}
   const hit = memCache.get(key);
-  if (!hit) return null;
-  if (Date.now() > hit.expire) { memCache.delete(key); return null; }
-  return hit.value;
+  if (hit) {
+    if (Date.now() > hit.expire) memCache.delete(key);
+    else return hit.value;
+  }
+  if (OmniBox && typeof OmniBox.getCache === "function") {
+    try {
+      const v = await withTimeout(Promise.resolve(OmniBox.getCache(key)), 800, null);
+      if (v != null) {
+        const parsed = typeof v === "string" ? JSON.parse(v) : v;
+        memCache.set(key, { value: parsed, expire: Date.now() + CACHE_TTL * 1000 });
+        return parsed;
+      }
+    } catch (_) { /* SDK 缓存不可用时静默回退 */ }
+  }
+  return null;
 }
 async function cacheSet(key, value, ttlSeconds) {
   const ttl = Math.max(0, Number(ttlSeconds || CACHE_TTL));
   memCache.set(key, { value, expire: Date.now() + ttl * 1000 });
   while (memCache.size > 320) memCache.delete(memCache.keys().next().value);
+  // SDK 持久缓存只做后台尽力而为，绝不 await 阻塞 handler 返回。
   try {
     if (OmniBox && typeof OmniBox.setCache === "function" && ttl > 0) {
-      await OmniBox.setCache(key, JSON.stringify(value), ttl);
+      const p = OmniBox.setCache(key, JSON.stringify(value), ttl);
+      if (p && typeof p.catch === "function") p.catch(() => {});
     }
   } catch (_) {}
 }
@@ -197,13 +220,12 @@ function buildHeaders(extra = {}) {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
     "Referer": SITE + "/",
-    "Origin": SITE,
     ...(COOKIE ? { Cookie: COOKIE } : {}),
     ...extra,
   };
 }
 
-function httpGet(url, options = {}, redirectLeft = 3) {
+function nativeHttpGet(url, options = {}, redirectLeft = 3) {
   return new Promise((resolve) => {
     let u;
     try { u = new URL(url); } catch (_) { return resolve({ statusCode: 0, headers: {}, body: "", bytes: 0, error: "非法 URL" }); }
@@ -230,7 +252,7 @@ function httpGet(url, options = {}, redirectLeft = 3) {
       if ([301, 302, 303, 307, 308].includes(status) && loc && redirectLeft > 0) {
         res.resume();
         const next = absUrl(loc, u.href);
-        if (next) return httpGet(next, options, redirectLeft - 1).then(done);
+        if (next) return nativeHttpGet(next, options, redirectLeft - 1).then(done);
       }
       const chunks = [];
       let bytes = 0;
@@ -254,13 +276,58 @@ function httpGet(url, options = {}, redirectLeft = 3) {
   });
 }
 
+function isBlockedHtml(body) {
+  const head = String(body || "").slice(0, 30000);
+  return /Just a moment|cf-challenge|cf-browser-verification|Attention Required|Access denied|403 Forbidden|请开启 JavaScript|请稍候|访问验证/i.test(head);
+}
+async function sdkRequest(url, options = {}) {
+  if (!OmniBox || typeof OmniBox.request !== "function") return null;
+  const headers = { ...buildHeaders(options.headers || {}), "Accept-Encoding": "identity" };
+  const task = Promise.resolve(OmniBox.request(url, { method: options.method || "GET", headers }));
+  const res = await withTimeout(task, Math.min(Math.max(2000, Number(options.timeout || TIMEOUT)), 8000), null);
+  if (!res) return null;
+  let body = typeof res.body === "string" ? res.body
+    : (Buffer.isBuffer(res.body) ? res.body.toString("utf8") : "");
+  if (body && body.charCodeAt(0) === 0x1f && body.charCodeAt(1) === 0x8b) {
+    try { body = zlib.gunzipSync(Buffer.from(body, "binary")).toString("utf8"); } catch (_) {}
+  }
+  const status = Number(res.statusCode ?? res.status ?? 0);
+  return { statusCode: status, headers: res.headers || {}, body, bytes: Buffer.byteLength(body), error: "", source: "sdk" };
+}
+async function httpGet(url, options = {}, redirectLeft = 3) {
+  if (HTTP_MODE !== "native") {
+    try {
+      const r = await sdkRequest(url, options);
+      if (r && r.statusCode === 200 && r.body && !isBlockedHtml(r.body)) return r;
+      if (r && r.statusCode && r.statusCode !== 200 && !isBlockedHtml(r.body || "")) {
+        logI(`[http] SDK 返回 HTTP ${r.statusCode}，回退裸请求 url=${String(url).slice(0, 100)}`);
+      }
+    } catch (err) {
+      logI(`[http] SDK 通道不可用，回退裸请求 url=${String(url).slice(0, 100)} err=${err.message || err}`);
+    }
+    if (HTTP_MODE === "sdk") {
+      return { statusCode: 0, headers: {}, body: "", bytes: 0, error: "SDK 请求失败", source: "sdk" };
+    }
+  }
+  const native = await nativeHttpGet(url, options, redirectLeft);
+  native.source = "native";
+  return native;
+}
+
 async function getHtml(url, options = {}, ttl = CACHE_TTL) {
   const key = cacheKey("html", url);
   const cached = await cacheGet(key);
   if (cached && typeof cached.body === "string" && cached.body) return cached.body;
-  const res = await httpGet(url, options);
-  if (res.statusCode !== 200 || !res.body) {
-    throw new Error(`HTTP ${res.statusCode} ${res.error || ""} bodyLen=${res.body.length}`);
+  let res = await httpGet(url, options);
+  if ((res.statusCode !== 200 || !res.body || isBlockedHtml(res.body)) && HTTP_MODE !== "sdk") {
+    logI(`[http] 首次响应异常，重试 url=${String(url).slice(0, 110)} status=${res.statusCode} src=${res.source || "?"}`);
+    res = await httpGet(url, {
+      ...options,
+      headers: { ...(options.headers || {}), "Cache-Control": "no-cache", Accept: "text/html,application/xhtml+xml,*/*" },
+    }, 3);
+  }
+  if (res.statusCode !== 200 || !res.body || isBlockedHtml(res.body)) {
+    throw new Error(`HTTP ${res.statusCode} ${res.error || ""} bodyLen=${res.body.length} src=${res.source || "?"}`);
   }
   await cacheSet(key, { body: res.body }, ttl);
   return res.body;
@@ -444,11 +511,16 @@ async function mapLimit(items, limit, fn) {
   await Promise.all(workers);
   return results;
 }
+function staticFiltersMap() {
+  const out = {};
+  for (const c of CLASS_LIST) out[c.type_id] = fallbackFilterGroups();
+  return out;
+}
 async function getFiltersMapCached() {
   const key = cacheKey("filters", "all");
   const cached = await cacheGet(key);
   if (cached && typeof cached === "object") return cached;
-  const rows = await mapLimit(CLASS_LIST, 3, async (item) => {
+  const rows = await mapLimit(CLASS_LIST, 2, async (item) => {
     try {
       const html = await getHtmlCached(`${SITE}/${item.key}/all`, FILTER_TTL);
       const groups = parseFilterGroups(html);
@@ -728,7 +800,7 @@ async function probeMedia(url, from, headers, opts = {}) {
   const depth = Number(opts.depth || 0);
   const t0 = Date.now();
   if (isTrustedFrom(from) && !direct) {
-    return { ok: true, score: 5000, kind: "trusted-page", url, ms: 0, parse: 1, direct: false };
+    return { ok: true, score: 900, kind: "trusted-page", url, ms: 0, parse: 1, direct: false };
   }
   if (direct && isM3u8(url)) {
     const r = await probeM3u8(url, headers, 0);
@@ -758,25 +830,13 @@ async function probeMedia(url, from, headers, opts = {}) {
     const sniffed = await sniffOrExtract(url, headers);
     if (sniffed && sniffed !== url) {
       const nested = await probeMedia(sniffed, from, headers, { direct: true, depth: depth + 1 });
-      return { ...nested, url: sniffed, fromPage: url, score: Math.max(nested.score || 0, 600) };
+      return { ...nested, url: sniffed, fromPage: url, score: Math.max(nested.score || 0, 1200) };
     }
   }
   if (isTrustedFrom(from)) {
-    return { ok: true, score: 5000, kind: "trusted-page", url, ms: Date.now() - t0, parse: 1, direct: false };
+    return { ok: true, score: 900, kind: "trusted-page", url, ms: Date.now() - t0, parse: 1, direct: false };
   }
   return { ok: false, score: 50, kind: "page", url, ms: Date.now() - t0, parse: 1, direct: false };
-}
-function withTimeout(promise, ms, fallbackValue) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(fallbackValue), Math.max(500, ms));
-    Promise.resolve(promise).then((value) => {
-      clearTimeout(timer);
-      resolve(value);
-    }, () => {
-      clearTimeout(timer);
-      resolve(fallbackValue);
-    });
-  });
 }
 
 async function probeMediaCached(url, from, headers, opts = {}) {
@@ -893,13 +953,14 @@ async function resolveCategoryUrl(categoryId, filters, page) {
 
 async function home(params, context) {
   try {
-    logI(`[home] from=${context?.from || "web"} 入口`);
+    logI(`[home] from=${context?.from || "web"} 入口 httpMode=${HTTP_MODE}`);
     const html = await getHtmlCached(`${SITE}/`, CACHE_TTL);
     const list = extractCards(html, 24);
-    let filters = {};
-    try { filters = await getFiltersMapCached(); }
-    catch (err) { logE(`[home] 筛选获取失败: ${err.message || err}`); }
-    logI(`[home] class=${CLASS_LIST.length} list=${list.length} filters=${Object.keys(filters).length}`);
+    // 首屏直接用静态筛选项，避免并发抓 6 个分类页拖垮宿主首屏；
+    // 真实筛选 href 在 category() 里按当前页 live chaining 获取。
+    const filters = staticFiltersMap();
+    getFiltersMapCached().catch(() => {});
+    logI(`[home] class=${CLASS_LIST.length} list=${list.length} filters=${Object.keys(filters).length} src=${httpGet.lastSource || "?"}`);
     return { class: CLASS_LIST.map((c) => ({ type_id: c.type_id, type_name: c.type_name })), list, filters };
   } catch (err) {
     logE(`[home] 失败: ${err.message || err}`);
@@ -1029,7 +1090,6 @@ function playHeaders() {
   return {
     "User-Agent": UA,
     "Referer": SITE + "/",
-    "Origin": SITE,
     "Accept": "*/*",
     ...(COOKIE ? { Cookie: COOKIE } : {}),
   };
@@ -1078,7 +1138,7 @@ async function play(params, context) {
     }
 
     const candidates = await collectAutoCandidates(token);
-    logI(`[play][auto] 候选线路=${candidates.length} autoProbe=${AUTO_PROBE ? 1 : 0} limit=${PROBE_LIMIT}`);
+    logI(`[play][auto] 候选线路=${candidates.length} autoProbe=${AUTO_PROBE ? 1 : 0} limit=${PROBE_LIMIT} firstUrl=${String(candidates[0]?.playUrl || "").slice(0, 130)}`);
     const header = playHeaders();
     if (!AUTO_PROBE) {
       const first = candidates[0];
@@ -1116,7 +1176,12 @@ async function play(params, context) {
       }
     });
 
-    const results = probed.filter(Boolean).sort((a, b) => (b.score - a.score) || (a.routeOrder - b.routeOrder) || (a.sid - b.sid));
+    const results = probed.filter(Boolean).sort((a, b) => {
+      const ap = Number(a.parse ?? 1) === 0 ? 1 : 0;
+      const bp = Number(b.parse ?? 1) === 0 ? 1 : 0;
+      if (ap !== bp) return bp - ap;
+      return (b.score - a.score) || (a.routeOrder - b.routeOrder) || (a.sid - b.sid);
+    });
     const good = results.filter((r) => r.url).slice(0, MAX_ROUTES);
     if (!good.length) throw new Error("所有线路均未返回地址");
     const best = good[0];
