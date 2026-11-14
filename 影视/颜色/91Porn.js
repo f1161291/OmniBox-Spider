@@ -1,6 +1,6 @@
 /**
  * @name 91porn
- * @version 2.2.0
+ * @version 2.2.1
  * @description 91porn.com 采集源（OmniBox Spider，单主站优先+SITE_HOSTS 可选容灾；列表封面/标题反混淆真值回填；返回形状守卫；列表耗时预算；SDK/Node 双通道传输 + 网络自检 + HTTP/SOCKS5 代理隧道；会话 cookie jar + 403 预热重试（应对出口 IP 拦截）；修复高清分类/搜索分页/作者解析/无效视频/直链规范）
  * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91Porn.js
  * @dependencies []
@@ -441,7 +441,15 @@ async function diagnoseNetwork(host) {
   const startedAt = Date.now();
   try {
     const res = await httpRequest(`${host}/index.php`, { timeout: 6000 });
-    return `可达 (HTTP ${res.statusCode}, ${Date.now() - startedAt}ms, ${String(res.body || '').length}B)`;
+    const len = String(res.body || '').length;
+    const cost = Date.now() - startedAt;
+    if (res.statusCode === 403 && len < 200) {
+      return `HTTP 403 + 仅 ${len}B（${cost}ms）→ Cloudflare 出口 IP 级拦截；换 UA/Cookie 无效，需 NINETYONE_PROXY_URL 换出口`;
+    }
+    if (res.statusCode >= 400) {
+      return `HTTP ${res.statusCode} + ${len}B（${cost}ms）→ 站点/边缘拒绝，非解析问题`;
+    }
+    return `可达 (HTTP ${res.statusCode}, ${cost}ms, ${len}B)`;
   } catch (e) {
     const msg = String((e && e.message) || e);
     const code = String((e && e.code) || '');
@@ -488,7 +496,12 @@ async function fetchWithFailover(path, options = {}) {
       // 这类情况换 UA/Cookie 都无效，只能换出口，因此单独打出可执行的处置建议。
       const ipBlocked = res.statusCode === 403 && bodyLen < 200;
       if (ipBlocked) {
-        logE(`[failover] ${host}${path} -> 403 且响应体仅 ${bodyLen}B`);
+        logE(`[failover] ${host}${path} -> 403 且响应体仅 ${bodyLen}B（Cloudflare 出口 IP 拦截）`);
+        if (!PROXY_URL && !globalThis.__ninetyoneIpBlockHinted) {
+          globalThis.__ninetyoneIpBlockHinted = true;
+          logE('[failover] 未配置 NINETYONE_PROXY_URL：换 UA/Cookie/Referer 均无效，必须换出口 IP');
+          logE('[failover] 处置：NINETYONE_PROXY_URL=http://127.0.0.1:7890 或 socks5://user:pass@127.0.0.1:1080');
+        }
         // 第一层补救：先用根路径建立会话 cookie，再重试原路径。
         // 实测站点对「无 cookie 的陌生机房 IP」会直接短 403，建 cookie 后多数可恢复。
         if (!options._cookieRetried) {
