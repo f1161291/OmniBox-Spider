@@ -1,9 +1,8 @@
 // @name GCAV
-// @version 1.0.0
+// @version 1.1.0
 // @author omnibox-spider
 // @description gcav.me 采集源：六大频道 + 排序筛选 + 搜索分页；列表 a.cover-group 取标题/封面/时长/热度；详情页 const source 解析 cloudfront / bunny 双线路预览直链，免费或带登录态时补 /v/{id}/manifest 完整 m3u8；播放直链→sniff→parse=1 三段式兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/GCAV.js
-// @indexs 1
 // @dependencies cheerio
 
 /**
@@ -26,12 +25,31 @@
  *      bunny      -> https://gc-b.skylines.pro/preview_mp4/{id}.mp4?token=...&expires=...（带签名，仍按直链处理）
  *    带 query 的 mp4/m3u8 一律 parse=0，不要因为 ?token= 误判成网页。
  * 7) 免费视频（has_access=true）或带登录 Cookie 时，GET /v/{id}/manifest 返回完整 m3u8 纯文本；
- *    VIP 受限视频返回空 body。无权限时只能拿到 preview_mp4 预览片，脚本照常返回并标注「预览」。
- * 8) 播放页缓存保守：home/category/search/detail 走短 TTL 缓存，play 不缓存（签名链接随时可能换）。
+ *    VIP 受限视频返回 200 + content-length: 0（空 body）。无权限时只能拿到 preview_mp4 预览片。
+ * 8) 【1.1.0 实测的关键事实】预览片不是前端截断，而是服务端只生成了 60 秒文件：
+ *      预览 https://gc.skylines.pro/preview_mp4/{id}.mp4
+ *        content-range: bytes 0-0/11567498  → 文件总长 11.5 MB
+ *        ffprobe duration = 60.000544 秒（60552/60551/59843 三个 id 全是 60.000544s）
+ *      完整 https://gc.skylines.pro/videos/{id}/{uuid}/manifest.m3u8（免费片 580 → 39 分钟）
+ *    那个 {uuid} 由服务端按会话权限动态签发，VIP 片详情页（117 KB）里 grep 不到任何 UUID；
+ *    伪造 cookie（vip=1/subscribed=1/has_access=1/premium=true）与 POST/XHR/Range 变体
+ *    实测全部返回空 body。也就是说：**这是授权问题，不是混淆问题**，
+ *    与 91Porn 那种「真源藏在页面里、解码即可」的情况本质不同，无法靠解码解决。
+ *    本源的做法：免费片给完整 m3u8，VIP 片明确标注「预览·60秒」并优先把免费片排前面，
+ *    配置 SITE_COOKIE（会员登录态）后 manifest 通过即自动切完整版。
+ * 9) 【1.1.0 实测的分布】首页 37 个卡片里只有 5 个免费（580/930/1652/21154/41964，
+ *    正好是 /free 频道那 5 个），其余 32 个全是 VIP 预览片；/free 频道本身 5/5 全免费。
+ *    也就是说免费片占比约 13%，且会重复出现在首页。据此：
+ *      - home 并行抓「首页 + /free」，把 /free 全部记为免费并置顶，零额外探测成本；
+ *      - 首页其余条目只做有限探测（GCAV_PROBE_LIMIT，默认 10），够把混在里面的免费片捞出来；
+ *      - 列表项的 vod_tag / vod_remarks 直接标「免费完整」或「预览60s」。
+ * 10) 播放页缓存保守：home/category/search/detail 走短 TTL 缓存，play 不缓存（签名链接随时可能换）。
  *
  * 【环境变量】（优先复用仓库既有命名）
  *  SITE_HOST        站点基址，默认 https://gcav.me；主域轮换时改这里即可
- *  SITE_COOKIE      可选，站点登录态 Cookie；带上后 /v/{id}/manifest 有机会返回完整正片
+ *  SITE_COOKIE      可选，站点登录态 Cookie（含 gcav_session）；带上后 /v/{id}/manifest
+ *                   对 VIP 片有机会返回完整正片 —— 这是拿到完整片的唯一途径
+ *  GCAV_FREE_FIRST  是否把免费片排在前面，默认 1（开启）；设 0 关闭
  *  GCAV_CACHE_TTL   页面缓存秒数，默认 600；新增变量，因为本源按页面类型再乘系数，
  *                   与仓库里其它站点专属 TTL（PORNY_CACHE_TTL 等）语义不同，避免串用别人的配置
  *
@@ -85,12 +103,19 @@ const CATEGORY_TTL = Math.max(0, Math.round(BASE_TTL * 0.8));
 const SEARCH_TTL = Math.max(0, Math.round(BASE_TTL * 0.8));
 const DETAIL_TTL = Math.max(0, Math.min(120, Math.round(BASE_TTL * 0.2)));
 const CACHE_PREFIX = "gcav:page:";
+// 免费片是否排前面（1=开，默认；实测 /free 频道 5/5 均 has_access=true，可放心前置）
+const FREE_FIRST = String(process.env.GCAV_FREE_FIRST || "1").trim() !== "0";
+// 列表阶段批量探测 access 的上限，避免首页被 N 个详情请求拖慢
+const ACCESS_PROBE_LIMIT = Math.max(0, Number(process.env.GCAV_PROBE_LIMIT || 10) || 10);
+const ACCESS_PROBE_CONCURRENCY = 4;
+const PREVIEW_SECONDS = 60;
 
 const CLASS_LIST = [
-  { type_id: "video", type_name: "最新视频" },
+  // 免费试看置顶：该频道实测 has_access 全为 true，manifest 直接给完整 m3u8
+  { type_id: "free", type_name: "免费完整❤️" },
+  { type_id: "video", type_name: "最新视频（含VIP预览）" },
   { type_id: "model-live", type_name: "主播实录" },
   { type_id: "amateur", type_name: "国产自拍" },
-  { type_id: "free", type_name: "免费试看" },
   { type_id: "japanese-uncensored", type_name: "日本无码" },
   { type_id: "western", type_name: "欧美" },
 ];
@@ -476,6 +501,81 @@ function buildLegacyFields(sources) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// access 探测与免费优先排序
+// ---------------------------------------------------------------------------
+
+/**
+ * 探测单个视频是否有完整片权限（同时拿 manifest，避免二次请求）。
+ * @returns {Promise<{hasAccess:boolean, manifest:string}>}
+ */
+async function probeAccess(videoId) {
+  const id = normalizeVideoId(videoId);
+  if (!id) return { hasAccess: false, manifest: "" };
+  const key = `gcav:access:${id}:${SITE_COOKIE ? "auth" : "anon"}`;
+  const cached = await getCachedText(key);
+  if (cached) {
+    try {
+      const obj = JSON.parse(cached);
+      if (obj && typeof obj.hasAccess === "boolean") return obj;
+    } catch (_) {}
+  }
+  let hasAccess = false;
+  let manifest = "";
+  try {
+    const body = (await requestText(`${HOST}/v/${id}/manifest`)).trim();
+    if (/^https?:\/\//i.test(body) || /\.m3u8/i.test(body)) {
+      manifest = body.split(/\s+/)[0].trim();
+      hasAccess = true;
+    }
+  } catch (e) {
+    log("info", `[probe] ${id} manifest 不可用: ${e?.message || e}`);
+  }
+  const result = { hasAccess, manifest };
+  await setCachedText(key, JSON.stringify(result), DETAIL_TTL);
+  return result;
+}
+
+/** 给列表项打 access 标记：只探前 N 个，失败的按预览处理，绝不阻断列表 */
+async function markAccess(list, tag) {
+  if (!Array.isArray(list) || !list.length) return list;
+  const limit = Math.min(ACCESS_PROBE_LIMIT, list.length);
+  if (limit <= 0) return list;
+  let ok = 0;
+  const targets = list.slice(0, limit);
+  const results = await mapLimit(targets, ACCESS_PROBE_CONCURRENCY, async (item) => {
+    const r = await probeAccess(item.vod_id);
+    if (r.hasAccess) ok += 1;
+    return r;
+  });
+  targets.forEach((item, i) => {
+    const r = results[i] || { hasAccess: false };
+    item._hasAccess = !!r.hasAccess;
+  });
+  log("info", `[${tag}] access 探测完成: 探测=${limit}/${list.length}, 免费=${ok}`);
+  return list;
+}
+
+/** 免费片排前；同组内保持站点原顺序（稳定排序） */
+function sortFreeFirst(list, tag) {
+  if (!FREE_FIRST || !Array.isArray(list) || list.length <= 1) return list;
+  const free = list.filter((x) => x._hasAccess === true);
+  const rest = list.filter((x) => x._hasAccess !== true);
+  if (!free.length) return list;
+  log("info", `[${tag}] 免费优先排序: 免费=${free.length}, 其余=${rest.length}`);
+  return free.concat(rest);
+}
+
+/** 列表项补充可见标记（vod_remarks 展示给用户） */
+function decorateListRemarks(item) {
+  if (!item) return item;
+  const base = String(item.vod_remarks || "").replace(/\s*·?\s*(完整|预览.*)$/, "").trim();
+  const mark = item._hasAccess === true ? "完整" : `预览${PREVIEW_SECONDS}s`;
+  item.vod_remarks = [base, mark].filter(Boolean).join(" · ");
+  item.vod_tag = item._hasAccess === true ? "免费完整" : "VIP预览";
+  return item;
+}
+
 function emptyPage(page = 1) {
   return { page: Number(page) || 1, pagecount: 0, total: 0, list: [] };
 }
@@ -497,19 +597,67 @@ function pageResult(list, page, pagecount) {
 async function home(params, context) {
   try {
     const from = context?.from || "web";
-    log("info", `[home] from=${from}, host=${HOST}`);
-    const url = `${HOST}/`;
-    log("info", `[home] 请求 URL=${url}`);
-    const html = await fetchHtml(url, HOME_TTL);
-    const list = parseList(html, "video");
+    log("info", `[home] from=${from}, host=${HOST}, freeFirst=${FREE_FIRST}`);
+    const homeUrl = `${HOST}/`;
+    const freeUrl = `${HOST}/free`;
+    log("info", `[home] 请求 URL=${homeUrl} + ${freeUrl}`);
+
+    // 首页 + /free 并行抓：/free 整页都是免费完整片，是免费内容最可靠的来源
+    const [homeHtml, freeHtml] = await Promise.all([
+      fetchHtml(homeUrl, HOME_TTL),
+      fetchHtml(freeUrl, HOME_TTL).catch((e) => {
+        log("info", `[home] /free 抓取失败，仅用首页: ${e?.message || e}`);
+        return "";
+      }),
+    ]);
+
+    const freeList = freeHtml ? parseList(freeHtml, "free") : [];
+    const freeIds = new Set(freeList.map((v) => v.vod_id));
+    let list = parseList(homeHtml, "video");
+
+    // 首页里落在 /free 名单上的，直接认定免费，不再探测
+    list.forEach((item) => {
+      if (freeIds.has(item.vod_id)) item._hasAccess = true;
+    });
+
+    // 剩余的做有限探测，把混在首页里的其它免费片捞出来
+    const unknown = list.filter((item) => item._hasAccess !== true);
+    if (unknown.length && ACCESS_PROBE_LIMIT > 0) {
+      const targets = unknown.slice(0, ACCESS_PROBE_LIMIT);
+      const results = await mapLimit(targets, ACCESS_PROBE_CONCURRENCY, async (item) => {
+        try { return await probeAccess(item.vod_id); } catch (_) { return { hasAccess: false, manifest: "" }; }
+      });
+      targets.forEach((item, i) => {
+        const r = results[i];
+        if (r && r.hasAccess) item._hasAccess = true;
+        else item._hasAccess = false;
+      });
+    }
+
+    let merged = list;
+    if (FREE_FIRST && freeList.length) {
+      // /free 独有的免费片补到最前（去重），保证首屏一定有完整片可看
+      const have = new Set(list.map((v) => v.vod_id));
+      const extra = freeList
+        .filter((v) => !have.has(v.vod_id))
+        .map((v) => ({ ...v, _hasAccess: true }));
+      merged = sortFreeFirst(extra.concat(list), "home");
+      log("info", `[home] 合并 /free: 新增免费=${extra.length}, 首页免费=${list.filter((v) => v._hasAccess === true).length}`);
+    } else {
+      merged = sortFreeFirst(list, "home");
+    }
+
+    merged = merged.map(decorateListRemarks);
+
     const filters = {};
     for (const item of CLASS_LIST) {
       filters[item.type_id] = [
         { key: "sort", name: "排序", init: "", value: SORT_OPTIONS },
       ];
     }
-    log("info", `[home] 返回分类=${CLASS_LIST.length}, 推荐=${list.length}`);
-    return { class: CLASS_LIST, filters, list };
+    const freeCount = merged.filter((v) => v._hasAccess === true).length;
+    log("info", `[home] 返回分类=${CLASS_LIST.length}, 推荐=${merged.length}, 免费=${freeCount}`);
+    return { class: CLASS_LIST, filters, list: merged };
   } catch (e) {
     log("error", `[home] 失败: ${e?.message || e}`);
     return { class: [], filters: {}, list: [] };
@@ -527,9 +675,17 @@ async function category(params, context) {
     log("info", `[category] 请求 URL=${url}`);
 
     const html = await fetchHtml(url, CATEGORY_TTL);
-    const list = parseList(html, categoryId);
+    let list = parseList(html, categoryId);
+    // 免费频道整页都是完整片，不必逐条探测；其它频道探测后免费排前
+    if (categoryId === "free") {
+      list.forEach((item) => { item._hasAccess = true; });
+    } else {
+      list = await markAccess(list, "category");
+      list = sortFreeFirst(list, "category");
+    }
+    list = list.map(decorateListRemarks);
     const pagecount = parsePageCount(html, 1);
-    log("info", `[category] 返回 list=${list.length}, pagecount=${pagecount}, pagecountRaw=${pagecount}`);
+    log("info", `[category] 返回 list=${list.length}, pagecount=${pagecount}`);
     return pageResult(list, page, pagecount);
   } catch (e) {
     log("error", `[category] 失败: ${e?.message || e}`);
@@ -556,7 +712,9 @@ async function search(params, context) {
     log("info", `[search] 请求 URL=${finalUrl}`);
 
     const html = await fetchHtml(finalUrl, SEARCH_TTL);
-    const list = parseList(html, "video");
+    let list = parseList(html, "video");
+    list = await markAccess(list, "search");
+    list = sortFreeFirst(list, "search").map(decorateListRemarks);
     const pagecount = parsePageCount(html, 1);
     log("info", `[search] 返回 list=${list.length}, pagecount=${pagecount}`);
     return pageResult(list, page, pagecount);
@@ -597,17 +755,18 @@ async function detail(params, context) {
       };
     });
 
-    // 完整版 m3u8：免费视频直接给，VIP 受限时带 SITE_COOKIE 再试
+    // 完整版 m3u8：免费片直接给；VIP 片带 SITE_COOKIE 再试一次。
+    // probeAccess 内部按 id 缓存，列表阶段猜过的这里不会再打一遍。
     let manifest = "";
+    let probed = null;
     try {
-      const body = (await requestText(`${HOST}/v/${videoId}/manifest`)).trim();
-      if (/^https?:\/\//i.test(body) || /\.m3u8/i.test(body)) {
-        manifest = body.split(/\s+/)[0].trim();
-      }
+      probed = await probeAccess(videoId);
+      manifest = probed.manifest || "";
     } catch (e) {
       log("info", `[detail] manifest 不可用: ${e?.message || e}`);
     }
-    log("info", `[detail] manifest=${manifest ? "命中完整片" : "无完整片（仅预览可用）"}`);
+    const hasFull = !!(manifest || info.hasAccess || (probed && probed.hasAccess));
+    log("info", `[detail] manifest=${manifest ? "命中完整片" : "无完整片（仅预览可用）"}, hasFull=${hasFull}`);
 
     const sources = [];
     for (const item of lineResults) {
@@ -622,13 +781,15 @@ async function detail(params, context) {
         pic: info.vod_pic,
         line: line.code,
         lineName: line.name,
-        kind: item.hasAccess ? "full" : "preview",
+        kind: hasFull ? "full" : "preview",
       };
+      // 有完整片时线路名不动；只有预览时把限制写在线路名上，避免用户以为播放器坏了
+      const lineLabel = hasFull ? line.name : `${line.name}（预览${PREVIEW_SECONDS}s）`;
       sources.push({
-        name: line.name,
+        name: lineLabel,
         episodes: [
           {
-            name: item.hasAccess ? "正片" : "预览",
+            name: hasFull ? "正片" : `预览${PREVIEW_SECONDS}s`,
             playId: encodePlayId(item.source, meta),
           },
         ],
@@ -636,8 +797,9 @@ async function detail(params, context) {
     }
 
     if (manifest) {
-      sources.push({
-        name: "完整版",
+      // 完整片排最前：用户点开默认就是正片，不用自己找
+      sources.unshift({
+        name: "完整版❤️",
         episodes: [
           {
             name: "完整版",
@@ -676,14 +838,23 @@ async function detail(params, context) {
     }
 
     const legacy = buildLegacyFields(sources);
+    // 预览限制写进 remarks/content，宿主的详情页一眼可见，不会误判成播放故障
+    const remarks = hasFull
+      ? [info.vod_remarks, "完整"].filter(Boolean).join(" · ")
+      : [info.vod_remarks, `预览${PREVIEW_SECONDS}s·VIP可看完整`].filter(Boolean).join(" · ");
+    const content = hasFull
+      ? info.vod_content
+      : [info.vod_content, `本片为 VIP 资源，未登录仅提供 ${PREVIEW_SECONDS} 秒预览；配置 SITE_COOKIE 后可自动切完整版。`]
+        .filter(Boolean).join("\n");
     const vod = {
       vod_id: videoId,
       vod_name: info.vod_name,
       vod_pic: info.vod_pic,
       type_id: "video",
       type_name: "GCAV",
-      vod_content: info.vod_content,
-      vod_remarks: info.vod_remarks,
+      vod_content: content,
+      vod_remarks: remarks,
+      vod_tag: hasFull ? "完整" : "VIP预览",
       vod_play_sources: sources,
       ...legacy,
     };
@@ -719,11 +890,35 @@ async function play(params, context) {
     const headers = buildPlayHeaders();
     log("info", `[play] resolved url=${url.slice(0, 200)}`);
 
+    // 播放前二次确认：若这次拿到了完整 manifest（含配了 SITE_COOKIE 后刚生效），
+    // 直接切正片，而不是回放 60 秒预览。
+    if (meta.kind !== "full" && meta.id) {
+      try {
+        const probed = await probeAccess(meta.id);
+        if (probed.manifest && isMediaUrl(probed.manifest)) {
+          log("info", `[play] 二次探测拿到完整片，切换正片: ${probed.manifest.slice(0, 140)}`);
+          recordHistory({ ...meta, kind: "full", lineName: "完整版" }, probed.manifest);
+          return {
+            urls: [{ name: "完整版", url: probed.manifest }],
+            flag,
+            header: headers,
+            parse: 0,
+          };
+        }
+      } catch (e) {
+        log("info", `[play] 二次探测失败，继续用现有地址: ${e?.message || e}`);
+      }
+    }
+
     if (isMediaUrl(url)) {
-      log("info", "[play] 命中媒体直链，parse=0");
+      const isPreview = meta.kind !== "full";
+      log("info", `[play] 命中媒体直链，parse=0, kind=${meta.kind || "unknown"}`);
       recordHistory(meta, url);
       return {
-        urls: [{ name: meta.kind === "full" ? "完整版" : (meta.lineName || "播放"), url }],
+        urls: [{
+          name: isPreview ? `预览${PREVIEW_SECONDS}s（VIP可看完整）` : (meta.lineName || "完整版"),
+          url,
+        }],
         flag,
         header: headers,
         parse: 0,
