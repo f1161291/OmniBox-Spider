@@ -1,7 +1,7 @@
 // @name PornHub
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
-// @description cn.pornhub.com 采集源：首页推荐 + 17 个分类（巨乳/巨屌/内射/女同等）+ 排序 + 搜索分页；列表取 pcVideoListItem 卡片（带 viewkey、封面、时长、观看数、评分），详情页从 flashvars_{id} 解析 mediaDefinitions 的 HLS 多档直链（240/480/720/1080）
+// @description cn.pornhub.com 采集源：首页推荐 + 17 个分类（巨乳/巨屌/内射/女同等）+ 排序 + 搜索分页；列表取 pcVideoListItem 卡片（带 viewkey、封面、时长、观看数、评分），详情页从 flashvars_{id} 解析 mediaDefinitions 的 HLS 直链（仅保留 1080P/720P，1080P 优先）
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/PornHub.js
 // @dependencies cheerio
 
@@ -29,6 +29,8 @@
  *      mediaDefinitions 数组里每项是一档清晰度：
  *        { format:"hls", quality:"720", defaultQuality:true/false, videoUrl:"https://ev-h.phncdn.com/hls/.../720P_4000K_xxxx.mp4/master.m3u8?validfrom=...&validto=...&ipa=1&hdl=-1&hash=..." }
  *      实测有 1080/720/480/240 四档 HLS（另有 mp4 分组走 get_media，本源只用 HLS）。
+ *      【1.0.1】按需求只保留 1080P 与 720P 两档，顺序固定为 1080P → 720P；
+ *      480/240 与未知档位在解析阶段直接丢弃，不再展示给用户。
  * 5) 【播放关键事实·必须读】视频 CDN（ev-h.phncdn.com / ev.phncdn.com / pix-fl.phncdn.com 等）
  *      在「本机出口 192.9.131.57 / Oracle 圣何塞」下 HTTP 层被连接重置（TLS 握手成功、但 GET 直接
  *      TCP RST），签名未过期（validto 在 ~1 小时内）也无法取流。
@@ -466,14 +468,14 @@ function parseMediaDefinitions(html) {
     if (fmt !== "hls") continue;
     let url = String(d.videoUrl || "").replace(/\\/g, "");
     if (!/^https?:\/\//i.test(url)) continue;
-    out.push({
-      quality: String(d.quality || "").trim() || "未知",
-      def: !!d.defaultQuality,
-      url,
-    });
+    const q = String(d.quality || "").trim();
+    // 只保留 1080P / 720P 两档，低清（240/480）与未知档一律丢弃
+    if (q !== "1080" && q !== "720") continue;
+    out.push({ quality: q, def: !!d.defaultQuality, url });
   }
-  // 默认清晰度排第一
-  out.sort((a, b) => (b.def ? 1 : 0) - (a.def ? 1 : 0));
+  // 1080P 固定优先，其次 720P；同档内保持站点原顺序
+  const RANK = { "1080": 0, "720": 1 };
+  out.sort((a, b) => (RANK[a.quality] ?? 99) - (RANK[b.quality] ?? 99));
   return out;
 }
 
@@ -578,13 +580,14 @@ async function play(params, context) {
       };
     }
 
-    // 仅 viewkey：回源详情页重新解析 mediaDefinitions（取默认档 / 最高清）
+    // 仅 viewkey：回源详情页重新解析 mediaDefinitions（优先 1080P，其次 720P）
     if (viewkey) {
       const detailUrl = `${HOST}/view_video.php?viewkey=${viewkey}`;
       const html = await fetchHtml(detailUrl, DETAIL_TTL);
       const media = parseMediaDefinitions(html);
       if (media.length) {
-        const pick = media.find((m) => m.def) || media[0];
+        // parseMediaDefinitions 已按 1080P → 720P 排好序，直接取第一档
+        const pick = media[0];
         log("info", `[play] 回源解析到 HLS，quality=${pick.quality}P，parse=0`);
         return {
           urls: [{ name: `${pick.quality}P`, url: pick.url }],
