@@ -1,4 +1,10 @@
 // @name 🔞-奥斯卡-
+// @version 3.8.4
+// @author omnibox-spider
+// @description 奥斯卡采集站（aosikazy.com，MacCMS 标准 JSON 接口）：直连 ac=list/class/videolist/detail 接口，支持首页推荐、分类列表、关键词搜索、详情多线路分集解析与播放；弹幕可选（DANMU_API）
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/-奥斯卡-.js
+
+/**
  * OmniBox 采集站直接爬虫脚本
  *
  * 此脚本直接调用采集站接口获取数据，参考 OmniBox 后端实现逻辑
@@ -52,6 +58,29 @@ const DANMU_API = process.env.DANMU_API || "";
  * @param {Object} params - 查询参数对象
  * @returns {Promise<Object>} API 响应数据
  */
+const API_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+// 该采集站存在间歇性风控：短时间连续请求会返回 418 + HTML 拦截页（无 JS 挑战，退避后即恢复）。
+// 单次失败直接抛出会让首页与搜索整块空掉，因此做有限次退避重试。
+const API_RETRY = Math.max(0, Number(process.env.OSIKA_RETRY || 3) || 3);
+const RETRY_BASE_MS = Math.max(100, Number(process.env.OSIKA_RETRY_BASE_MS || 1200) || 1200);
+const RETRYABLE_STATUS = new Set([0, 418, 429, 302, 403, 500, 502, 503, 504]);
+
+function sleep(ms) {
+  // 某些运行器不给全局定时器，退化为立即返回，保证重试链路不因缺 setTimeout 直接崩
+  if (typeof setTimeout !== "function") return Promise.resolve();
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function looksLikeJson(text) {
+  const s = String(text || "").trim();
+  return s.startsWith("{") || s.startsWith("[");
+}
+
+/**
+ * 发送 HTTP 请求到采集站（带有限重试）
+ * @param {Object} params - 查询参数对象
+ * @returns {Promise<Object>} API 响应数据
+ */
 async function requestSiteAPI(params = {}) {
   if (!SITE_API) {
     throw new Error("请配置采集站 API 地址（SITE_API 环境变量）");
@@ -65,26 +94,51 @@ async function requestSiteAPI(params = {}) {
     }
   });
 
-  OmniBox.log("info", `请求采集站: ${url.toString()}`);
+  const target = url.toString();
+  OmniBox.log("info", `请求采集站: ${target}`);
 
-  try {
-    const response = await OmniBox.request(url.toString(), {
-      method: "GET",
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      },
-    });
+  let lastError = null;
+  for (let attempt = 0; attempt <= API_RETRY; attempt++) {
+    try {
+      const response = await OmniBox.request(target, {
+        method: "GET",
+        headers: {
+          "User-Agent": API_UA,
+          Accept: "application/json, text/plain, */*",
+          "Accept-Language": "zh-CN,zh;q=0.9",
+          Referer: "https://aosikazy.com/",
+        },
+      });
 
-    if (response.statusCode !== 200) {
-      throw new Error(`HTTP ${response.statusCode}: ${response.body}`);
+      const status = Number(response?.statusCode);
+      const body = String(response?.body ?? "");
+
+      if (status !== 200) {
+        throw new Error(`HTTP ${status}: ${body.slice(0, 120)}`);
+      }
+      // 命中拦截页时 body 是 HTML，不能当 JSON 解析
+      if (!looksLikeJson(body)) {
+        throw new Error(`响应非 JSON（疑似风控拦截）: ${body.slice(0, 120)}`);
+      }
+      return JSON.parse(body);
+    } catch (error) {
+      lastError = error;
+      const msg = String(error?.message || error);
+      const retryable = RETRYABLE_STATUS.has(Number((msg.match(/HTTP (\d+)/) || [])[1])) ||
+        /非 JSON|timeout|ECONN|socket|reset/i.test(msg);
+      if (attempt < API_RETRY && retryable) {
+        // 指数退避并封顶：418 风控通常 1s 以上才恢复，但不能让宿主等太久（首屏需尽快出结果）
+        const wait = Math.min(3000, RETRY_BASE_MS * Math.pow(2, attempt));
+        OmniBox.log("info", `请求失败，${wait}ms 后重试(${attempt + 1}/${API_RETRY}): ${msg.slice(0, 100)}`);
+        await sleep(wait);
+        continue;
+      }
+      break;
     }
-
-    const data = JSON.parse(response.body);
-    return data;
-  } catch (error) {
-    OmniBox.log("error", `请求采集站失败: ${error.message}`);
-    throw error;
   }
+
+  OmniBox.log("error", `请求采集站失败: ${lastError?.message || lastError}`);
+  throw lastError || new Error("请求采集站失败");
 }
 
 /**
@@ -605,8 +659,8 @@ async function search(params) {
     OmniBox.log("info", `搜索视频: keyword=${keyword}, page=${page}`);
 
     const response = await requestSiteAPI({
-      ac: "list",
-      wd: keyword,
+      ac: "videolist",
+      keywords: keyword,
       pg: String(page),
     });
 
