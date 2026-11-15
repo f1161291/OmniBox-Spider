@@ -1,7 +1,7 @@
 // @name 黄果短剧
 // @author 宝宝巴士
-// @description 黄果短剧：从 https://huangguoai.com/go-home/ 官方地址发布页动态获取域名并健康度轮转（主域 + 3 条线路）；分类/搜索/详情/播放；播放走 POST /api/videos/{id}/episodes/{ep}/playback 直取 m3u8 直链
-// @version 1.2.0
+// @description 黄果短剧：每 6 小时自动从 go-home 等 3 个官方发布页获取最新域名（兼容两种页面结构）+ 健康度轮转 + 故障即时刷新；分类/搜索/详情/播放；POST playback 直取 m3u8
+// @version 1.3.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/黄果短剧.js
 
 const OmniBox = require("omnibox_sdk");
@@ -28,6 +28,9 @@ const UA = "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, l
 //   同构主站（220KB 首页 + POST playback 返回 status:1 + streams.main），
 //   其余是地址发布页/跳转页/介绍页，不能当采集源，因此会自动按「可用性探测」筛掉。
 // 默认种子：主域 + go-home 发布页域名；运行时调用 refreshHosts() 拉取最新清单。
+// 【1.3.0 更新频率】默认每 6 小时主动刷新一次（HUANGGUO_HOSTS_REFRESH 可调，单位小时）；
+// 首次请求即刷新；全部域名失败时立即强制刷新（1 分钟内最多一次）。
+// 上次刷新时间与域名池写入 SDK 持久缓存 huangguo:hosts:v1（TTL 30 天），跨进程/重启不丢。
 const GO_HOME = "https://huangguoai.com/go-home/";
 const DEFAULT_HOSTS = [
   "https://huangguoai.com",
@@ -88,18 +91,53 @@ function hostOrder() {
 
 /**
  * 从官方地址发布页拉取最新域名清单并并入 HOSTS。
- * 只解析 hg-homeway-line / hg-homeway-permanent 两个区块里的域名文本，
- * 避免把 t.me / x.com / pic 图床等无关域名混进来。
- * 结果按可用性验证（能返回同构首页才加入轮换池），验证失败不加入。
+ *
+ * 【两种页面结构，实测 2026-11-15】
+ *  A) 主发布页 https://huangguoai.com/go-home/（114KB）
+ *     article.hg-homeway-line > p.hg-homeway-line__domain
+ *     article.hg-homeway-permanent__item > span.hg-homeway-permanent__domain
+ *     a.hg-homeway-line__enter[href]
+ *  B) 备用发布页 https://huangguoai.ai/ 与 https://hgai15.com/（77KB，根路径！）
+ *     article.route-card[data-url] + span.url-text + a.use-btn[href]
+ *     ⚠️ 这两站的 /go-home/ 路径实测 404，必须请求根路径。
+ *     实测含新域名 af08.bmikbxhi.cc / huangguoai.io / 40dca.vlkotdgb.cc。
+ * 发布页还混有 t.me / x.com / pic 图床 / 统计域，需过滤；
+ * 且部分候选是地址页/跳转页，加入池前用轻量 API 探测「能返回 JSON」才算同构主站。
  */
-async function refreshHosts() {
-  const pages = [GO_HOME];
-  // 备用发布页（实测同结构）
-  for (const d of ["https://huangguoai.ai", "https://hgai15.com"]) {
-    pages.push(`${d}/go-home/`);
-  }
+const REFRESH_PAGES = [
+  "https://huangguoai.com/go-home/",
+  "https://huangguoai.ai/",
+  "https://hgai15.com/",
+];
+
+function extractDomainsFromPublisher(html) {
   const found = new Set();
-  for (const page of pages) {
+  const s = String(html || "");
+  // 结构 A：主发布页
+  const reA = /(?:hg-homeway-line__domain|hg-homeway-permanent__domain)[^>]*>\s*([a-z0-9.-]+\.[a-z]{2,})\s*</gi;
+  let m;
+  while ((m = reA.exec(s)) !== null) found.add(m[1].toLowerCase());
+  const reA2 = /class="[^"]*hg-homeway-line__enter[^"]*"[^>]*href="(https?:\/\/[a-z0-9.-]+)/gi;
+  while ((m = reA2.exec(s)) !== null) {
+    try { found.add(new URL(m[1]).hostname.toLowerCase()); } catch (_) {}
+  }
+  // 结构 B：备用发布页
+  const reB = /<article[^>]*class="[^"]*route-card[^"]*"[^>]*data-url="(https?:\/\/[a-z0-9.-]+)/gi;
+  while ((m = reB.exec(s)) !== null) {
+    try { found.add(new URL(m[1]).hostname.toLowerCase()); } catch (_) {}
+  }
+  const reB2 = /class="url-text"[^>]*>\s*([a-z0-9.-]+\.[a-z]{2,})\s*</gi;
+  while ((m = reB2.exec(s)) !== null) found.add(m[1].toLowerCase());
+  const reB3 = /class="[^"]*use-btn[^"]*"[^>]*href="(https?:\/\/[a-z0-9.-]+)/gi;
+  while ((m = reB3.exec(s)) !== null) {
+    try { found.add(new URL(m[1]).hostname.toLowerCase()); } catch (_) {}
+  }
+  return found;
+}
+
+async function refreshHosts() {
+  const found = new Set();
+  for (const page of REFRESH_PAGES) {
     try {
       const res = await OmniBox.request(page, {
         method: "GET",
@@ -108,12 +146,9 @@ async function refreshHosts() {
       });
       const html = asText(res);
       if (!html) continue;
-      const re = /(?:hg-homeway-line__domain|hg-homeway-permanent__domain)[^>]*>\s*([a-z0-9.-]+\.[a-z]{2,})\s*</gi;
-      let m;
-      while ((m = re.exec(html)) !== null) found.add(m[1].toLowerCase());
-      // 「立即进入」按钮的 href 也是有效入口
-      const re2 = /class="[^"]*hg-homeway-line__enter[^"]*"[^>]*href="(https?:\/\/[a-z0-9.-]+)/gi;
-      while ((m = re2.exec(html)) !== null) found.add(new URL(m[1]).hostname.toLowerCase());
+      const got = extractDomainsFromPublisher(html);
+      for (const d of got) found.add(d);
+      log("info", `[hosts] 解析发布页 ${page} -> ${got.size} 个域名`);
     } catch (e) {
       log("info", `[hosts] 拉取发布页失败 ${page}: ${(e && e.message) || e}`);
     }
@@ -122,10 +157,9 @@ async function refreshHosts() {
   for (const host of found) {
     const u = normalizeHost(host);
     if (!u || HOSTS.includes(u)) continue;
-    // 只收看起来像主站/线路域名的，排除图床/社交/统计
-    if (/pic\.|drleao|google|yandex|t\.me|x\.com|tiktok|youtube|pages\.dev|huangguojob/i.test(u)) continue;
-    // 【可用性验证】go-home 里混有 301 跳转页、地址发布页、介绍页，
-    // 直接塞进池会导致大量无效请求。用一个轻量 API 探测：能返回 JSON 才算同构主站。
+    // 只收看起来像主站/线路域名的，排除图床/社交/统计/招聘
+    if (/pic\.|drleao|google|yandex|t\.me|x\.com|tiktok|youtube|pages\.dev|huangguojob|mc\./i.test(u)) continue;
+    // 【可用性验证】轻量 API 探测：能返回 JSON 才算同构主站
     let ok = false;
     try {
       const res = await rawRequest(`${u}/api/videos?sort=hot&page=1&size=1`, { method: "GET" });
@@ -142,6 +176,70 @@ async function refreshHosts() {
   }
   if (added) log("info", `[hosts] 本次新增 ${added} 个，当前池共 ${HOSTS.length} 个`);
   return added;
+}
+
+/**
+ * 定期主动刷新：距上次成功刷新超过 HOSTS_REFRESH_INTERVAL 就重新拉发布页。
+ * 时间戳与域名池写入 SDK 持久缓存（huangguo:hosts），跨进程/重启仍有效；
+ * 缓存不可用时退化为进程内变量。首次启动必刷新一次（把发布页上的新线路纳入池）。
+ */
+const HOSTS_REFRESH_INTERVAL = (() => {
+  const raw = String(process.env.HUANGGUO_HOSTS_REFRESH || "").trim();
+  const h = raw === "" ? 6 : Number(raw); // 默认 6 小时
+  return Math.max(0, Number.isFinite(h) ? h : 6) * 3600 * 1000;
+})();
+const HOSTS_CACHE_KEY = "huangguo:hosts:v1";
+let lastHostsRefresh = 0;
+let hostsRefreshInFlight = null;
+
+/** 从 SDK 持久缓存恢复时间戳与域名池（进程内只做一次） */
+let cacheRestored = false;
+async function restoreHostsCache() {
+  if (cacheRestored) return;
+  cacheRestored = true;
+  try {
+    const saved = await cacheGet(HOSTS_CACHE_KEY);
+    if (saved && Array.isArray(saved.hosts)) {
+      for (const h of saved.hosts) {
+        const u = normalizeHost(h);
+        if (u && !HOSTS.includes(u)) {
+          HOSTS.push(u);
+          hostHealth[u] = hostHealth[u] || { fail: 0, okAt: 0, blockedAt: 0 };
+        }
+      }
+    }
+    if (saved && Number(saved.at) > lastHostsRefresh) lastHostsRefresh = Number(saved.at);
+    if (lastHostsRefresh) {
+      log("info", `[hosts] 已从缓存恢复域名池（${HOSTS.length} 个），上次刷新 ${new Date(lastHostsRefresh).toISOString()}`);
+    }
+  } catch (_) {}
+}
+
+async function ensureHostsFresh(force) {
+  // 关键：必须先恢复持久缓存里的时间戳，再判断间隔，
+  // 否则新进程 lastHostsRefresh=0 会误判成「从未刷新」而每次都重新拉发布页。
+  await restoreHostsCache();
+  const now = Date.now();
+  if (!force && lastHostsRefresh && now - lastHostsRefresh < HOSTS_REFRESH_INTERVAL) return 0;
+  // 并发去重：同一时刻只跑一次
+  if (hostsRefreshInFlight) return hostsRefreshInFlight;
+  hostsRefreshInFlight = (async () => {
+    try {
+      log("info", `[hosts] 定时刷新开始（间隔 ${HOSTS_REFRESH_INTERVAL / 3600000}h，上次 ${lastHostsRefresh ? new Date(lastHostsRefresh).toISOString() : "无"}）`);
+      const added = await refreshHosts();
+      lastHostsRefresh = Date.now();
+      // 用长 TTL 持久化（30 天）；不依赖 ttl=0 的语义（不同宿主可能是「立即过期」）
+      await cacheSet(HOSTS_CACHE_KEY, { at: lastHostsRefresh, hosts: HOSTS.slice() }, 30 * 24 * 3600);
+      log("info", `[hosts] 定时刷新完成，新增 ${added} 个，池共 ${HOSTS.length} 个`);
+      return added;
+    } catch (e) {
+      log("info", `[hosts] 定时刷新异常: ${(e && e.message) || e}`);
+      return 0;
+    } finally {
+      hostsRefreshInFlight = null;
+    }
+  })();
+  return hostsRefreshInFlight;
 }
 
 // Cloudflare Worker 反代（只作为列表/详情/搜索的兜底，POST 播放接口不支持）
@@ -244,6 +342,10 @@ function candidateUrls(apiPath, onlyOrigin) {
 }
 
 async function requestJson(apiPath, options = {}) {
+  // 定期主动刷新域名池（默认每 6 小时），不 await 阻塞主请求；
+  // 首次调用即触发一次，把发布页上的新线路纳入池。
+  try { ensureHostsFresh(false); } catch (_) {}
+
   const urls = candidateUrls(apiPath, !!options.onlyOrigin);
   let lastErr = "";
   for (let i = 0; i < urls.length; i++) {
@@ -270,24 +372,31 @@ async function requestJson(apiPath, options = {}) {
     if (isHost) { markHost(host, false, lastErr); log("info", `[rotate] ${host} 失败，切下一个`); }
     log("error", `${options.method || "GET"} ${url} 失败：${lastErr}`);
   }
-  // 全部失败：尝试从官方发布页刷新域名清单，只刷新一轮
-  if (!globalThis.__huangguoRefreshed) {
-    globalThis.__huangguoRefreshed = true;
-    log("info", "[rotate] 全部域名失败，尝试从 go-home 刷新域名池");
-    const added = await refreshHosts();
-    if (added > 0) {
-      for (const h of hostOrder().map((i) => HOSTS[i])) {
-        try {
-          const res = await rawRequest(h + apiPath, options);
-          const json = parseJson(res.body);
-          if (res.statusCode >= 200 && res.statusCode < 300 && json) {
-            markHost(h, true);
-            PREFERRED = HOSTS.indexOf(h);
-            log("info", `[rotate] 用新域名重试成功 -> ${h}`);
-            return json;
-          }
-        } catch (_) {}
-      }
+  // 全部失败：立刻强制刷新一次发布页（不等 6 小时间隔），并用新域名重试。
+  // 用「距上次刷新 >= 60s」节流：首次请求已触发过一次定时刷新时，
+  // 紧接着的全挂强制刷新就不再重复打发布页，直接用刚刷新的池重试。
+  const sinceLast = Date.now() - lastHostsRefresh;
+  let added = 0;
+  if (sinceLast >= 60000 || !lastHostsRefresh) {
+    log("info", "[rotate] 全部域名失败，强制刷新发布页域名池");
+    added = await ensureHostsFresh(true);
+  } else {
+    // 刚刷新过（首次请求的定时刷新）：不重复打发布页，直接用当前池重试
+    log("info", `[rotate] 全部域名失败，距上次刷新仅 ${Math.round(sinceLast / 1000)}s，直接用当前池重试`);
+    added = 1; // 触发下面的重试循环
+  }
+  if (added > 0) {
+    for (const h of hostOrder().map((i) => HOSTS[i])) {
+      try {
+        const res = await rawRequest(h + apiPath, options);
+        const json = parseJson(res.body);
+        if (res.statusCode >= 200 && res.statusCode < 300 && json) {
+          markHost(h, true);
+          PREFERRED = HOSTS.indexOf(h);
+          log("info", `[rotate] 用新域名重试成功 -> ${h}`);
+          return json;
+        }
+      } catch (_) {}
     }
   }
   return null;
