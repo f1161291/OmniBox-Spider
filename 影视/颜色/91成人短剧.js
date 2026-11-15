@@ -1,8 +1,8 @@
 // @name 91成人短剧
 // @author 宝宝巴士
-// @description 91crdj · 成人短剧/漫剧/真人剧/视频，原 ForwardWidget 源 bbbs.js 适配 OmniBox
-// @version 1.2.1
-// @downloadURL https://gh-proxy.org/https://github.com/f1161291/other/blob/main/JS/91成人短剧.js
+// @description 91crdj · 成人短剧/漫剧/真人剧/视频，原 ForwardWidget 源 bbbs.js 适配 OmniBox；1.3.0 修正播放源为 POST /api/videos/{id}/episodes/{n}/playback 取 streams.main 正片 m3u8，并修正 @downloadURL
+// @version 1.3.0
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91成人短剧.js
 
 /**
  * ==========================================================================
@@ -15,19 +15,24 @@
  *   - 详情页 ep-grid 集数链接，播放页内嵌 <script id="playInitialData" type="application/json">
  *   - 卡片链接可能指向 91crdjai.com，请求主域会自动跳转，无需特殊处理
  *   - 搜索仅支持第 1 页，频道分页到页尾后返回 404
- * 【1.2.1 修复·视频无法播放】根因不是网络也不是嗅探，而是源解析正则写错：
- *   - 原实现用 /"current"\s*:\s*\{[^{}]*"src"\s*:\s*"([^"]+)"/ 从播放页抠 src，
- *     其中 [^{}]* 不允许嵌套对象，且该正则只匹配「非空 src」；
- *   - 该站当前把 current.src 下发为空字符串 ""（实测多部剧、91crdjai.com / crdj.net 多个域名、
- *     带与不带会话、PC 与移动端 UA 结果一致），于是原正则必然不命中，
- *     随后退到「整页搜 .m3u8」分支 —— 而该站播放页 HTML 里 m3u8 出现次数为 0，
- *     最终只能返回 parse=1 让端上嗅探，端上同样嗅不到，表现为「视频无法播放」。
- *   - 修复：改为整体解析 playInitialData JSON（容忍嵌套），按
- *     src → srcHevc → playbackEndpoint 现取 → 页面裸链 的顺序逐级回退；
- *     playbackEndpoint 形如 /api/videos/{id}/episodes/__EP__/playback，
- *     __EP__ 依次尝试集数 n 与 videoId，并带 ?fmt=json。
- *   - 注意：player.js 里明确写着「主播放为明文 .m3u8」，即站点正常时会直接下发 src；
- *     当前为空属站点侧下发限制，脚本已把诊断信息写进日志，恢复下发后无需再改代码。
+ * 【1.3.0 修复·获取不到播放视频】根因是播放源走的是独立 POST 接口，旧实现全猜错了。
+ *   前端证据（2026-11-15 实抓）：
+ *     - 播放页 <script data-main="/static/web/js/pages/drama-play.js">
+ *     - drama-play.js: requirejs([..., 'services/playback']) -> playback.episode(data.id, n)
+ *     - services/playback.js 的 request() 明确：
+ *         http({ url:'/api/videos/{id}/episodes/{n}/playback', method:'POST',
+ *                contentType:'application/json', data: JSON.stringify({}), useToken:true })
+ *   因此真实协议是：POST + JSON body {} + __EP__ 填「集数 n」（不是 current.videoId），
+ *   不能带 ?fmt=json（那是页面「随便逛」用的另一套接口），也不是 GET。
+ *   响应：{ data:{ streams:{ main, hevc, preview }, manifest_method:"GET", cdn:{...} }, status:1 }
+ *   main 即正片 m3u8（AES-128 加密 HLS），里面的 \u0026 需还原成 &。
+ *   实测 POST /api/videos/10073/episodes/1/playback -> 200，
+ *   main = https://yd-zhqr-hls.hzjvlo.cn/videos5/....m3u8?auth_key=...&v=3...
+ *   该 m3u8 200、首 ts 分片 1.2MB 200、AES key 16B 200 —— 播放链完整可用。
+ *   旧实现用 GET + ?fmt=json + __EP__ 填 videoId，三处都不对，所以永远拿不到源，
+ *   只能回退 parse=1 嗅探，表现为「获取不到播放视频」。
+ *   本版改为 postPlayback() 走正确 POST，并做 3 次有限重试（站点偶发 302 限流）。
+ *   页面 current.src 依然恒为空 ""，这是站点设计（正片只从 POST 接口下发），不是故障。
  * 核心功能:
  *   - home: 4 个频道分类 + 首页推荐
  *   - category: 频道分页列表（分页器解析总页数）
@@ -291,6 +296,70 @@ async function fetchHtml(url, referer) {
     }
   }
   await log("warn", `[请求] 失败 url=${url} 原因=${lastError}`);
+  return "";
+}
+
+/**
+ * 函数：postPlayback
+ * 作用：调用站点真正的播放源接口（2026-11-15 实测修正）。
+ *
+ * 【这是本次「获取不到播放视频」的根因】
+ * 前端 /static/web/js/pages/drama-play.js 里是
+ *     requirejs([..., 'services/playback'], ...) -> playback.episode(data.id, n)
+ * 而 services/playback.js 的 request() 明确是：
+ *     http({ url: '/api/videos/{id}/episodes/{n}/playback',
+ *            method: 'POST', contentType: 'application/json',
+ *            data: JSON.stringify(data || {}), useToken: true })
+ * 即：
+ *   1) 必须是 POST，且 Content-Type: application/json，body 为 {}；
+ *   2) __EP__ 填「集数 n」（1,2,3...），不是 current.videoId；
+ *   3) 不能加 ?fmt=json（那是页面里「随便逛」用的另一套接口）；
+ *   4) 响应是 { data: { streams: { main, hevc, preview }, manifest_method, cdn, ... }, status: 1 }；
+ *      main 就是正片 m3u8，里面的 \u0026 必须还原成 &。
+ *
+ * 旧实现用 GET + ?fmt=json + 把 __EP__ 填成 videoId，三处都不对，所以永远拿不到源。
+ * 站点偶发 302（限流），这里做有限重试。
+ */
+async function postPlayback(apiPath, ep, referer) {
+  var url = absUrl(apiPath);
+  var payload = "{}";
+  for (var attempt = 1; attempt <= 3; attempt++) {
+    try {
+      var h = headers(referer || HOST + "/");
+      h["Content-Type"] = "application/json";
+      h["Accept"] = "application/json, text/plain, */*";
+      h["Origin"] = HOST;
+      h["Accept-Encoding"] = "identity";
+      var res = await OmniBox.request(url, {
+        method: "POST",
+        headers: h,
+        body: payload,
+      });
+      var status = Number(res && res.statusCode) || 0;
+      var text = bodyToText(res && res.body);
+      if (status === 200 && text) {
+        var data;
+        try { data = JSON.parse(text); } catch (e) { data = null; }
+        if (data) {
+          var root = (data.data && typeof data.data === "object") ? data.data : data;
+          var streams = root.streams || {};
+          // main 优先，其次 hevc，最后 preview
+          var pick = t(streams.main) || t(streams.hevc) || t(streams.preview);
+          if (pick) {
+            // \u0026 -> &，保证 URL 参数完整
+            pick = pick.replace(/\\u0026/gi, "&").replace(/\\\//g, "/");
+            await log("info", `[playback] POST 命中 n=${ep} main=${pick.slice(0, 120)}`);
+            return pick;
+          }
+          await log("warn", `[playback] POST 200 但 streams 为空 n=${ep} status=${data.status} msg=${data.msg || ""}`);
+          return "";
+        }
+      }
+      await log("warn", `[playback] 第${attempt}次 HTTP ${status} len=${text.length} url=${url}`);
+    } catch (e) {
+      await log("warn", `[playback] 第${attempt}次异常: ${(e && e.message) || e}`);
+    }
+  }
   return "";
 }
 
@@ -588,12 +657,11 @@ async function detail(params, context) {
 /**
  * 作用：从播放页 HTML 中提取播放源。
  * 关键事实（2026-11-15 实测）：
- *   站点把播放源放在 <script id="playInitialData" type="application/json"> 里，
- *   结构是 { current:{ n,title,src,srcHevc,videoId,... }, eps:[...], playbackEndpoint:"/api/videos/{id}/episodes/__EP__/playback", ... }
- *   - current.src 为主播放源（明文 m3u8；player.js 注释明确「主播放为明文 .m3u8」）
- *   - current.srcHevc 为 HEVC 备用源
- *   - 服务端会把 src 下发为空字符串 ""（实测所有剧、所有域名、带/不带会话都为空），
- *     此时才需要走 playbackEndpoint 现取。
+ *   站点把「集数信息」放在 <script id="playInitialData" type="application/json"> 里，
+ *   结构是 { id, current:{ n,title,src,srcHevc,videoId,... }, eps:[...],
+ *            playbackEndpoint:"/api/videos/{id}/episodes/__EP__/playback", ... }
+ *   - current.src / srcHevc 恒为空 ""：正片不放在页面里，只从 POST playback 接口下发；
+ *   - 因此 play() 拿到 playbackEndpoint + 集数 n 后，必须走 postPlayback() 的 POST 请求。
  * 注意：原正则 /"current"\s*:\s*\{[^{}]*"src"\s*:\s*"([^"]+)"/ 有两个致命问题：
  *   1) [^{}]* 不允许嵌套，而 current 里字段一多就会失配；
  *   2) 只匹配非空 src，遇到 src:"" 直接不命中，然后落到「整页搜 .m3u8」分支，
@@ -734,21 +802,27 @@ async function play(params, context) {
         `videoId=${info.videoId || "-"}, n=${info.n || "-"}, endpoint=${info.playbackEndpoint || "-"}`
     );
 
-    // ② 站点未下发 src 时，用 playbackEndpoint 现取（__EP__ 填集数 n，其次 videoId）
+    // ② 站点未在页面下发 src 时，POST playback 接口现取正片（实测唯一有效路径）
+    //    __EP__ 填集数 n；接口为 POST + JSON body {}，不能用 GET / ?fmt=json
     if (!info.url && info.playbackEndpoint) {
-      var epTokens = [];
-      if (info.n) epTokens.push(String(info.n));
-      if (info.videoId && String(info.videoId) !== String(info.n)) epTokens.push(info.videoId);
+      var epsToTry = [];
+      if (info.n) epsToTry.push(info.n);
+      // 从播放页路径末尾的 /{集数}/ 再兜底取一次
+      var mEp = String(playId).match(/\/(\d+)\/?$/);
+      if (mEp) {
+        var nFromPath = toInt(mEp[1]);
+        if (nFromPath && epsToTry.indexOf(nFromPath) < 0) epsToTry.push(nFromPath);
+      }
+      if (!epsToTry.length) epsToTry.push(1);
 
-      for (var i = 0; i < epTokens.length && !info.url; i++) {
-        var apiPath = info.playbackEndpoint.replace("__EP__", epTokens[i]);
-        var apiUrl = absUrl(apiPath) + (apiPath.indexOf("?") >= 0 ? "&" : "?") + "fmt=json";
-        await log("info", `[play] 尝试 playback 接口: ${apiUrl}`);
-        var raw = await fetchHtml(apiUrl, playId);
-        var got = pickUrlFromJson(raw);
+      for (var i = 0; i < epsToTry.length && !info.url; i++) {
+        var ep = epsToTry[i];
+        var apiPath = info.playbackEndpoint.replace("__EP__", String(ep));
+        await log("info", `[play] POST playback 接口: ${apiPath} (n=${ep})`);
+        var got = await postPlayback(apiPath, ep, playId);
         if (got) {
           info.url = got;
-          await log("info", `[play] playback 接口命中直链: ${got.slice(0, 120)}`);
+          await log("info", `[play] playback 接口命中正片: ${got.slice(0, 120)}`);
         }
       }
     }
