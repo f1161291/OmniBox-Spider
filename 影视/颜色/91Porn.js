@@ -1,9 +1,29 @@
 /**
  * @name 91porn
- * @version 2.2.1
- * @description 91porn.com 采集源（OmniBox Spider，单主站优先+SITE_HOSTS 可选容灾；列表封面/标题反混淆真值回填；返回形状守卫；列表耗时预算；SDK/Node 双通道传输 + 网络自检 + HTTP/SOCKS5 代理隧道；会话 cookie jar + 403 预热重试（应对出口 IP 拦截）；修复高清分类/搜索分页/作者解析/无效视频/直链规范）
+ * @version 2.3.0
+ * @description 91porn.com 采集源（OmniBox Spider，多域名轮换（健康度排序+SITE_HOSTS/SITE_MIRRORS+镜像同构探测+IP拦截降权）；列表封面/标题反混淆真值回填；返回形状守卫；列表耗时预算；SDK/Node 双通道传输 + 网络自检 + HTTP/SOCKS5 代理隧道；会话 cookie jar + 403 预热重试（应对出口 IP 拦截）；修复高清分类/搜索分页/作者解析/无效视频/直链规范）
  * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91Porn.js
  * @dependencies []
+ *
+ * 【2.3.0 域名轮换】
+ * 实测结论（2026-11-15）：91porn.com 是唯一真站；91porn.* 其余后缀域名均为停放页或
+ * Angular SPA 外壳（index.php 返回 5785B 且无 view_video.php），不可当作同构镜像。
+ * 站点被 Cloudflare 按出口 IP 拦截时返回 403 error code: 1006（响应体仅 17B），
+ * 此时换 UA / Cookie / Referer 全部无效，必须换出口或换域名。
+ *
+ * 本版在既有 failover 之上加了四件事：
+ *   1) 健康度排序：优选基址 > 近期未被判定 IP 拦截 > 连续失败少的 > 原配置顺序；
+ *      被判定为 IP 拦截的域名在 NINETYONE_ROTATE_COOLDOWN（默认 600s）内自动降权。
+ *   2) 跨请求记忆：成功过的域名写回 PREFERRED，后续调用优先复用它，不再每次从 0 号基址撞墙。
+ *   3) 镜像同构探测：全部基址失败时，才去验证 SITE_MIRRORS / 内置池的候选域名，
+ *      只接受「index.php 里能抓到 view_video.php?viewkey= 或 strencode2」的真同构站，
+ *      避免把 SPA 停放页混进轮换池制造新的播放问题。
+ *   4) 新镜像即时重试：探测到可用镜像后立刻用它重跑本次请求，尽量不让这次调用空手而归。
+ *
+ * 配置：
+ *   SITE_HOSTS              显式指定域名列表（逗号分隔），优先级最高，完全覆盖默认
+ *   SITE_MIRRORS            追加候选镜像（逗号分隔），参与轮换并在失败时被探测
+ *   NINETYONE_ROTATE_COOLDOWN  被拦截域名的降权时长（秒），默认 600
  */
 
 let OmniBox;
@@ -38,12 +58,101 @@ const NINETYONE_PLAY_MODE = String(process.env.NINETYONE_PLAY_MODE || 'auto').tr
 //   混用会让 play() 拿到镜像地址后播放器取流失败，反而制造问题。
 //   需要多基址容灾时可自行用 SITE_HOSTS 逗号配置。）
 const PRIMARY_API = (process.env.SITE_API || 'https://91porn.com').replace(/\/+$/, '');
+
+/**
+ * 内置镜像候选池（域名轮换用）。
+ * 事实说明（2026-11-15 实测）：
+ *   - 91porn.com 是唯一「真站」，其 PHP 结构特征为 index.php / view_video.php?viewkey= /
+ *     strencode2 混淆脚本；其余 91porn.* 后缀域名实测均为停放页或 Angular SPA 外壳
+ *     （index.php 返回 5785B 的 SPA、无 view_video.php），不能当作同构镜像使用，
+ *     因此不放进默认池——混入非同构域名只会让 play() 拿到失效地址，制造新的播放问题。
+ *   - 站点主域被 Cloudflare 按「出口 IP」拦截时返回 403 error code: 1006（响应体仅 17B），
+ *     此时换 UA / Cookie / Referer 全部无效，唯一有效的办法是：
+ *       a) 换出口 IP（NINETYONE_PROXY_URL），或
+ *       b) 换到真正可用的镜像域名。
+ * 所以这里的轮换池设计成「可配置 + 可扩展」，而不是硬编码一堆失效域名：
+ *   SITE_HOSTS  显式指定镜像（逗号分隔），优先级最高；
+ *   SITE_MIRRORS 追加候选镜像（逗号分隔）。
+ * 未配置时默认只有主站，保持既有行为不变。
+ */
+const BUILTIN_MIRRORS = [
+  // 预留位：确认某域名与 91porn.com 同构（index.php 里能抓到 view_video.php?viewkey=）
+  // 后再加进来。当前实测没有可用的同构镜像，故留空。
+];
+
 const HOSTS = (() => {
-  const fromEnv = String(process.env.SITE_HOSTS || PRIMARY_API)
+  const fromHosts = String(process.env.SITE_HOSTS || '')
     .split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
-  return Array.from(new Set(fromEnv.length ? fromEnv : [PRIMARY_API]));
+  const fromMirrors = String(process.env.SITE_MIRRORS || '')
+    .split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
+  // 优先级：SITE_HOSTS 显式指定 > 主站 + SITE_MIRRORS 追加 > 主站 + 内置池
+  const merged = fromHosts.length
+    ? fromHosts
+    : [PRIMARY_API, ...fromMirrors, ...BUILTIN_MIRRORS];
+  const norm = merged.map((u) => (/^https?:\/\//i.test(u) ? u : `https://${u}`).replace(/\/+$/, ''));
+  return Array.from(new Set(norm.length ? norm : [PRIMARY_API]));
 })();
 let PREFERRED = 0; // 上次成功的基址下标，下次优先
+
+/**
+ * 域名轮换状态（跨请求保留，进程内存级）。
+ * 目的：让「上次成功过的域名」在后续调用里优先，避免每次都从 0 号基址开始撞墙。
+ * 记录两类信息：
+ *   hostHealth[host] = { fail: 连续失败次数, okAt: 最近成功时间戳, blockAt: 被 IP 拦截时间戳 }
+ *   ROTATION_COOLDOWN 内被判定为 IP 拦截的基址会排到队尾，优先尝试其它域名。
+ */
+const hostHealth = Object.create(null);
+const ROTATION_COOLDOWN = Math.max(60, Number(process.env.NINETYONE_ROTATE_COOLDOWN || 600) || 600) * 1000;
+
+/**
+ * 作用：按健康度给基址排优先级。
+ * 排序依据（依次比较，越靠前越优先尝试）：
+ *   1) 未被判定为 IP 拦截的优先（**必须排在最前**：被拦截的域名再「优选」也必然失败，
+ *      把 blocked 放在 isPreferred 之前，才能真正跳过已死域名，这是 v2.3.0 的修正点）；
+ *   2) 当前 PREFERRED 基址优先（上次整体成功过）；
+ *   3) 连续失败次数少的优先；
+ *   4) 保持原有配置顺序（稳定排序）。
+ */
+function buildHostOrder() {
+  const now = Date.now();
+  const scored = HOSTS.map((host, idx) => {
+    const h = hostHealth[host] || {};
+    const recentlyBlocked = h.blockAt && (now - h.blockAt) < ROTATION_COOLDOWN;
+    return {
+      idx,
+      host,
+      isPreferred: idx === PREFERRED ? 0 : 1,
+      blocked: recentlyBlocked ? 1 : 0,
+      fails: Number(h.fail || 0),
+    };
+  });
+  scored.sort((a, b) =>
+    a.blocked - b.blocked ||
+    a.isPreferred - b.isPreferred ||
+    a.fails - b.fails ||
+    a.idx - b.idx
+  );
+  return scored.map((s) => s.idx);
+}
+
+/**
+ * 作用：记录某基址的成功 / 失败，用于后续轮换决策。
+ */
+function markHostResult(host, ok, reason) {
+  if (!host) return;
+  const h = hostHealth[host] || (hostHealth[host] = { fail: 0, okAt: 0, blockAt: 0 });
+  if (ok) {
+    h.fail = 0;
+    h.okAt = Date.now();
+    h.blockAt = 0;
+    return;
+  }
+  h.fail = Number(h.fail || 0) + 1;
+  if (/IP 拦截|403|1006/i.test(String(reason || ''))) {
+    h.blockAt = Date.now();
+  }
+}
+
 const PREFIX = '[91porn]';
 // 日志统一走「吞掉异常 + 不写 stdout」的实现：
 //   * 宿主通过 stdout 读脚本返回值，任何直接 console.log 都可能污染结果流，
@@ -479,8 +588,69 @@ async function warmupCookie(host) {
   }
 }
 
+/**
+ * 作用：验证某个候选域名是否真的是「91porn 同构站」。
+ * 判据（缺一不可）：
+ *   1) GET /index.php 返回 2xx；
+ *   2) 页面里能抓到 view_video.php?viewkey= 形式的视频链接，或存在 strencode2 混淆脚本。
+ * 之所以要校验同构性：91porn.* 下大量域名是停放页/SPA 外壳，直接塞进轮换池会让
+ * play() 拿到结构不兼容的页面，反而制造「视频打不开」的新问题。
+ */
+async function probeMirror(host, timeout = 8000) {
+  try {
+    const res = await httpRequest(`${host}/index.php`, { timeout });
+    const status = Number(res && res.statusCode) || 0;
+    const body = String((res && res.body) || '');
+    if (status < 200 || status >= 300) {
+      return { ok: false, reason: `HTTP ${status}` };
+    }
+    const hasViewkey = /view_video\.php\?viewkey=/i.test(body);
+    const hasStrencode = /strencode2\s*\(/i.test(body);
+    if (!hasViewkey && !hasStrencode) {
+      return { ok: false, reason: `结构不同构（${body.length}B，无 viewkey/strencode2）` };
+    }
+    return { ok: true, reason: `同构 ${body.length}B` };
+  } catch (e) {
+    return { ok: false, reason: String((e && e.message) || e) };
+  }
+}
+
+/**
+ * 作用：全部基址失败时，探测 SITE_MIRRORS / 内置池里的候选域名，把可用的并入 HOSTS。
+ * 返回新并入的域名数组（可能为空）。
+ * 只在「已经全挂」时触发，正常请求路径零成本。
+ */
+async function discoverMirrors() {
+  const candidates = [];
+  const fromMirrors = String(process.env.SITE_MIRRORS || '')
+    .split(',').map(x => x.trim()).filter(Boolean);
+  for (const raw of [...fromMirrors, ...BUILTIN_MIRRORS]) {
+    const u = (/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).replace(/\/+$/, '');
+    if (!HOSTS.includes(u)) candidates.push(u);
+  }
+  if (!candidates.length) return [];
+
+  const added = [];
+  for (const host of candidates) {
+    const r = await probeMirror(host);
+    if (r.ok) {
+      HOSTS.push(host);
+      hostHealth[host] = { fail: 0, okAt: 0, blockAt: 0 };
+      added.push(host);
+      logI(`[rotate] 发现可用镜像 -> ${host}（${r.reason}）`);
+    } else {
+      logI(`[rotate] 候选镜像不可用 -> ${host}（${r.reason}）`);
+    }
+  }
+  return added;
+}
+
 async function fetchWithFailover(path, options = {}) {
-  const order = [PREFERRED, ...HOSTS.map((_, i) => i).filter(i => i !== PREFERRED)];
+  // 轮换顺序按「健康度」动态计算：优选基址 > 近期未被拦截 > 失败次数少 > 原配置顺序。
+  const order = buildHostOrder();
+  if (HOSTS.length > 1) {
+    logI(`[rotate] 本轮尝试顺序: ${order.map(i => HOSTS[i]).join(' -> ')}`);
+  }
   let lastErr;
   for (const idx of order) {
     const host = HOSTS[idx];
@@ -527,19 +697,60 @@ async function fetchWithFailover(path, options = {}) {
       }
       if (res.statusCode >= 500 || res.statusCode === 403 || res.statusCode < 200 || tooSmall) {
         logE(`[failover] ${host}${path} -> HTTP ${res.statusCode}${tooSmall ? ` 响应体过小(${bodyLen}B)` : ''}, 切下一个`);
+        markHostResult(host, false, `HTTP ${res.statusCode}`);
         lastErr = new Error(`HTTP ${res.statusCode}${tooSmall ? ' body too small' : ''}`);
         continue;
       }
+      // 成功：清零健康度并记下优选基址，后续请求优先复用它
+      markHostResult(host, true);
       if (idx !== PREFERRED) { PREFERRED = idx; logI(`[failover] 切换优选基址 -> ${host}`); }
       return { ...res, host, finalUrl: res.finalUrl || `${host}${path}` };
     } catch (e) {
       logE(`[failover] ${host}${path} -> ${e.message}, 切下一个`);
+      markHostResult(host, false, e.message);
       lastErr = e;
     }
   }
   // 全部基址失败：跑一次自检，把根因写进日志（宿主界面只看得到「执行成功/失败」）
   const diag = await diagnoseNetwork(HOSTS[0]);
   logE(`[failover] 所有基址失败（已试 ${order.length} 个）。网络自检 → ${diag}`);
+
+  // 全部基址失败后才探测候选镜像（正常路径零成本）。
+  // 只看一轮：避免在整站不可达时反复打探测请求。
+  if (!globalThis.__ninetyoneMirrorProbed) {
+    globalThis.__ninetyoneMirrorProbed = true;
+    const added = await discoverMirrors();
+    if (added.length) {
+      // 立刻用新发现的镜像重试一次，让本次调用尽量拿到数据
+      for (const host of added) {
+        try {
+          const res = await httpRequest(`${host}${path}`, options);
+          const len = String(res.body || '').length;
+          if (res.statusCode >= 200 && res.statusCode < 400 && len >= 512) {
+            markHostResult(host, true);
+            PREFERRED = HOSTS.indexOf(host);
+            logI(`[rotate] 改用新镜像成功 -> ${host}${path} HTTP ${res.statusCode} ${len}B`);
+            return { ...res, host, finalUrl: res.finalUrl || `${host}${path}` };
+          }
+          logE(`[rotate] 新镜像重试失败 -> ${host}${path} HTTP ${res.statusCode} ${len}B`);
+          markHostResult(host, false, `HTTP ${res.statusCode}`);
+        } catch (e) {
+          logE(`[rotate] 新镜像重试异常 -> ${host}: ${e.message}`);
+          markHostResult(host, false, e.message);
+        }
+      }
+    } else {
+      logI('[rotate] 未发现可用镜像；如已知备用域，请配置 SITE_HOSTS 或 SITE_MIRRORS');
+    }
+  }
+
+  if (HOSTS.length > 1) {
+    // 多基址全挂时给出轮换诊断：哪些被判定为 IP 拦截
+    const blocked = Object.keys(hostHealth).filter(h => hostHealth[h].blockAt);
+    if (blocked.length) {
+      logE(`[rotate] 被判为 IP 拦截的基址: ${blocked.join(', ')}（${ROTATION_COOLDOWN / 1000}s 内降权）`);
+    }
+  }
   throw lastErr || new Error('所有基址均不可用');
 }
 
