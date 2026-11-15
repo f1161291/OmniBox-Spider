@@ -1,7 +1,7 @@
 // @name 黄果短剧
 // @author 宝宝巴士
-// @description 黄果短剧（huangguoai.com）：分类/搜索/详情/播放；播放走 POST /api/videos/{id}/episodes/{ep}/playback 直取 m3u8 直链
-// @version 1.1.0
+// @description 黄果短剧：从 https://huangguoai.com/go-home/ 官方地址发布页动态获取域名并健康度轮转（主域 + 3 条线路）；分类/搜索/详情/播放；播放走 POST /api/videos/{id}/episodes/{ep}/playback 直取 m3u8 直链
+// @version 1.2.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/黄果短剧.js
 
 const OmniBox = require("omnibox_sdk");
@@ -13,12 +13,143 @@ try {
   runner = { run() {} };
 }
 
-// 站点主域名（GET /api/* 与播放 POST 都直连这里）
-const ORIGIN = String(process.env.HUANGGUO_HOST || "https://huangguoai.com").replace(/\/+$/, "");
+const UA = "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+
+// ---------------------------------------------------------------------------
+// 域名池：从官方地址发布页 https://huangguoai.com/go-home/ 动态获取并轮转
+// ---------------------------------------------------------------------------
+// 实站事实（2026-11-15 实测）：
+//   /go-home/ 是「黄果短剧 · 官方最新地址发布页」，里面
+//     - <article class="hg-homeway-line"> 的 p.hg-homeway-line__domain 是线路域名
+//       （d1716d.bmikbxhi.cc / 40dca.vlkotdgb.cc / up0e.bmikbxhi.cc）
+//     - <article class="hg-homeway-permanent__item"> 的 span.hg-homeway-permanent__domain
+//       是官方域名（huangguoai.com / .ai / .me / hgai15.com / huangguoai.pages.dev）
+//   实测只有 huangguoai.com / d1716d.bmikbxhi.cc / up0e.bmikbxhi.cc 三个是
+//   同构主站（220KB 首页 + POST playback 返回 status:1 + streams.main），
+//   其余是地址发布页/跳转页/介绍页，不能当采集源，因此会自动按「可用性探测」筛掉。
+// 默认种子：主域 + go-home 发布页域名；运行时调用 refreshHosts() 拉取最新清单。
+const GO_HOME = "https://huangguoai.com/go-home/";
+const DEFAULT_HOSTS = [
+  "https://huangguoai.com",
+  "https://d1716d.bmikbxhi.cc",
+  "https://up0e.bmikbxhi.cc",
+];
+
+function normalizeHost(v) {
+  const raw = String(v || "").trim().replace(/\/+$/, "");
+  if (!raw) return "";
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try { const u = new URL(withProtocol); return `${u.protocol}//${u.host}`; }
+  catch (_) { return ""; }
+}
+
+let HOSTS = (() => {
+  const raw = String(process.env.HUANGGUO_HOSTS || process.env.HUANGGUO_HOST || "").trim();
+  const list = raw
+    ? raw.split(/[,;]/).map(normalizeHost).filter(Boolean)
+    : DEFAULT_HOSTS.map(normalizeHost).filter(Boolean);
+  return Array.from(new Set(list.length ? list : DEFAULT_HOSTS));
+})();
+
+// 健康度：成功过的域名优先；失败/被拦截的在 HUANGGUO_ROTATE_COOLDOWN 内降权
+const hostHealth = Object.create(null);
+let PREFERRED = 0;
+const ROTATE_COOLDOWN = (() => {
+  const raw = String(process.env.HUANGGUO_ROTATE_COOLDOWN || "").trim();
+  const n = raw === "" ? 600 : Number(raw);
+  return Math.max(60, Number.isFinite(n) ? n : 600) * 1000;
+})();
+
+function currentOrigin() { return HOSTS[PREFERRED] || HOSTS[0] || "https://huangguoai.com"; }
+
+function markHost(host, ok, reason) {
+  if (!host) return;
+  const h = hostHealth[host] || (hostHealth[host] = { fail: 0, okAt: 0, blockedAt: 0 });
+  if (ok) { h.fail = 0; h.okAt = Date.now(); h.blockedAt = 0; return; }
+  h.fail = Number(h.fail || 0) + 1;
+  if (/403|401|429|blocked|challenge|拦截/i.test(String(reason || ""))) h.blockedAt = Date.now();
+}
+
+/** 排序：未拦截 > 优选 > 失败少 > 配置顺序 */
+function hostOrder() {
+  const now = Date.now();
+  return HOSTS.map((host, idx) => {
+    const h = hostHealth[host] || {};
+    return {
+      idx, host,
+      blocked: (h.blockedAt && now - h.blockedAt < ROTATE_COOLDOWN) ? 1 : 0,
+      preferred: idx === PREFERRED ? 0 : 1,
+      fails: Number(h.fail || 0),
+    };
+  }).sort((a, b) =>
+    a.blocked - b.blocked || a.preferred - b.preferred || a.fails - b.fails || a.idx - b.idx
+  ).map((x) => x.idx);
+}
+
+/**
+ * 从官方地址发布页拉取最新域名清单并并入 HOSTS。
+ * 只解析 hg-homeway-line / hg-homeway-permanent 两个区块里的域名文本，
+ * 避免把 t.me / x.com / pic 图床等无关域名混进来。
+ * 结果按可用性验证（能返回同构首页才加入轮换池），验证失败不加入。
+ */
+async function refreshHosts() {
+  const pages = [GO_HOME];
+  // 备用发布页（实测同结构）
+  for (const d of ["https://huangguoai.ai", "https://hgai15.com"]) {
+    pages.push(`${d}/go-home/`);
+  }
+  const found = new Set();
+  for (const page of pages) {
+    try {
+      const res = await OmniBox.request(page, {
+        method: "GET",
+        headers: { "User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9", Referer: "https://huangguoai.com/" },
+        timeout: 15000,
+      });
+      const html = asText(res);
+      if (!html) continue;
+      const re = /(?:hg-homeway-line__domain|hg-homeway-permanent__domain)[^>]*>\s*([a-z0-9.-]+\.[a-z]{2,})\s*</gi;
+      let m;
+      while ((m = re.exec(html)) !== null) found.add(m[1].toLowerCase());
+      // 「立即进入」按钮的 href 也是有效入口
+      const re2 = /class="[^"]*hg-homeway-line__enter[^"]*"[^>]*href="(https?:\/\/[a-z0-9.-]+)/gi;
+      while ((m = re2.exec(html)) !== null) found.add(new URL(m[1]).hostname.toLowerCase());
+    } catch (e) {
+      log("info", `[hosts] 拉取发布页失败 ${page}: ${(e && e.message) || e}`);
+    }
+  }
+  let added = 0;
+  for (const host of found) {
+    const u = normalizeHost(host);
+    if (!u || HOSTS.includes(u)) continue;
+    // 只收看起来像主站/线路域名的，排除图床/社交/统计
+    if (/pic\.|drleao|google|yandex|t\.me|x\.com|tiktok|youtube|pages\.dev|huangguojob/i.test(u)) continue;
+    // 【可用性验证】go-home 里混有 301 跳转页、地址发布页、介绍页，
+    // 直接塞进池会导致大量无效请求。用一个轻量 API 探测：能返回 JSON 才算同构主站。
+    let ok = false;
+    try {
+      const res = await rawRequest(`${u}/api/videos?sort=hot&page=1&size=1`, { method: "GET" });
+      ok = res.statusCode >= 200 && res.statusCode < 300 && !!parseJson(res.body);
+    } catch (_) {}
+    if (!ok) {
+      log("info", `[hosts] 跳过非主站域名 -> ${u}（API 无 JSON 响应）`);
+      continue;
+    }
+    HOSTS.push(u);
+    hostHealth[u] = { fail: 0, okAt: 0, blockedAt: 0 };
+    added++;
+    log("info", `[hosts] 发现可用主站 -> ${u}`);
+  }
+  if (added) log("info", `[hosts] 本次新增 ${added} 个，当前池共 ${HOSTS.length} 个`);
+  return added;
+}
+
 // Cloudflare Worker 反代（只作为列表/详情/搜索的兜底，POST 播放接口不支持）
 const PROXY = String(process.env.HUANGGUO_PROXY_HOST || "https://little-waterfall-ea20.sjzkn886.workers.dev/proxy").replace(/\/+$/, "");
 const PIC = "https://little-waterfall-ea20.sjzkn886.workers.dev/img?u=";
-const UA = "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+
+// 注意：所有需要当前域名的地方统一调用 currentOrigin()，不用静态常量，
+// 这样轮换后 Referer / Origin / 播放页 URL 会跟着切换。
 
 const CATEGORIES = [
   { type_id: "newest", type_name: "最近上新", mode: "list", sort: "new" },
@@ -33,7 +164,6 @@ const HEADERS = {
   "User-Agent": UA,
   "Accept": "application/json, text/plain, */*",
   "Accept-Language": "zh-CN,zh;q=0.9",
-  "Referer": ORIGIN + "/",
 };
 
 function log(level, msg) {
@@ -59,9 +189,15 @@ function asText(res) {
 }
 
 async function rawRequest(url, options) {
+  // Referer / Origin 按本次请求的目标域名动态生成，轮换后才不会串域
+  let origin = currentOrigin();
+  try { origin = new URL(url).origin; } catch (_) {}
   const opts = {
     method: options.method || "GET",
-    headers: Object.assign({}, HEADERS, options.headers || {}),
+    headers: Object.assign({}, HEADERS, {
+      Referer: `${origin}/`,
+      ...(options.method === "POST" ? { Origin: origin } : {}),
+    }, options.headers || {}),
   };
   if (options.body !== undefined && options.body !== null) {
     opts.body = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
@@ -89,30 +225,70 @@ function parseJson(text) {
   }
 }
 
-// /api/xxx -> 依次尝试：直连站点、Worker 反代（去掉 /api 前缀）
-function candidateUrls(apiPath) {
-  const urls = [ORIGIN + apiPath];
-  const proxied = apiPath.replace(/^\/api/, "");
-  if (PROXY) urls.push(PROXY + proxied);
+/**
+ * /api/xxx 的候选 URL：按健康度轮转所有域名（成功的优先、被拦截的降权），
+ * 最后再挂 Worker 反代兜底（去掉 /api 前缀）。
+ * onlyOrigin（播放 POST）只走域名池，不用反代（反代不支持 POST playback）。
+ */
+function candidateUrls(apiPath, onlyOrigin) {
+  const order = hostOrder();
+  if (HOSTS.length > 1) {
+    log("info", `[rotate] 尝试顺序: ${order.map((i) => HOSTS[i]).join(" -> ")}`);
+  }
+  const urls = order.map((i) => HOSTS[i] + apiPath);
+  if (!onlyOrigin && PROXY) {
+    const proxied = apiPath.replace(/^\/api/, "");
+    urls.push(PROXY + proxied);
+  }
   return urls;
 }
 
 async function requestJson(apiPath, options = {}) {
-  const urls = options.onlyOrigin ? [ORIGIN + apiPath] : candidateUrls(apiPath);
+  const urls = candidateUrls(apiPath, !!options.onlyOrigin);
   let lastErr = "";
   for (let i = 0; i < urls.length; i++) {
     const url = urls[i];
+    // 从 URL 反推本次尝试的域名，用于健康度记录
+    let host = "";
+    try { host = new URL(url).origin; } catch (_) {}
+    const isHost = HOSTS.indexOf(host) >= 0;
     try {
       const res = await rawRequest(url, options);
       const json = parseJson(res.body);
       if (res.statusCode >= 200 && res.statusCode < 300 && json) {
+        if (isHost) {
+          markHost(host, true);
+          const idx = HOSTS.indexOf(host);
+          if (idx !== PREFERRED) { PREFERRED = idx; log("info", `[rotate] 切换优选域名 -> ${host}`); }
+        }
         return json;
       }
       lastErr = `status=${res.statusCode} body=${String(res.body || "").slice(0, 120)}`;
     } catch (e) {
       lastErr = e && e.message ? e.message : String(e);
     }
+    if (isHost) { markHost(host, false, lastErr); log("info", `[rotate] ${host} 失败，切下一个`); }
     log("error", `${options.method || "GET"} ${url} 失败：${lastErr}`);
+  }
+  // 全部失败：尝试从官方发布页刷新域名清单，只刷新一轮
+  if (!globalThis.__huangguoRefreshed) {
+    globalThis.__huangguoRefreshed = true;
+    log("info", "[rotate] 全部域名失败，尝试从 go-home 刷新域名池");
+    const added = await refreshHosts();
+    if (added > 0) {
+      for (const h of hostOrder().map((i) => HOSTS[i])) {
+        try {
+          const res = await rawRequest(h + apiPath, options);
+          const json = parseJson(res.body);
+          if (res.statusCode >= 200 && res.statusCode < 300 && json) {
+            markHost(h, true);
+            PREFERRED = HOSTS.indexOf(h);
+            log("info", `[rotate] 用新域名重试成功 -> ${h}`);
+            return json;
+          }
+        } catch (_) {}
+      }
+    }
   }
   return null;
 }
@@ -219,13 +395,13 @@ function buildEpisodes(id, data) {
         // 站点 duration 单位是秒，宿主 episodeRuntime 期望分钟
         episodeRuntime: sec > 0 ? Math.max(1, Math.round(sec / 60)) : undefined,
       });
-      playUrls.push(`${name}$${ORIGIN}/video/${id}/${ep > 1 ? `ep-${ep}/` : ""}`);
+      playUrls.push(`${name}$${currentOrigin()}/video/${id}/${ep > 1 ? `ep-${ep}/` : ""}`);
     }
   } else {
     for (let ep = 1; ep <= total; ep++) {
       const name = `第${ep}集`;
       episodes.push({ name, playId: encodePlayId(id, ep), episodeName: name });
-      playUrls.push(`${name}$${ORIGIN}/video/${id}/${ep > 1 ? `ep-${ep}/` : ""}`);
+      playUrls.push(`${name}$${currentOrigin()}/video/${id}/${ep > 1 ? `ep-${ep}/` : ""}`);
     }
   }
   return { total, episodes, playUrls };
@@ -323,7 +499,7 @@ async function detail(params, context) {
         continue;
       }
       const { total, episodes, playUrls } = buildEpisodes(id, data);
-      const playUrl = `${ORIGIN}/video/${id}/`;
+      const playUrl = `${currentOrigin()}/video/${id}/`;
       log("info", `[detail] id=${id} name=${data.title || ""} ep=${total} episodes=${episodes.length}`);
       out.push({
         vod_id: String(data.id || id),
@@ -365,6 +541,15 @@ async function fetchPlayback(videoId, ep) {
     log("error", `[play] id=${videoId} ep=${ep} 上游返回 status=${json.status} msg=${json.msg || ""}`);
     return null;
   }
+  // 上游 JSON 里的 URL 用 \u0026 转义 &（如 ?auth_key=...\u0026v=3），必须还原，
+  // 否则播放器拿到带字面 \u0026 的地址会丢参数、取流 403。
+  const fixUrl = (u) => String(u || "").replace(/\\u0026/gi, "&").replace(/\\\//g, "/");
+  const streams = data.streams || {};
+  if (streams.main) streams.main = fixUrl(streams.main);
+  if (streams.hevc) streams.hevc = fixUrl(streams.hevc);
+  if (streams.preview) streams.preview = fixUrl(streams.preview);
+  if (data.video_url) data.video_url = fixUrl(data.video_url);
+  if (data.video_url_hevc) data.video_url_hevc = fixUrl(data.video_url_hevc);
   return data;
 }
 
@@ -403,8 +588,8 @@ async function play(params, context) {
   const cdn = (data && data.cdn) || {};
   const header = {
     "User-Agent": UA,
-    "Referer": ORIGIN + "/",
-    "Origin": ORIGIN,
+    "Referer": currentOrigin() + "/",
+    "Origin": currentOrigin(),
   };
   if (cdn.authKey && cdn.authValue) header[String(cdn.authKey)] = String(cdn.authValue);
   log("info", `[play] id=${videoId} ep=${ep} urls=${urls.length} first=${urls[0].url.slice(0, 90)}`);
