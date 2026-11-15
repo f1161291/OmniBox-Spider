@@ -1,7 +1,7 @@
 /**
  * @name 91porn
- * @version 2.3.0
- * @description 91porn.com 采集源（OmniBox Spider，多域名轮换（健康度排序+SITE_HOSTS/SITE_MIRRORS+镜像同构探测+IP拦截降权）；列表封面/标题反混淆真值回填；返回形状守卫；列表耗时预算；SDK/Node 双通道传输 + 网络自检 + HTTP/SOCKS5 代理隧道；会话 cookie jar + 403 预热重试（应对出口 IP 拦截）；修复高清分类/搜索分页/作者解析/无效视频/直链规范）
+ * @version 2.4.0
+ * @description 91porn.com 采集源（OmniBox Spider，多域名轮换（健康度排序+SITE_HOSTS/SITE_MIRRORS+镜像同构探测+跳转入口域名落地解析+IP拦截降权；内置 91p618.com 跳转入口）；列表封面/标题反混淆真值回填；返回形状守卫；列表耗时预算；SDK/Node 双通道传输 + 网络自检 + HTTP/SOCKS5 代理隧道；会话 cookie jar + 403 预热重试（应对出口 IP 拦截）；修复高清分类/搜索分页/作者解析/无效视频/直链规范）
  * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91Porn.js
  * @dependencies []
  *
@@ -76,8 +76,12 @@ const PRIMARY_API = (process.env.SITE_API || 'https://91porn.com').replace(/\/+$
  * 未配置时默认只有主站，保持既有行为不变。
  */
 const BUILTIN_MIRRORS = [
-  // 预留位：确认某域名与 91porn.com 同构（index.php 里能抓到 view_video.php?viewkey=）
-  // 后再加进来。当前实测没有可用的同构镜像，故留空。
+  // 91p618.com：跳转入口型域名（实测 2026-11-15）。
+  //   GET / 与 /index.php 都返回 69B 的 <META HTTP-EQUIV=Refresh CONTENT="0; URL=https://a.26702.app/1.php">，
+  //   再经 302 → https://903.9p234.com（标题 Chinese homemade video，91porn 同构站，CF 盾保护）。
+  //   它不是直连同构站，因此 probeMirror() 增加了「META Refresh / 302 落地跟随」，
+  //   跟随后的最终域名才会被真正并入轮换池；未跟随时会被判为「结构不同构」而跳过。
+  'https://91p618.com',
 ];
 
 const HOSTS = (() => {
@@ -595,24 +599,69 @@ async function warmupCookie(host) {
  *   2) 页面里能抓到 view_video.php?viewkey= 形式的视频链接，或存在 strencode2 混淆脚本。
  * 之所以要校验同构性：91porn.* 下大量域名是停放页/SPA 外壳，直接塞进轮换池会让
  * play() 拿到结构不兼容的页面，反而制造「视频打不开」的新问题。
+ *
+ * 【跳转入口型域名】部分入口（如 91p618.com）本身只是个跳板：
+ *   GET /index.php → 69B 的 <META HTTP-EQUIV=Refresh CONTENT="0; URL=...">
+ *   → 再 302 到真正站点（如 903.9p234.com）。
+ * nodeRequest 只跟随 HTTP 3xx，不跟随 HTML 的 META Refresh，所以这里手动解析并跟随，
+ * 否则这类域名永远会被误判成「结构不同构」而无法进入轮换池。
+ * 返回的 host 是**最终落地域名**（供调用方并入 HOSTS），不是原始跳板域名。
  */
+function extractMetaRefreshTarget(html) {
+  const s = String(html || '');
+  // <META HTTP-EQUIV=Refresh CONTENT="0; URL=https://x.y/z">
+  const m = s.match(/http-equiv\s*=\s*["']?refresh["']?[^>]*content\s*=\s*["']([^"']+)["']/i)
+    || s.match(/content\s*=\s*["']([^"']+)["'][^>]*http-equiv\s*=\s*["']?refresh["']?/i);
+  if (!m) return '';
+  const u = m[1].match(/url\s*=\s*['"]?([^'";\s]+)/i);
+  return u ? u[1] : '';
+}
+
 async function probeMirror(host, timeout = 8000) {
-  try {
-    const res = await httpRequest(`${host}/index.php`, { timeout });
-    const status = Number(res && res.statusCode) || 0;
-    const body = String((res && res.body) || '');
-    if (status < 200 || status >= 300) {
-      return { ok: false, reason: `HTTP ${status}` };
+  const visited = [];
+  let current = host;
+  for (let hop = 0; hop < 3; hop++) {
+    visited.push(current);
+    try {
+      const res = await httpRequest(`${current}/index.php`, { timeout });
+      const status = Number(res && res.statusCode) || 0;
+      const body = String((res && res.body) || '');
+      if (status < 200 || status >= 300) {
+        return { ok: false, reason: `HTTP ${status}${visited.length > 1 ? ` @${current}` : ''}` };
+      }
+      // nodeRequest 跟随 HTTP 3xx 后会把真实地址放在 finalUrl/_host 上；
+      // SDK 通道没有这两个字段，则回落到本次请求的 current。
+      let landed = current;
+      const finalUrl = String((res && (res.finalUrl || res.url)) || '');
+      if (finalUrl) {
+        try { landed = new URL(finalUrl).origin; } catch (_) {}
+      } else if (res && res._host) {
+        landed = `https://${res._host}`;
+      }
+      // 同构判据
+      const hasViewkey = /view_video\.php\?viewkey=/i.test(body);
+      const hasStrencode = /strencode2\s*\(/i.test(body);
+      if (hasViewkey || hasStrencode) {
+        const hops = visited.length - 1 + (landed !== current ? 1 : 0);
+        return { ok: true, host: landed, reason: `同构 ${body.length}B${hops > 0 ? `（经 ${hops} 跳落地 ${landed}）` : ''}` };
+      }
+      // 跳转入口：解析 META Refresh 继续跟
+      const next = extractMetaRefreshTarget(body);
+      if (!next) {
+        return { ok: false, reason: `结构不同构（${body.length}B，无 viewkey/strencode2）` };
+      }
+      let nextHost = '';
+      try { nextHost = new URL(next, `${current}/`).host; } catch (_) { nextHost = ''; }
+      if (!nextHost) return { ok: false, reason: `跳转目标无法解析：${next}` };
+      const nextOrigin = `https://${nextHost}`;
+      if (visited.includes(nextOrigin)) return { ok: false, reason: `跳转成环：${visited.join(' -> ')}` };
+      logI(`[rotate] ${current} 是跳转入口 -> ${nextOrigin}`);
+      current = nextOrigin;
+    } catch (e) {
+      return { ok: false, reason: `${String((e && e.message) || e)}${visited.length > 1 ? ` @${current}` : ''}` };
     }
-    const hasViewkey = /view_video\.php\?viewkey=/i.test(body);
-    const hasStrencode = /strencode2\s*\(/i.test(body);
-    if (!hasViewkey && !hasStrencode) {
-      return { ok: false, reason: `结构不同构（${body.length}B，无 viewkey/strencode2）` };
-    }
-    return { ok: true, reason: `同构 ${body.length}B` };
-  } catch (e) {
-    return { ok: false, reason: String((e && e.message) || e) };
   }
+  return { ok: false, reason: `跳转层数过多：${visited.join(' -> ')}` };
 }
 
 /**
@@ -626,21 +675,41 @@ async function discoverMirrors() {
     .split(',').map(x => x.trim()).filter(Boolean);
   for (const raw of [...fromMirrors, ...BUILTIN_MIRRORS]) {
     const u = (/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).replace(/\/+$/, '');
-    if (!HOSTS.includes(u)) candidates.push(u);
+    // 注意：不能因为「已在 HOSTS 里」就跳过探测。
+    // 跳转入口型域名（如 91p618.com）虽然被登记进轮换池，但它本身返回的是
+    // META Refresh 空壳，直接当基址请求必然失败；必须探测出它的**落地域名**
+    // 并并入池，轮转才真正生效。落地域名若已在池中，probe 后会被去重。
+    if (!candidates.includes(u)) candidates.push(u);
   }
   if (!candidates.length) return [];
 
   const added = [];
   for (const host of candidates) {
     const r = await probeMirror(host);
-    if (r.ok) {
-      HOSTS.push(host);
-      hostHealth[host] = { fail: 0, okAt: 0, blockAt: 0 };
-      added.push(host);
-      logI(`[rotate] 发现可用镜像 -> ${host}（${r.reason}）`);
-    } else {
+    if (!r.ok) {
       logI(`[rotate] 候选镜像不可用 -> ${host}（${r.reason}）`);
+      continue;
     }
+    // 跳转入口型域名：真正可用的基址是落地域名，把它并入轮换池；
+    // 跳板域名本身不并入（它返回的是 META Refresh 空壳，当作基址请求必然拿不到内容）。
+    const target = (r.host || host).replace(/\/+$/, '');
+    if (target !== host) {
+      // 跳板域名若已在池中（来自 BUILTIN_MIRRORS），移除它，避免每轮白跑一次失败请求
+      const bridgeIdx = HOSTS.indexOf(host);
+      if (bridgeIdx >= 0) {
+        HOSTS.splice(bridgeIdx, 1);
+        if (PREFERRED >= HOSTS.length) PREFERRED = 0;
+        logI(`[rotate] 跳板域名 ${host} 已从轮换池移除（改用它落地后的 ${target}）`);
+      }
+    }
+    if (HOSTS.includes(target)) {
+      logI(`[rotate] 镜像已在池中 -> ${target}（来自 ${host}）`);
+      continue;
+    }
+    HOSTS.push(target);
+    hostHealth[target] = { fail: 0, okAt: 0, blockAt: 0 };
+    added.push(target);
+    logI(`[rotate] 发现可用镜像 -> ${target}（${r.reason}${target !== host ? `，入口 ${host}` : ''}）`);
   }
   return added;
 }
