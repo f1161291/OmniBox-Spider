@@ -1,7 +1,7 @@
 // @name XNXX
-// @version 1.0.1
+// @version 1.0.2
 // @author omnibox-spider
-// @description xnxx.com 采集源：/hits 推荐 + /tags 常见标签分类 + /search/{kw} 搜索分页；详情页解析 html5player.setVideoHLS/High/Low，并二次请求 HLS master 解出真实 1080P/720P/480P 单档，按真实分辨率数值降序，最高档恒为 vod_play_sources[0] 与 play().urls[0]
+// @description xnxx.com 采集源：/hits 推荐 + /tags 常见标签分类 + /search/{kw} 搜索分页；详情页解析 html5player.setVideoHLS/High/Low，并二次请求 HLS master 解出真实 1080P/720P/480P 单档，按真实分辨率数值降序，最高档恒为 vod_play_sources[0] 与 play().urls[0]；【1.0.2】按要求删除 720 以下线路，仅保留 >=720P 档与 HLS 自适应
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/XNXX.js
 // @dependencies cheerio
 
@@ -413,7 +413,25 @@ function unescapeUrl(u) {
     .trim();
 }
 
-/** 按 height 数值严格降序：HLS(2160) > 360P(360) > 240P(240) */
+/**
+ * 【最低分辨率门槛】按需求去掉 720 以下线路：480P(HLS)/360P(HLS)/250P(HLS) 与
+ * 360P/240P mp4 全部丢弃，只保留 >= 720P 的真实档。
+ * HLS 自适应 master（key === "hls"）只在「确实存在 >=720P 的单档」时保留作兜底；
+ * 若 master 解析出的最高档本身 < 720P（如部分老片只有 738x554），按需求连 master 一起删，
+ * 返回空线路 —— 不保留任何低于 720P 的内容。
+ */
+const MIN_HEIGHT = 720;
+
+function filterMinHeight(variants, hasQualifiedSingle) {
+  const arr = Array.isArray(variants) ? variants.slice() : [];
+  const kept = arr.filter((v) => (Number(v && v.height) || 0) >= MIN_HEIGHT);
+  if (hasQualifiedSingle === false) return kept; // 无达标档：连 master 也不留
+  // 有达标单档：master 作为自适应兜底保留在末尾
+  const master = arr.filter((v) => v && v.key === "hls");
+  return [...kept, ...master];
+}
+
+/** 按 height 数值严格降序 */
 function sortVariantsByHeightDesc(variants) {
   const arr = Array.isArray(variants) ? variants.slice() : [];
   return arr.sort((a, b) => {
@@ -483,7 +501,9 @@ function parseVariants(html) {
   if (hls) out.push({ key: "hls", name: "HLS自适应(最高)", height: HLS_HEIGHT, url: hls });
   if (high) out.push({ key: "360p", name: "360P", height: HEIGHT_360, url: high });
   if (low) out.push({ key: "240p", name: "240P", height: HEIGHT_240, url: low });
-  return { base: sortVariantsByHeightDesc(out), hlsMaster: hls };
+  // 【去掉 720 以下线路】基础档位同样过滤（master 请求失败时也不会漏出 360P/240P）。
+  // 基础档位里没有 >=720P 的真实单档，因此不保留 master。
+  return { base: filterMinHeight(sortVariantsByHeightDesc(out), false), hlsMaster: hls };
 }
 
 /**
@@ -492,21 +512,27 @@ function parseVariants(html) {
  * 网络失败安全降级：只返回基础档位，不抛错。
  */
 async function enrichWithHlsVariants(baseVariants, hlsMaster) {
-  if (!hlsMaster) return baseVariants;
+  // 无 master 或 master 无 STREAM-INF：基础档位里没有 >=720P 真实单档，按需求返回空线路
+  if (!hlsMaster) return filterMinHeight(baseVariants, false);
   try {
     const masterText = await requestText(hlsMaster);
     const singles = parseHlsMaster(hlsMaster, masterText);
-    if (!singles.length) return baseVariants;
+    if (!singles.length) return filterMinHeight(baseVariants, false);
     // master 降级为兜底（去掉过高的排序权重），避免与真实单档重复
     const rest = baseVariants
       .filter((v) => v.key !== "hls")
       .map((v) => ({ ...v }));
-    return sortVariantsByHeightDesc([...singles, ...rest, {
+    const all = sortVariantsByHeightDesc([...singles, ...rest, {
       key: "hls", name: "HLS自适应", height: 1, url: hlsMaster,
     }]);
+    // 是否存在 >=720P 的真实单档；没有则连 master 一起删（如老片仅 738x554）
+    const hasQualified = singles.some((v) => (Number(v.height) || 0) >= MIN_HEIGHT);
+    // 【去掉 720 以下线路】统一在出口过滤，detail/play 都走这里
+    return filterMinHeight(all, hasQualified);
   } catch (e) {
-    log("info", `[hls] master 解析失败，保留自适应线路: ${e?.message || e}`);
-    return baseVariants;
+    log("info", `[hls] master 解析失败，无达标档位: ${e?.message || e}`);
+    // master 解析失败时基础档位里也无达标档，返回空线路
+    return filterMinHeight(baseVariants, false);
   }
 }
 

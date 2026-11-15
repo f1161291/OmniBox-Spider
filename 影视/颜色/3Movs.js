@@ -1,7 +1,7 @@
 // @name 3Movs
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
-// @description 3Movs（KVS/PHP）采集源：首页/分类/最新/搜索五方法；分类翻页严格 ?from=N，搜索翻页走 mode=async；详情内联 flashvars 解析 video_url(720P High Quality)/video_alt_url(360P Low Quality)，按 height 数值降序，最高档恒为 vod_play_sources[0] 与 urls[0]
+// @description 3Movs（KVS/PHP）采集源：首页/分类/最新/搜索五方法；分类翻页严格 ?from=N，搜索翻页走 mode=async；详情内联 flashvars 解析 video_url(720P High Quality)/video_alt_url(360P Low Quality)，按 height 数值降序，最高档恒为 vod_play_sources[0] 与 urls[0]；【1.0.1】按要求删除 720 以下线路，仅保留 720P High Quality
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/3Movs.js
 // @dependencies cheerio
 
@@ -103,11 +103,11 @@ const FALLBACK_CATEGORIES = [
 
 /**
  * 画质档位定义。height 用于「按高度数值降序」排序，rank 用于同高度时稳定兜底。
- * video_url = High Quality 720P；video_alt_url = Low Quality 360P。
+ * 【去掉 720 以下线路】Low Quality 360P（video_alt_url）不再纳入，只保留 High Quality 720P。
  */
+const MIN_HEIGHT = 720;
 const QUALITY_DEFS = [
   { key: "hq", field: "video_url", textField: "video_url_text", fallbackName: "High Quality", height: 720, rank: 0 },
-  { key: "lq", field: "video_alt_url", textField: "video_alt_url_text", fallbackName: "Low Quality", height: 360, rank: 1 },
 ];
 
 /** 【核心】按 height 数值降序；同高度按 rank、再按原始顺序稳定排列。 */
@@ -593,6 +593,8 @@ function parseQualities(html) {
     const text = cleanText(pickFlashvar(block, def.textField)) || def.fallbackName;
     const parsedHeight = Number(pickFlashvar(block, `preview_height${i + 1}`)) || 0;
     const height = parsedHeight > 0 ? parsedHeight : def.height;
+    // 【去掉 720 以下线路】以最终解析出的真实高度为准过滤
+    if (height < MIN_HEIGHT) continue;
     out.push({ key: def.key, name: `${text} (${height}P)`, height, url, rank: def.rank });
   }
   const sorted = sortQualitiesByHeightDesc(out);

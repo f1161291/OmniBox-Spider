@@ -1,7 +1,7 @@
 // @name XHamster
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
-// @description xhamster.com 采集源：initials JSON 列表 + 分类/搜索分页 + HLS master 多档（1080P 最高分辨率优先）
+// @description xhamster.com 采集源：initials JSON 列表 + 分类/搜索分页 + HLS master 多档（1080P 最高分辨率优先）；【1.0.1】按要求删除 720 以下线路，仅保留 1080P/720P
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/XHamster.js
 // @dependencies cheerio
 
@@ -504,6 +504,21 @@ function extractMeta(html) {
 }
 
 /**
+ * 【最低分辨率门槛】按需求去掉 720 以下（480/240/144）线路，只保留 >= 720P。
+ * 站点若无 720 及以上档位，则回退保留最高可用档，避免整片无线路可播。
+ */
+const MIN_HEIGHT = 720;
+
+function filterMinHeight(variants) {
+  const arr = Array.isArray(variants) ? variants.slice() : [];
+  const kept = arr.filter((v) => (Number(v && v.height) || 0) >= MIN_HEIGHT);
+  if (kept.length) return kept;
+  // 没有任何达标档位：退回最高的一档，保证仍能播放
+  const sorted = sortVariantsByHeightDesc(arr);
+  return sorted.length ? [sorted[0]] : [];
+}
+
+/**
  * 【档位排序：明确函数】按 height 数值降序（1080 > 720 > 480 > 240 > 144），
  * 同高度再按 width 降序。保证 1080p 恒为第一个。
  */
@@ -532,9 +547,9 @@ function parseVariants(masterUrl) {
       });
     }
   }
-  // multi= 段缺失或损坏时按站点固定五档兜底
+  // multi= 段缺失或损坏时按站点固定档位兜底（只保留 >= MIN_HEIGHT）
   if (raw.length === 0) {
-    for (const q of [1080, 720, 480, 240, 144]) {
+    for (const q of [1080, 720]) {
       raw.push({ width: 0, height: q, label: `${q}p` });
     }
   }
@@ -545,7 +560,8 @@ function parseVariants(masterUrl) {
     seen.add(v.label);
     uniq.push(v);
   }
-  return sortVariantsByHeightDesc(uniq).map((v) => ({
+  // 【去掉 720 以下线路】过滤后再降序，1080P/720P 保留
+  return sortVariantsByHeightDesc(filterMinHeight(uniq)).map((v) => ({
     ...v,
     url: String(masterUrl).replace("_TPL_", v.label),
   }));
@@ -659,8 +675,7 @@ async function detail(params, context) {
     const html = await fetchHtml(detailUrl, DETAIL_TTL);
     const meta = extractMeta(html);
     const master = extractMasterUrl(html);
-    const mp4 = master ? "" : extractNoscriptMp4(html);
-
+    // 【去掉 720 以下线路】noscript 只提供 480p 单档 mp4，按要求不再作为线路返回
     const variants = master ? parseVariants(master) : [];
     const sources = variants.map((v) => ({
       name: qualityName(v.label),
@@ -678,14 +693,9 @@ async function detail(params, context) {
           playId: `xh:${path}|||master`,
         }],
       });
-    } else if (mp4) {
-      sources.push({
-        name: "480P",
-        episodes: [{ name: "480P", playId: `xh:${path}|||mp4` }],
-      });
     }
 
-    const top = variants.length ? qualityName(variants[0].label) : (mp4 ? "480P" : "");
+    const top = variants.length ? qualityName(variants[0].label) : "";
     log("info", `[detail] title=${meta.title || "(无)"}, master=${master ? "有" : "无"}, 档位=${variants.map((v) => v.label).join(">")}, 线路=${sources.length}`);
     return {
       list: [{
@@ -736,10 +746,9 @@ async function play(params, context) {
     const master = extractMasterUrl(html);
 
     if (!master) {
-      const mp4 = extractNoscriptMp4(html);
-      if (!mp4) throw new Error("详情页未解析到 HLS master 或 noscript mp4");
-      log("info", `[play] master 缺失，回退 noscript mp4: ${mp4.slice(0, 140)}`);
-      return { urls: [{ name: "480P", url: mp4 }], flag, header, parse: 0 };
+      // 【去掉 720 以下线路】noscript 的 480p mp4 不再返回
+      log("info", "[play] 未解析到 HLS master（480p 兜底已按需求移除），返回空线路");
+      return { urls: [], flag, header, parse: 0 };
     }
 
     // parseVariants 已按 height 数值降序：urls[0] 恒为 1080P 单档 playlist

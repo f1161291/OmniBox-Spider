@@ -1,7 +1,7 @@
 // @name PornTrex
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
-// @description porntrex.com 采集源：首页/分类/最新/搜索分页；详情页内联 flashvars 解析 480p/720p/1080p/2160p(4K) 多档 mp4 直链，按真实分辨率数值严格降序，最高档恒为 vod_play_sources[0] 与 play().urls[0]
+// @description porntrex.com 采集源：首页/分类/最新/搜索分页；详情页内联 flashvars 解析 480p/720p/1080p/2160p(4K) 多档 mp4 直链，按真实分辨率数值严格降序，最高档恒为 vod_play_sources[0] 与 play().urls[0]；【1.0.1】按要求删除 720 以下线路，仅保留 2160P/1080P/720P
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/PornTrex.js
 // @dependencies cheerio
 
@@ -104,11 +104,12 @@ const CLASS_LIST = [
 ];
 
 // flashvars 档位定义：字段后缀 -> 分辨率高度与显示名
+// 【去掉 720 以下线路】480p（video_url）不再纳入，只保留 720P 及以上
+const MIN_HEIGHT = 720;
 const QUALITY_DEFS = [
   { key: "video_alt_url3", height: 2160, label: "2160P 4K" },
   { key: "video_alt_url2", height: 1080, label: "1080P FHD" },
   { key: "video_alt_url", height: 720, label: "720P HD" },
-  { key: "video_url", height: 480, label: "480P" },
 ];
 
 const PREFIX = "[ptx]";
@@ -394,6 +395,7 @@ function extractVideoVariants(html) {
   const fv = extractFlashvars(html);
   const out = [];
   for (const d of QUALITY_DEFS) {
+    if (d.height < MIN_HEIGHT) continue; // 【去掉 720 以下线路】双保险
     const u = String(fv[d.key] || "").trim();
     if (!u) continue;
     const abs = absUrl(u);

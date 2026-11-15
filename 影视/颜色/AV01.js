@@ -1,7 +1,7 @@
 // @name AV01
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
-// @description av01.media（React SPA，HTML 仅 4948B 空壳）直连 /api/v1 JSON：最新/热门/标签榜单 + POST body query 搜索 + 单片详情；播放解析 HLS master 的 RESOLUTION，按高度数值降序，1080p 恒为 vod_play_sources[0] / urls[0]，免 token 直出 m3u8
+// @description av01.media（React SPA，HTML 仅 4948B 空壳）直连 /api/v1 JSON：最新/热门/标签榜单 + POST body query 搜索 + 单片详情；播放解析 HLS master 的 RESOLUTION，按高度数值降序，1080p 恒为 vod_play_sources[0] / urls[0]，免 token 直出 m3u8；【1.0.1】按要求删除 720 以下线路，仅保留 1080P/720P
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/AV01.js
 // @dependencies cheerio
 
@@ -417,6 +417,20 @@ function parseMasterVariants(text, id) {
 }
 
 /**
+ * 【最低分辨率门槛】按需求去掉 720 以下线路：显式 RESOLUTION 高度 < 720 的档位一律丢弃。
+ * height=0 表示 master 没给 RESOLUTION 的单档（COVER_ONLY 的 gen-variant，实为 720p），
+ * 这种保留，避免该片完全无线路。
+ */
+const MIN_HEIGHT = 720;
+
+function filterMinHeight(variants) {
+  return (Array.isArray(variants) ? variants : []).filter((v) => {
+    const h = Number(v && v.height) || 0;
+    return h === 0 || h >= MIN_HEIGHT;
+  });
+}
+
+/**
  * 档位排序：按 RESOLUTION 的高度【数值降序】——1080 > 720 > 360 > 0(单档默认)。
  * 同高度按 BANDWIDTH 降序，再按 master 原始顺序稳定排列。
  * 这是「最高分辨率优先」的唯一排序入口，detail() 与 play() 共用。
@@ -465,7 +479,8 @@ async function resolveVariants(id) {
     if (text && MASTER_TTL > 0) await setCachedText(key, text, MASTER_TTL);
   }
 
-  let variants = uniqueVariantNames(sortVariantsByHeightDesc(parseMasterVariants(text, id)));
+  // 【去掉 720 以下线路】先按高度过滤，再降序
+  let variants = uniqueVariantNames(sortVariantsByHeightDesc(filterMinHeight(parseMasterVariants(text, id))));
   if (!variants.length) {
     const gm = String(text || "").match(/gen-variant\.m3u8(?:\?[^\s"'<>]*)?/i);
     const uri = gm ? gm[0] : "gen-variant.m3u8?ro=0";
