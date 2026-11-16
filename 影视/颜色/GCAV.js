@@ -1,7 +1,7 @@
 // @name GCAV
-// @version 1.1.0
+// @version 1.1.1
 // @author omnibox-spider
-// @description gcav.me 采集源：六大频道 + 排序筛选 + 搜索分页；列表 a.cover-group 取标题/封面/时长/热度；详情页 const source 解析 cloudfront / bunny 双线路预览直链，免费或带登录态时补 /v/{id}/manifest 完整 m3u8；播放直链→sniff→parse=1 三段式兜底
+// @description gcav.me 采集源：修复宿主缺 cheerio 时列表返回 0 条导致封面全空（新增正则兜底解析 + Node 直连兜底）；六大频道 + 排序筛选 + 搜索分页；列表 a.cover-group 取标题/封面/时长/热度；详情页 const source 解析 cloudfront / bunny 双线路预览直链，免费或带登录态时补 /v/{id}/manifest 完整 m3u8；播放直链→sniff→parse=1 三段式兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/GCAV.js
 // @dependencies cheerio
 
@@ -58,6 +58,9 @@
  */
 
 const crypto = require("crypto");
+const https = require("https");
+const http = require("http");
+const zlib = require("zlib");
 
 let cheerio = null;
 try {
@@ -195,6 +198,55 @@ function buildCookie(extra) {
     .trim();
 }
 
+function decompressText(buf, encoding) {
+  const enc = String(encoding || "").toLowerCase();
+  try {
+    if (enc.includes("br")) return zlib.brotliDecompressSync(buf);
+    if (enc.includes("gzip")) return zlib.gunzipSync(buf);
+    if (enc.includes("deflate")) return zlib.inflateSync(buf);
+  } catch (_) {}
+  return buf;
+}
+/** Node 直连（http/https），带重定向跟随与解压 */
+function nodeRequest(urlStr, options = {}, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 4) return reject(new Error("重定向过多"));
+    let u;
+    try { u = new URL(urlStr); } catch (e) { return reject(e); }
+    const isHttps = u.protocol === "https:";
+    const client = isHttps ? https : http;
+    const headers = Object.assign({}, options.headers || {}, {
+      "Accept-Encoding": "gzip, deflate, br",
+    });
+    const req = client.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (isHttps ? 443 : 80),
+      path: u.pathname + u.search,
+      method: options.method || "GET",
+      headers,
+      timeout: options.timeout || 20000,
+      rejectUnauthorized: false,
+    }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        return nodeRequest(new URL(res.headers.location, u.href).href, options, redirects + 1)
+          .then(resolve).catch(reject);
+      }
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve({
+        statusCode: res.statusCode,
+        headers: res.headers,
+        body: decompressText(Buffer.concat(chunks), res.headers["content-encoding"]).toString("utf-8"),
+      }));
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(new Error("请求超时")); });
+    req.end();
+  });
+}
+
 async function requestText(url, options = {}) {
   const headers = {
     "User-Agent": UA,
@@ -206,11 +258,25 @@ async function requestText(url, options = {}) {
   const cookie = buildCookie(options.cookie);
   if (cookie) headers.Cookie = cookie;
 
-  const res = await OmniBox.request(url, {
-    method: options.method || "GET",
-    headers,
-    timeout: options.timeout || 20000,
-  });
+  let res = null;
+  // 宿主缺失/不支持 OmniBox.request 时直接回落 Node 直连，
+  // 否则 home/category 会整体抛错返回 0 条（表现为「封面全空」）。
+  if (OmniBox && typeof OmniBox.request === "function") {
+    try {
+      res = await OmniBox.request(url, {
+        method: options.method || "GET",
+        headers,
+        timeout: options.timeout || 20000,
+      });
+    } catch (_) { res = null; }
+  }
+  if (!res) {
+    res = await nodeRequest(url, {
+      method: options.method || "GET",
+      headers,
+      timeout: options.timeout || 20000,
+    });
+  }
   if (!res || Number(res.statusCode) !== 200) {
     throw new Error(`HTTP ${res?.statusCode ?? "unknown"} @ ${url}`);
   }
@@ -286,8 +352,77 @@ function pickImage($, node) {
   return "";
 }
 
+/**
+ * 正则兜底解析：宿主未安装 cheerio 时使用。
+ * 站点卡片形态稳定：
+ *   <a class="... cover-group" href="https://gcav.me/v/{id}" title="标题" data-id="{id}">
+ *     <img data-src="https://gc.skylines.pro/thumbnails/{id}.jpg" src="data:image/png;base64,..." alt="标题">
+ * 注意 img[src] 是 1x1 base64 占位图，必须跳过，只认 data-src / data-original。
+ */
+function parseListByRegex(html, categoryId) {
+  const text = String(html || "");
+  const list = [];
+  const seen = new Set();
+  // 注意：真实标签跨多行且 class 以空格开头（如 class=" flex gap-2 ... cover-group"），
+  // 不能给 class 值内部加 \b 边界，否则匹配不到。
+  const re = /<a\b[^>]*class="[^"]*cover-group[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const openTag = m[0].slice(0, m[0].indexOf(">") + 1);
+    const inner = m[1];
+    const hrefM = /\bhref="([^"]+)"/i.exec(openTag);
+    if (!hrefM) continue;
+    const href = decodeEntities(hrefM[1]);
+    const idM = href.match(/\/v\/(\d+)/);
+    if (!idM) continue;
+    const dataIdM = /\bdata-id="([^"]*)"/i.exec(openTag);
+    const id = String((dataIdM && dataIdM[1]) || idM[1]).trim();
+    if (!id || seen.has(id)) continue;
+
+    const titleM = /\btitle="([^"]*)"/i.exec(openTag);
+    const altM = /<img\b[^>]*\balt="([^"]*)"/i.exec(inner);
+    const name = clean(decodeEntities((titleM && titleM[1]) || "") || (altM && altM[1]) || "");
+    if (!name) continue;
+
+    // 封面：只认 data-src / data-original，跳过 base64 占位
+    let pic = "";
+    const dsM = /<img\b[^>]*\bdata-src="([^"]+)"/i.exec(inner);
+    const doM = /<img\b[^>]*\bdata-original="([^"]+)"/i.exec(inner);
+    const aDoM = /\bdata-original="([^"]+)"/i.exec(openTag);
+    const aDsM = /\bdata-src="([^"]+)"/i.exec(openTag);
+    for (const cand of [dsM && dsM[1], doM && doM[1], aDoM && aDoM[1], aDsM && aDsM[1]]) {
+      const v = decodeEntities(cand || "");
+      if (v && !/^data:|placeholder/i.test(v)) { pic = v; break; }
+    }
+
+    const durM = /<span[^>]*class="[^"]*bottom-1[^"]*right-1[^"]*"[^>]*>([^<]*)</i.exec(inner);
+    const viewsM = /<span[^>]*class="[^"]*bottom-1[^"]*left-1[^"]*"[^>]*>[\s\S]{0,120}?<span[^>]*>([^<]*)</i.exec(inner);
+    const duration = clean(durM ? durM[1] : "");
+    const views = clean(viewsM ? viewsM[1] : "");
+
+    seen.add(id);
+    list.push({
+      vod_id: id,
+      vod_name: name,
+      vod_pic: pic,
+      type_id: String(categoryId || "video"),
+      type_name: (CLASS_LIST.find((c) => c.type_id === categoryId) || CLASS_LIST[0]).type_name,
+      vod_remarks: duration || "",
+      vod_subtitle: [views, duration].filter(Boolean).join(" / "),
+    });
+  }
+  return list;
+}
+
 function parseList(html, categoryId) {
-  if (!cheerio) return [];
+  // 宿主未内置 cheerio 时走正则兜底，避免整页返回 0 条（表现为「封面全空」）
+  if (!cheerio) {
+    const fallback = parseListByRegex(html, categoryId);
+    if (fallback.length) {
+      log("info", `[parseList] cheerio 不可用，正则兜底解析 ${fallback.length} 条`);
+    }
+    return fallback;
+  }
   const $ = cheerio.load(html);
   const list = [];
   const seen = new Set();
