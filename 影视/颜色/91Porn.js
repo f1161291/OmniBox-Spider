@@ -1,6 +1,6 @@
 /**
  * @name 91porn
- * @version 2.4.0
+ * @version 2.4.1
  * @description 91porn.com 采集源（OmniBox Spider，多域名轮换（健康度排序+SITE_HOSTS/SITE_MIRRORS+镜像同构探测+跳转入口域名落地解析+IP拦截降权；内置 91p618.com 跳转入口）；列表封面/标题反混淆真值回填；返回形状守卫；列表耗时预算；SDK/Node 双通道传输 + 网络自检 + HTTP/SOCKS5 代理隧道；会话 cookie jar + 403 预热重试（应对出口 IP 拦截）；修复高清分类/搜索分页/作者解析/无效视频/直链规范）
  * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91Porn.js
  * @dependencies []
@@ -20,9 +20,18 @@
  *      避免把 SPA 停放页混进轮换池制造新的播放问题。
  *   4) 新镜像即时重试：探测到可用镜像后立刻用它重跑本次请求，尽量不让这次调用空手而归。
  *
- * 配置：
- *   SITE_HOSTS              显式指定域名列表（逗号分隔），优先级最高，完全覆盖默认
- *   SITE_MIRRORS            追加候选镜像（逗号分隔），参与轮换并在失败时被探测
+ * 配置（三种「用环境变量加网址」的方式，按需要选一种）：
+ *   SITE_HOSTS              显式指定域名列表（逗号分隔），**完全覆盖**默认池（连主站一起替换）
+ *                           例：SITE_HOSTS=https://91porn.com,https://your-mirror.com
+ *   SITE_MIRRORS            在默认池基础上**追加**候选镜像（逗号分隔），主站仍在
+ *                           例：SITE_MIRRORS=https://your-mirror.com
+ *   SITE_API                只替换主站基址（默认 https://91porn.com）
+ *                           例：SITE_API=https://your-mirror.com
+ *   说明：
+ *     - 三项都支持「不带协议」（自动补 https://）、尾斜杠自动去掉、自动去重。
+ *     - 配进去的域名同样可以是「跳转入口型」（如 91p618.com），全部基址失败时会
+ *       自动探测它的 META Refresh 落地域名并并入轮换池。
+ *     - 空值 / 纯逗号 / 非法 URL 都会安全回退，不会让脚本崩。
  *   NINETYONE_ROTATE_COOLDOWN  被拦截域名的降权时长（秒），默认 600
  */
 
@@ -665,22 +674,33 @@ async function probeMirror(host, timeout = 8000) {
 }
 
 /**
- * 作用：全部基址失败时，探测 SITE_MIRRORS / 内置池里的候选域名，把可用的并入 HOSTS。
+ * 作用：全部基址失败时，探测所有候选域名，把可用的并入 HOSTS。
+ * 候选来源（合并去重）：
+ *   1) 当前 HOSTS 里的全部域名 —— 含 SITE_HOSTS / SITE_MIRRORS / SITE_API 用户配置的；
+ *      用户配的域名同样可能是「跳转入口」，必须一并探测出落地域名才能救回本次请求；
+ *   2) SITE_MIRRORS 追加项；
+ *   3) BUILTIN_MIRRORS 内置池。
  * 返回新并入的域名数组（可能为空）。
  * 只在「已经全挂」时触发，正常请求路径零成本。
  */
 async function discoverMirrors() {
   const candidates = [];
-  const fromMirrors = String(process.env.SITE_MIRRORS || '')
-    .split(',').map(x => x.trim()).filter(Boolean);
-  for (const raw of [...fromMirrors, ...BUILTIN_MIRRORS]) {
-    const u = (/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).replace(/\/+$/, '');
-    // 注意：不能因为「已在 HOSTS 里」就跳过探测。
-    // 跳转入口型域名（如 91p618.com）虽然被登记进轮换池，但它本身返回的是
-    // META Refresh 空壳，直接当基址请求必然失败；必须探测出它的**落地域名**
-    // 并并入池，轮转才真正生效。落地域名若已在池中，probe 后会被去重。
-    if (!candidates.includes(u)) candidates.push(u);
-  }
+  const push = (raw) => {
+    const u = (/^https?:\/\//i.test(String(raw)) ? String(raw) : `https://${raw}`).replace(/\/+$/, '');
+    if (u && !candidates.includes(u)) candidates.push(u);
+  };
+  // 1) 池内域名（含用户通过 SITE_HOSTS 配的跳转入口）
+  for (const h of HOSTS.slice()) push(h);
+  // 2) SITE_MIRRORS 追加项
+  String(process.env.SITE_MIRRORS || '')
+    .split(',').map(x => x.trim()).filter(Boolean)
+    .forEach(push);
+  // 3) 内置池
+  BUILTIN_MIRRORS.forEach(push);
+  // 注意：不能因为「已在 HOSTS 里」就跳过探测。
+  // 跳转入口型域名（如 91p618.com）虽然被登记进轮换池，但它本身返回的是
+  // META Refresh 空壳，直接当基址请求必然失败；必须探测出它的**落地域名**
+  // 并并入池，轮转才真正生效。落地域名若已在池中，probe 后会被去重。
   if (!candidates.length) return [];
 
   const added = [];
