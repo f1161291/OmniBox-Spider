@@ -1,7 +1,7 @@
 // @name TAOLUSM
 // @author 宝宝巴士
 // @description taolusm.com（套路调教视频）：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默 + 探测超时 6s）；从地址发布页 itaolu.com 被动拉取备用域名（全部域名失败才拉，分批 10 个探测）；首页/分类/搜索/详情/播放；列表 module-poster-item 取封面；详情 const source 取 preview_mp4，免费或有权限时补 /v/{id}/manifest 完整 m3u8
-// @version 1.0.2
+// @version 1.0.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/TAOLUSM.js
 // @dependencies []
 /**
@@ -600,6 +600,146 @@ async function mapLimit(items, limit, worker) {
   return results;
 }
 
+/* ---------------- 封面 CDN 兜底 ----------------
+ * 站点主域和图片 CDN 是两套解析：
+ *   站点  → taolusm.com（有发布页可切换）
+ *   图床  → tl.skylines.pro（CloudFront）/ tl-b.skylines.pro（Bunny）
+ * 主域换到新地址后，图床仍可能不可达（CloudFront 常被墙）。
+ * 处理：同一张图按 CDN 列表依次尝试；全部失败则抓回字节内联成 data URI，
+ * 彻底不依赖用户侧能否访问 CDN。
+ * ================================================ */
+const COVER_INLINE = process.env.TAOLU_COVER_INLINE !== "0";
+const COVER_TIMEOUT = Math.max(3000, Number(process.env.TAOLU_COVER_TIMEOUT || 8000) || 8000);
+const COVER_CDN_HOSTS = String(process.env.TAOLU_COVER_HOSTS || "").trim()
+  ? String(process.env.TAOLU_COVER_HOSTS).split(",").map((x) => x.trim()).filter(Boolean)
+  : ["tl.skylines.pro", "tl-b.skylines.pro"];
+const coverCache = new Map();
+
+function sniffImageMime(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 4) return "";
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "image/png";
+  if (buf.slice(0, 3).toString("ascii") === "GIF") return "image/gif";
+  if (buf.slice(0, 4).toString("ascii") === "RIFF" && buf.slice(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  return "";
+}
+/** 抓图片原始字节（带 Referer，绕防盗链） */
+function fetchImageBinary(urlStr, referer, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 3) return reject(new Error("图片重定向过多"));
+    let u;
+    try { u = new URL(urlStr); } catch (e) { return reject(e); }
+    const isHttps = u.protocol === "https:";
+    const client = isHttps ? https : http;
+    const req = client.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (isHttps ? 443 : 80),
+      path: u.pathname + u.search,
+      method: "GET",
+      headers: {
+        "User-Agent": UA,
+        Referer: referer,
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+      },
+      timeout: COVER_TIMEOUT,
+      rejectUnauthorized: false,
+    }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        return fetchImageBinary(new URL(res.headers.location, u.href).href, referer, redirects + 1)
+          .then(resolve).catch(reject);
+      }
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        const raw = Buffer.concat(chunks);
+        const enc = String(res.headers["content-encoding"] || "").toLowerCase();
+        let buf = raw;
+        try {
+          if (enc.includes("br")) buf = zlib.brotliDecompressSync(raw);
+          else if (enc.includes("gzip")) buf = zlib.gunzipSync(raw);
+          else if (enc.includes("deflate")) buf = zlib.inflateSync(raw);
+        } catch (_) {}
+        resolve({ statusCode: res.statusCode, body: buf });
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(new Error("封面超时")); });
+    req.end();
+  });
+}
+/** 把图片 URL 换成同路径的另一个 CDN 域 */
+function swapCoverCdn(url, fromHost, toHost) {
+  try {
+    const u = new URL(url);
+    if (u.hostname !== fromHost) return url;
+    u.hostname = toHost;
+    return u.href;
+  } catch (_) { return url; }
+}
+
+/**
+ * 解决封面：
+ *  1) 依次尝试各 CDN 域；
+ *  2) 任一域返回真实图片字节 → 内联 data URI（避免用户侧再请求 CDN）；
+ *  3) 全部失败 → 返回原始 URL（至少保留信息，不阻断列表）。
+ */
+async function resolveCover(url, refererHost) {
+  if (!url || url.startsWith("data:")) return url || "";
+  if (coverCache.has(url)) return coverCache.get(url);
+
+  const referer = `${refererHost || HOST}/`;
+  const candidates = [url];
+  try {
+    const host = new URL(url).hostname;
+    for (const cdn of COVER_CDN_HOSTS) {
+      if (cdn !== host) candidates.push(swapCoverCdn(url, host, cdn));
+    }
+  } catch (_) {}
+
+  for (const cand of candidates) {
+    try {
+      const r = await withHardTimeout(
+        fetchImageBinary(cand, referer),
+        COVER_TIMEOUT + 1000,
+        `cover ${cand}`
+      );
+      const mime = sniffImageMime(r.body);
+      if (r.statusCode === 200 && mime) {
+        if (!COVER_INLINE) {
+          coverCache.set(url, cand);
+          return cand;
+        }
+        const uri = `data:${mime};base64,${r.body.toString("base64")}`;
+        if (coverCache.size >= 300) coverCache.delete(coverCache.keys().next().value);
+        coverCache.set(url, uri);
+        return uri;
+      }
+    } catch (_) {}
+  }
+  logI(`[cover] 全部 CDN 失败，保留原 URL: ${String(url).slice(0, 80)}`);
+  coverCache.set(url, url);
+  return url;
+}
+
+/** 批量处理列表封面（限并发，失败不阻断） */
+async function resolveCovers(list, refererHost) {
+  if (!Array.isArray(list) || !list.length) return list;
+  const targets = list.filter((v) => v && v.vod_pic && !String(v.vod_pic).startsWith("data:"));
+  if (!targets.length) return list;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < targets.length) {
+      const item = targets[cursor++];
+      try { item.vod_pic = await resolveCover(item.vod_pic, refererHost); } catch (_) {}
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, targets.length) }, () => worker()));
+  return list;
+}
+
 /* ---------------- 分类 ---------------- */
 const CLASS_LIST = [
   { type_id: "juqing", type_name: "剧情调教" },
@@ -760,7 +900,8 @@ async function fetchDetail(videoId) {
 
   const html = await fetchHtml(`${HOST}/v/${id}`, DETAIL_TTL);
   const title = parseTitle(html) || `TAOLUSM ${id}`;
-  const pic = parseCover(html);
+  let pic = parseCover(html);
+  if (pic) pic = await resolveCover(pic, HOST);
   const content = parseDesc(html);
   const preview = parseSource(html);
   const { hasAccess, manifest } = await probeManifest(id);
@@ -853,6 +994,7 @@ async function home(params, context) {
     logI(`[home] from=${context?.from || "web"} host=${HOST}`);
     const html = await fetchHtml(`${HOST}/`, HOME_TTL);
     let list = parseListByRegex(html, "juqing");
+    list = await resolveCovers(list, HOST);
     logI(`[home] 返回 ${list.length} 条`);
     return { class: CLASS_LIST, filters: {}, list, parse: 0, jx: 0 };
   } catch (e) {
@@ -870,7 +1012,7 @@ async function category(params, context) {
     const base = `${HOST}/${encodeURIComponent(categoryId)}`;
     const url = page > 1 ? `${base}?page=${page}` : base;
     const html = await fetchHtml(url, CATEGORY_TTL);
-    const list = parseListByRegex(html, categoryId);
+    const list = await resolveCovers(parseListByRegex(html, categoryId), HOST);
     const pagecount = parsePageCount(html, list.length ? page + 1 : page);
     logI(`[category] 返回 ${list.length} 条，pagecount=${pagecount}`);
     return { page, pagecount, total: pagecount * list.length, limit: list.length, list };
@@ -906,7 +1048,7 @@ async function search(params, context) {
   try {
     const url = `${HOST}/search?q=${encodeURIComponent(wd)}${page > 1 ? `&page=${page}` : ""}`;
     const html = await fetchHtml(url, SEARCH_TTL);
-    const list = parseListByRegex(html, "juqing");
+    const list = await resolveCovers(parseListByRegex(html, "juqing"), HOST);
     const pagecount = parsePageCount(html, list.length ? page + 1 : page);
     logI(`[search] 返回 ${list.length} 条`);
     return { page, pagecount, total: pagecount * list.length, limit: list.length, list };

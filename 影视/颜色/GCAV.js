@@ -1,5 +1,5 @@
 // @name GCAV
-// @version 1.2.2
+// @version 1.2.3
 // @author omnibox-spider
 // @description gcav.me 采集源：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默 + 探测超时 6s）；新增地址发布页 itaolu.com 被动拉取备用域名（全部域名失败才拉，分批 10 个探测，13 个 gcav 备用域）；修复宿主缺 cheerio 时列表返回 0 条导致封面全空（新增正则兜底解析 + Node 直连兜底）；六大频道 + 排序筛选 + 搜索分页；列表 a.cover-group 取标题/封面/时长/热度；详情页 const source 解析 cloudfront / bunny 双线路预览直链，免费或带登录态时补 /v/{id}/manifest 完整 m3u8；播放直链→sniff→parse=1 三段式兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/GCAV.js
@@ -970,6 +970,138 @@ function buildLegacyFields(sources) {
 }
 
 // ---------------------------------------------------------------------------
+// 封面 CDN 兜底
+// ---------------------------------------------------------------------------
+/**
+ * 站点主域和图片 CDN 是两套解析：
+ *   站点  → gcav.me（有发布页可切换）
+ *   图床  → gc.skylines.pro（CloudFront）/ gc-b.skylines.pro（Bunny）
+ * 主域换到新地址后，图床仍可能不可达（CloudFront 常被墙）。
+ * 处理：同一张图按 CDN 列表依次尝试；成功则内联 data URI，
+ * 让封面完全不依赖用户侧对 CDN 的连通性。
+ */
+const COVER_INLINE = process.env.GCAV_COVER_INLINE !== "0";
+const COVER_TIMEOUT = Math.max(3000, Number(process.env.GCAV_COVER_TIMEOUT || 8000) || 8000);
+const COVER_CDN_HOSTS = String(process.env.GCAV_COVER_HOSTS || "").trim()
+  ? String(process.env.GCAV_COVER_HOSTS).split(",").map((x) => x.trim()).filter(Boolean)
+  : ["gc.skylines.pro", "gc-b.skylines.pro"];
+const coverCache = new Map();
+
+function sniffImageMime(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 4) return "";
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "image/png";
+  if (buf.slice(0, 3).toString("ascii") === "GIF") return "image/gif";
+  if (buf.slice(0, 4).toString("ascii") === "RIFF" && buf.slice(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  return "";
+}
+function fetchImageBinary(urlStr, referer, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 3) return reject(new Error("图片重定向过多"));
+    let u;
+    try { u = new URL(urlStr); } catch (e) { return reject(e); }
+    const isHttps = u.protocol === "https:";
+    const client = isHttps ? https : http;
+    const req = client.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (isHttps ? 443 : 80),
+      path: u.pathname + u.search,
+      method: "GET",
+      headers: {
+        "User-Agent": UA,
+        Referer: referer,
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+      },
+      timeout: COVER_TIMEOUT,
+      rejectUnauthorized: false,
+    }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        return fetchImageBinary(new URL(res.headers.location, u.href).href, referer, redirects + 1)
+          .then(resolve).catch(reject);
+      }
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        const raw = Buffer.concat(chunks);
+        const enc = String(res.headers["content-encoding"] || "").toLowerCase();
+        let buf = raw;
+        try {
+          if (enc.includes("br")) buf = zlib.brotliDecompressSync(raw);
+          else if (enc.includes("gzip")) buf = zlib.gunzipSync(raw);
+          else if (enc.includes("deflate")) buf = zlib.inflateSync(raw);
+        } catch (_) {}
+        resolve({ statusCode: res.statusCode, body: buf });
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(new Error("封面超时")); });
+    req.end();
+  });
+}
+function swapCoverCdn(url, fromHost, toHost) {
+  try {
+    const u = new URL(url);
+    if (u.hostname !== fromHost) return url;
+    u.hostname = toHost;
+    return u.href;
+  } catch (_) { return url; }
+}
+async function resolveCover(url, refererHost) {
+  if (!url || String(url).startsWith("data:")) return url || "";
+  if (coverCache.has(url)) return coverCache.get(url);
+
+  const referer = `${refererHost || HOST}/`;
+  const candidates = [url];
+  try {
+    const host = new URL(url).hostname;
+    for (const cdn of COVER_CDN_HOSTS) {
+      if (cdn !== host) candidates.push(swapCoverCdn(url, host, cdn));
+    }
+  } catch (_) {}
+
+  for (const cand of candidates) {
+    try {
+      const r = await withHardTimeout(
+        fetchImageBinary(cand, referer),
+        COVER_TIMEOUT + 1000,
+        `cover ${cand}`
+      );
+      const mime = sniffImageMime(r.body);
+      if (r.statusCode === 200 && mime) {
+        if (!COVER_INLINE) {
+          coverCache.set(url, cand);
+          return cand;
+        }
+        const uri = `data:${mime};base64,${r.body.toString("base64")}`;
+        if (coverCache.size >= 300) coverCache.delete(coverCache.keys().next().value);
+        coverCache.set(url, uri);
+        return uri;
+      }
+    } catch (_) {}
+  }
+  log("info", `[cover] 全部 CDN 失败，保留原 URL: ${String(url).slice(0, 80)}`);
+  coverCache.set(url, url);
+  return url;
+}
+async function resolveCovers(list, refererHost) {
+  if (!Array.isArray(list) || !list.length) return list;
+  const targets = list.filter((v) => v && v.vod_pic && !String(v.vod_pic).startsWith("data:"));
+  if (!targets.length) return list;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < targets.length) {
+      const item = targets[cursor++];
+      try { item.vod_pic = await resolveCover(item.vod_pic, refererHost); } catch (_) {}
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, targets.length) }, () => worker()));
+  return list;
+}
+
+// ---------------------------------------------------------------------------
 // access 探测与免费优先排序
 // ---------------------------------------------------------------------------
 
@@ -1079,9 +1211,9 @@ async function home(params, context) {
       }),
     ]);
 
-    const freeList = freeHtml ? parseList(freeHtml, "free") : [];
+    const freeList = freeHtml ? await resolveCovers(parseList(freeHtml, "free"), HOST) : [];
     const freeIds = new Set(freeList.map((v) => v.vod_id));
-    let list = parseList(homeHtml, "video");
+    let list = await resolveCovers(parseList(homeHtml, "video"), HOST);
 
     // 首页里落在 /free 名单上的，直接认定免费，不再探测
     list.forEach((item) => {
@@ -1143,7 +1275,7 @@ async function category(params, context) {
     log("info", `[category] 请求 URL=${url}`);
 
     const html = await fetchHtml(url, CATEGORY_TTL);
-    let list = parseList(html, categoryId);
+    let list = await resolveCovers(parseList(html, categoryId), HOST);
     // 免费频道整页都是完整片，不必逐条探测；其它频道探测后免费排前
     if (categoryId === "free") {
       list.forEach((item) => { item._hasAccess = true; });
@@ -1180,7 +1312,7 @@ async function search(params, context) {
     log("info", `[search] 请求 URL=${finalUrl}`);
 
     const html = await fetchHtml(finalUrl, SEARCH_TTL);
-    let list = parseList(html, "video");
+    let list = await resolveCovers(parseList(html, "video"), HOST);
     list = await markAccess(list, "search");
     list = sortFreeFirst(list, "search").map(decorateListRemarks);
     const pagecount = parsePageCount(html, 1);
@@ -1204,7 +1336,9 @@ async function detail(params, context) {
     log("info", `[detail] 请求 URL=${detailUrl}`);
 
     const html = await fetchHtml(detailUrl, DETAIL_TTL);
-    const info = parseDetail(html, videoId);
+    const info = parseDetail(
+      html, videoId);
+    if (info && info.vod_pic) info.vod_pic = await resolveCover(info.vod_pic, HOST);
     log("info", `[detail] title=${info.vod_name}, source=${info.source ? "命中" : "未命中"}, hasAccess=${info.hasAccess}, lines=${info.lines.map((l) => l.code).join(",")}`);
 
     // 各线路带 video_cdn_preference cookie 重取详情；cloudfront 复用已抓到的页面，避免重复请求
