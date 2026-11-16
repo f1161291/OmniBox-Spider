@@ -1,7 +1,7 @@
 // @name TAOLUSM
 // @author 宝宝巴士
 // @description taolusm.com（套路调教视频）：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默 + 探测超时 6s）；从地址发布页 itaolu.com 被动拉取备用域名（全部域名失败才拉，分批 10 个探测）；首页/分类/搜索/详情/播放；列表 module-poster-item 取封面；详情 const source 取 preview_mp4，免费或有权限时补 /v/{id}/manifest 完整 m3u8
-// @version 1.0.1
+// @version 1.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/TAOLUSM.js
 // @dependencies []
 /**
@@ -95,11 +95,40 @@ const PROBE_BATCH_SIZE = (() => {
 const PROBE_BATCH_DELAY = 200;
 const PROBE_TIMEOUT = Math.max(3000, Number(process.env.TAOLU_PROBE_TIMEOUT || 6000) || 6000);
 
+/**
+ * 内置备用域名（2026-11-17 从发布页 itaolu.com「套路视频」区块抄录）。
+ * 作用：发布页本身不可达时（实测部分网络 Node 直连会 ECONNRESET，
+ * 宿主 SDK 也可能被拦），仍有一批已知域名可轮换，不至于直接抓瞎。
+ * 可用 TAOLU_HOSTS 追加，TAOLU_NO_BUILTIN=1 关闭内置列表。
+ */
+const BUILTIN_HOSTS = String(process.env.TAOLU_NO_BUILTIN || "") === "1" ? [] : [
+  "https://taolusm.com",
+  "https://taolu.sale",
+  "https://tlsm.app",
+  "https://tlsm.shop",
+  "https://taolu.red",
+  "https://tlsm.one",
+  "https://taolu.bio",
+  "https://tlsm.run",
+  "https://tlsm.club",
+  "https://tlsm.live",
+  "https://taolu.pro",
+  "https://taolusm.pro",
+  "https://tlsm.net",
+  "https://wetaolu.pro",
+  "https://taolu99.space",
+  "https://taolu.dog",
+  "https://taolu.one",
+  "https://tlsm.xyz",
+  "https://tlsm.tv",
+  "https://91taolu.mom",
+];
+
 const HOST_POOL = (() => {
   const primary = normalizeHost(process.env.TAOLU_HOST || "https://taolusm.com");
   const extra = String(process.env.TAOLU_HOSTS || "")
     .split(",").map((x) => x.trim()).filter(Boolean).map(normalizeHost);
-  return Array.from(new Set([primary, ...extra]));
+  return Array.from(new Set([primary, ...extra, ...BUILTIN_HOSTS.map(normalizeHost)]));
 })();
 let HOST = HOST_POOL[0];
 let HOST_POOL_READY = false;
@@ -257,20 +286,72 @@ async function restoreHostCache() {
   } catch (_) {}
 }
 
+/**
+ * 拉发布页：SDK 优先、Node 直连兜底。
+ * 实测部分网络环境下 Node 直连 itaolu.com 会被 ECONNRESET，
+ * 而宿主 request 走宿主自己的网络栈/代理能通，所以必须先试 SDK。
+ */
+async function fetchPublishPage(url) {
+  const headers = {
+    "User-Agent": UA,
+    Accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    Referer: `${url.replace(/\/+$/, "")}/`,
+  };
+  const timeout = Math.max(5000, Number(process.env.TAOLU_PUBLISH_TIMEOUT || 12000) || 12000);
+  const errors = [];
+
+  // ① 宿主 SDK
+  if (OmniBox && typeof OmniBox.request === "function") {
+    try {
+      const r = await withHardTimeout(
+        Promise.resolve(OmniBox.request(url, { method: "GET", headers, timeout })),
+        timeout,
+        `publish sdk ${url}`
+      );
+      const body = typeof r?.body === "string" ? r.body : "";
+      if (Number(r?.statusCode) === 200 && body.length > 500) return body;
+      errors.push(`sdk HTTP ${r?.statusCode ?? "?"} len=${body.length}`);
+    } catch (e) {
+      errors.push(`sdk ${e?.message || e}`);
+    }
+  }
+
+  // ② Node 直连
+  try {
+    const r = await withHardTimeout(
+      nodeRequest(url, { timeout, headers }),
+      timeout,
+      `publish node ${url}`
+    );
+    const body = String(r.body || "");
+    if (Number(r.statusCode) === 200 && body.length > 500) return body;
+    errors.push(`node HTTP ${r.statusCode} len=${body.length}`);
+  } catch (e) {
+    errors.push(`node ${e?.message || e}`);
+  }
+
+  throw new Error(`发布页两条通道均失败: ${errors.join(" | ")}`);
+}
+
 async function discoverHosts() {
   const candidates = new Set();
+  let publishOk = false;
   try {
     logI(`[hosts] 拉取发布页 ${PUBLISH_PAGE}`);
-    const r = await nodeRequest(PUBLISH_PAGE, {
-      timeout: 15000,
-      headers: { "User-Agent": UA, Referer: `${PUBLISH_PAGE.replace(/\/+$/, "")}/` },
-    });
-    const body = String(r.body || "");
+    const body = await fetchPublishPage(PUBLISH_PAGE);
+    publishOk = true;
     const found = extractSectionHosts(body, PUBLISH_SECTION);
     found.forEach((h) => candidates.add(h));
     logI(`[hosts] 发布页「${PUBLISH_SECTION}」解析到 ${found.length} 个域名`);
   } catch (e) {
     logI(`[hosts] 发布页拉取失败: ${e?.message || e}`);
+  }
+
+  if (!publishOk) {
+    // 发布页拿不到 ≠ 没有新域名：保持现有池，交给调用方继续轮换/重试
+    logI("[hosts] 发布页不可用，保留现有域名池不变");
+    return 0;
   }
 
   const newOnes = Array.from(candidates).filter((h) => !HOST_POOL.includes(h));

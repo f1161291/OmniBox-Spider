@@ -1,5 +1,5 @@
 // @name GCAV
-// @version 1.2.1
+// @version 1.2.2
 // @author omnibox-spider
 // @description gcav.me 采集源：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默 + 探测超时 6s）；新增地址发布页 itaolu.com 被动拉取备用域名（全部域名失败才拉，分批 10 个探测，13 个 gcav 备用域）；修复宿主缺 cheerio 时列表返回 0 条导致封面全空（新增正则兜底解析 + Node 直连兜底）；六大频道 + 排序筛选 + 搜索分页；列表 a.cover-group 取标题/封面/时长/热度；详情页 const source 解析 cloudfront / bunny 双线路预览直链，免费或带登录态时补 /v/{id}/manifest 完整 m3u8；播放直链→sniff→parse=1 三段式兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/GCAV.js
@@ -116,11 +116,32 @@ const PROBE_BATCH_DELAY = 200;
 const PROBE_TIMEOUT = Math.max(3000, Number(process.env.GCAV_PROBE_TIMEOUT || 6000) || 6000);
 
 /** 域名池：第一个是当前 HOST，其余为备用 */
+/**
+ * 内置备用域名（2026-11-17 从发布页 itaolu.com「国产AV视频」区块抄录）。
+ * 作用：发布页本身不可达时（Node 直连可能 ECONNRESET、宿主 SDK 也可能被拦），
+ * 仍有一批已知域名可轮换。SITE_HOSTS 可追加，GCAV_NO_BUILTIN=1 关闭。
+ */
+const BUILTIN_HOSTS = String(process.env.GCAV_NO_BUILTIN || "") === "1" ? [] : [
+  "https://gcav.me",
+  "https://gcav.sale",
+  "https://gcav.app",
+  "https://gcav.shop",
+  "https://gcav.red",
+  "https://cnav.live",
+  "https://gcav.live",
+  "https://gcav.run",
+  "https://gcav.club",
+  "https://gcav.pro",
+  "https://gcav.bio",
+  "https://gavs.lol",
+  "https://gcav.lol",
+];
+
 const HOST_POOL = (() => {
   const primary = normalizeHost(process.env.SITE_HOST || "https://gcav.me");
   const extra = String(process.env.SITE_HOSTS || "")
     .split(",").map((x) => x.trim()).filter(Boolean).map(normalizeHost);
-  return Array.from(new Set([primary, ...extra]));
+  return Array.from(new Set([primary, ...extra, ...BUILTIN_HOSTS.map(normalizeHost)]));
 })();
 let HOST = HOST_POOL[0];           // 当前生效域名（12 处引用都用它）
 let HOST_POOL_READY = false;       // 是否已尝试从缓存恢复过
@@ -356,20 +377,65 @@ async function restoreHostCache() {
 }
 
 /** 分批探测候选域名：每批 PROBE_BATCH_SIZE 个，批间 sleep */
+/** 拉发布页：SDK 优先、Node 直连兜底（部分网络下直连会 ECONNRESET） */
+async function fetchPublishPage(url) {
+  const headers = {
+    "User-Agent": UA,
+    Accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    Referer: `${url.replace(/\/+$/, "")}/`,
+  };
+  const timeout = Math.max(5000, Number(process.env.GCAV_PUBLISH_TIMEOUT || 12000) || 12000);
+  const errors = [];
+
+  if (OmniBox && typeof OmniBox.request === "function") {
+    try {
+      const r = await withHardTimeout(
+        Promise.resolve(OmniBox.request(url, { method: "GET", headers, timeout })),
+        timeout,
+        `publish sdk ${url}`
+      );
+      const body = typeof r?.body === "string" ? r.body : "";
+      if (Number(r?.statusCode) === 200 && body.length > 500) return body;
+      errors.push(`sdk HTTP ${r?.statusCode ?? "?"} len=${body.length}`);
+    } catch (e) {
+      errors.push(`sdk ${e?.message || e}`);
+    }
+  }
+
+  try {
+    const r = await withHardTimeout(
+      nodeRequest(url, { timeout, headers }),
+      timeout,
+      `publish node ${url}`
+    );
+    const body = String(r.body || "");
+    if (Number(r.statusCode) === 200 && body.length > 500) return body;
+    errors.push(`node HTTP ${r.statusCode} len=${body.length}`);
+  } catch (e) {
+    errors.push(`node ${e?.message || e}`);
+  }
+
+  throw new Error(`发布页两条通道均失败: ${errors.join(" | ")}`);
+}
+
 async function discoverGcavHosts() {
   const candidates = new Set();
+  let publishOk = false;
   try {
     log("info", `[hosts] 拉取发布页 ${PUBLISH_PAGE}`);
-    const r = await nodeRequest(PUBLISH_PAGE, {
-      timeout: 15000,
-      headers: { "User-Agent": UA, Referer: `${PUBLISH_PAGE.replace(/\/+$/, "")}/` },
-    });
-    const body = String(r.body || "");
+    const body = await fetchPublishPage(PUBLISH_PAGE);
     const found = extractSectionHosts(body, PUBLISH_SECTION);
     found.forEach((h) => candidates.add(h));
     log("info", `[hosts] 发布页「${PUBLISH_SECTION}」解析到 ${found.length} 个域名`);
+    publishOk = true;
   } catch (e) {
     log("info", `[hosts] 发布页拉取失败: ${e?.message || e}`);
+  }
+
+  if (!publishOk) {
+    log("info", "[hosts] 发布页不可用，保留现有域名池不变");
+    return 0;
   }
 
   const newOnes = Array.from(candidates).filter((h) => !HOST_POOL.includes(h));

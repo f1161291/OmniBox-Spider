@@ -1,7 +1,7 @@
 // @name 海角社区
 // @author 宝宝巴士
 // @description 海角社区（hjsqn.com）：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默）；从地址发布页 hjsq2.co 自动获取最新域名并健康轮转；首页排行/往期列表/搜索/详情/播放；DPlayer data-config 取 /media/m3u8/ 代理直链；封面图床 AES-128-CBC 内联解密
-// @version 1.0.2
+// @version 1.0.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角社区.js
 // @dependencies crypto
 /**
@@ -93,11 +93,19 @@ const COVER_CONCURRENCY = (() => {
 const COVER_TIMEOUT = 8000;
 
 /* ---------------- 域名池 ---------------- */
+/**
+ * 内置备用域名（2026-11-17 实测可用）：发布页本身不可达时兜底，
+ * 避免「主域挂了 + 发布页也拉不到」时直接抓瞎。HJ_NO_BUILTIN=1 关闭。
+ */
+const BUILTIN_HOSTS = String(process.env.HJ_NO_BUILTIN || '') === '1' ? [] : [
+  'https://hjsqn.com',
+  'https://hjsqw.com',
+];
 const HOSTS = (() => {
   const extra = String(process.env.HJ_MIRRORS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
   const norm = (u) => (/^https?:\/\//i.test(u) ? u : `https://${u}`).replace(/\/+$/, '');
-  return Array.from(new Set([PRIMARY, ...extra.map(norm)]));
+  return Array.from(new Set([PRIMARY, ...extra.map(norm), ...BUILTIN_HOSTS.map(norm)]));
 })();
 let PREFERRED = 0;
 const hostHealth = Object.create(null);
