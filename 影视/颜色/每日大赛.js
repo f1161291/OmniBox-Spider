@@ -1,9 +1,9 @@
 // @name 每日大赛
 // @author 宝宝巴士
-// @description 每日大赛（mrds66.com）：WordPress Mirages 主题；分类/搜索/详情/播放；DPlayer data-config 直取 m3u8；从发布页 ukcyeyqpp.cc + GitLab README 自动获取最新域名防失联
-// @version 1.0.0
+// @description 每日大赛（mrds66.com）：WordPress Mirages 主题；分类/搜索/详情/播放；DPlayer data-config 直取 m3u8；图床图片 AES-128-CBC 加密，脚本内解密还原为 data:image；从发布页 ukcyeyqpp.cc + GitLab README 自动获取最新域名防失联
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/每日大赛.js
-// @dependencies []
+// @dependencies crypto
 /**
  * ============================================================================
  * 每日大赛（mrds66.com）OmniBox 采集源
@@ -37,6 +37,11 @@
  *   真实 m3u8 在 data-config 的 JSON 里，含 \u002f / \/ 转义必须还原。
  *   实测 HTTP 200，标准 AES-128 HLS（EXT-X-KEY + crypt.key + seg_*.ts）。
  *   封面：<meta itemprop="image" content="https://pic.gyezbp.cn/.../xxx.jpeg">
+ *   ⚠️ 图床图片（pic.gyezbp.cn）是 AES-128-CBC 加密密文（Content-Type:
+ *     binary/octet-stream，非标准图片格式），前端用 tbxw/zzz.js 的 decryptImage
+ *     解密后再渲染。脚本需用相同密钥解密，输出 data:image/jpeg;base64,...
+ *     密钥/IV 来自前端混淆字符码：key=f5d965df75336270, iv=97b60394abc2fbe1
+ *     （CBC + Pkcs7）。与 51吃瓜.js 共用同一图床，密钥相同。
  *   标题：<h1>标题</h1>
  *
  * 【自动获取最新域名（本需求核心）】
@@ -87,6 +92,23 @@ catch (_) { runner = { run() {} }; }
 const https = require('https');
 const http = require('http');
 const zlib = require('zlib');
+const crypto = require('crypto');
+
+// 【封面解密】图床 pic.gyezbp.cn 图片是 AES-128-CBC 加密密文（Content-Type:
+// binary/octet-stream），前端 tbxw/zzz.js 的 decryptImage 用固定 key/iv 解密。
+// key/iv 来自前端混淆字符码：key=f5d965df75336270, iv=97b60394abc2fbe1（CBC+Pkcs7）。
+// 与 51吃瓜.js 共用同一图床，密钥相同。
+const COVER_AES_KEY = Buffer.from('f5d965df75336270', 'latin1');
+const COVER_AES_IV = Buffer.from('97b60394abc2fbe1', 'latin1');
+const COVER_TIMEOUT = (() => {
+  const raw = String(process.env.MRDS_COVER_TIMEOUT || '').trim();
+  return Number.isFinite(Number(raw)) && Number(raw) > 0 ? Number(raw) : 8000;
+})();
+const COVER_CONCURRENCY = (() => {
+  const raw = String(process.env.MRDS_COVER_CONCURRENCY || '').trim();
+  return Number.isFinite(Number(raw)) && Number(raw) > 0 ? Number(raw) : 6;
+})();
+const COVER_DISABLE = process.env.MRDS_COVER_DISABLE === '1';
 
 const PREFIX = '[mrds]';
 function logI(m) { try { Promise.resolve(OmniBox.log('info', `${PREFIX} ${m}`)).catch(() => {}); } catch (_) {} }
@@ -405,6 +427,125 @@ async function fetchHtml(urlOrPath, options = {}) {
   return { body: '', host: HOSTS[PREFERRED] || PRIMARY, statusCode: 0 };
 }
 
+/* ---------------- 封面解密（图床 AES-128-CBC 密文） ---------------- */
+/** 二进制抓取：保留原始 Buffer（不能 toString utf8），带重定向与解压 */
+function fetchBinary(urlStr, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirectCount > 4) return reject(new Error(`封面重定向过多: ${urlStr}`));
+    let u;
+    try { u = new URL(urlStr); } catch (e) { return reject(e); }
+    const isHttps = u.protocol === 'https:';
+    const client = isHttps ? https : http;
+    const req = client.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (isHttps ? 443 : 80),
+      path: u.pathname + u.search,
+      method: 'GET',
+      headers: {
+        'User-Agent': UA,
+        Referer: `${u.origin}/`,
+        Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+      },
+      timeout: COVER_TIMEOUT,
+    }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        return resolve(fetchBinary(new URL(res.headers.location, u.href).href, redirectCount + 1));
+      }
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks);
+        const enc = (res.headers['content-encoding'] || '').toLowerCase();
+        const finish = (buf) => resolve({ statusCode: res.statusCode || 200, body: buf });
+        if (enc === 'gzip') zlib.gunzip(raw, (e, x) => finish(e ? raw : x));
+        else if (enc === 'deflate') zlib.inflate(raw, (e, x) => finish(e ? raw : x));
+        else if (enc === 'br') zlib.brotliDecompress(raw, (e, x) => finish(e ? raw : x));
+        else finish(raw);
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('封面请求超时')));
+    req.end();
+  });
+}
+
+/** 与前端 is_cdnimg 一致：这些路径下的图被加密 */
+function isCdnImg(url) {
+  if (typeof url !== 'string' || !url) return false;
+  return ['/xiao/', '/upload/upload/', '/upload_01/', '/uploads/'].some((seg) => url.includes(seg));
+}
+/** 探测图片真实类型 */
+function sniffImageType(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 4) return '';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.slice(0, 3).toString('ascii') === 'GIF') return 'image/gif';
+  if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return '';
+}
+/** AES-CBC 解密密文，已是明文则原样返回 */
+function decryptCoverBytes(raw) {
+  const plain = sniffImageType(raw);
+  if (plain) return { mime: plain, body: raw };
+  try {
+    const decipher = crypto.createDecipheriv('aes-128-cbc', COVER_AES_KEY, COVER_AES_IV);
+    const out = Buffer.concat([decipher.update(raw), decipher.final()]);
+    const mime = sniffImageType(out);
+    if (mime) return { mime, body: out };
+  } catch (_) {}
+  return null;
+}
+const coverCache = new Map();
+/** 单张封面：加密图 -> 解密 -> data URI；失败回退原 URL */
+async function resolveCover(url) {
+  if (!url || COVER_DISABLE) return url || '';
+  if (coverCache.has(url)) return coverCache.get(url);
+  // 普通图片或 data URI 无需解密
+  if (url.startsWith('data:') || !isCdnImg(url)) {
+    coverCache.set(url, url);
+    return url;
+  }
+  try {
+    const res = await fetchBinary(url);
+    if (res.statusCode !== 200 || !res.body || !res.body.length) {
+      coverCache.set(url, url);
+      return url;
+    }
+    const decoded = decryptCoverBytes(res.body);
+    if (!decoded) {
+      coverCache.set(url, url);
+      return url;
+    }
+    const dataUri = `data:${decoded.mime};base64,${decoded.body.toString('base64')}`;
+    coverCache.set(url, dataUri);
+    return dataUri;
+  } catch (e) {
+    logI(`[cover] 解密失败 ${String(url).slice(0, 80)}: ${e.message}`);
+    coverCache.set(url, url);
+    return url;
+  }
+}
+/** 限并发批量解析封面，失败不阻塞主链路 */
+async function resolveCovers(list) {
+  if (COVER_DISABLE || !Array.isArray(list) || !list.length) return list;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < list.length) {
+      const idx = cursor++;
+      const item = list[idx];
+      if (item && item.vod_pic) {
+        try { item.vod_pic = await resolveCover(item.vod_pic); } catch (_) {}
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(COVER_CONCURRENCY, list.length) }, () => worker()));
+  return list;
+}
+
 /* ---------------- 工具 ---------------- */
 function cleanText(s) {
   return String(s || '')
@@ -686,7 +827,8 @@ async function home(params, context) {
   try {
     const { body, host } = await fetchHtml('/');
     list = parseList(body, host);
-    logI(`home 返回 ${list.length} 条`);
+    list = await resolveCovers(list);
+    logI(`home 返回 ${list.length} 条，封面解密 ${list.filter((v) => /^data:image/.test(v.vod_pic || '')).length} 张`);
   } catch (e) {
     logE(`home 异常: ${e.message}`);
   }
@@ -710,6 +852,7 @@ async function category(params, context) {
     const { body, host } = await fetchHtml(path);
     list = parseList(body, host);
     if (!list.length && /archives\.html|brick/.test(path)) list = parseArchiveList(body, host);
+    list = await resolveCovers(list);
     pagecount = parsePageCount(body);
     logI(`category 返回 ${list.length} 条，共 ${pagecount} 页`);
   } catch (e) {
@@ -729,6 +872,7 @@ async function detail(params, context) {
   try {
     const v = await fetchDetail(id);
     if (!v) return { list: [] };
+    await resolveCovers([v]);
     logI(`detail 成功: ${v.vod_name.slice(0, 40)}，${(v.vod_play_sources[0] && v.vod_play_sources[0].episodes.length) || 0} 条线路`);
     return { list: [v] };
   } catch (e) {
@@ -750,6 +894,7 @@ async function search(params, context) {
       : `/search/${encodeURIComponent(wd)}/`;
     const { body, host } = await fetchHtml(path);
     list = parseList(body, host);
+    list = await resolveCovers(list);
     logI(`search 返回 ${list.length} 条`);
   } catch (e) {
     logE(`search 异常: ${e.message}`);
