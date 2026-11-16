@@ -4,7 +4,7 @@
 // @name 红果短剧
 // @author OmniBox
 // @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型（完整 Argus 551/Ladon 签名 + gzip + player/v1）+ 内置 CENC Range 解密流服务；直接替代旧《红果短剧.py》+《红果短剧-代理.py》，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 1.3.4
+// @version 1.3.5
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -74,7 +74,22 @@ function normalizeProxyBase(value) {
 }
 const VIDEO_API = 'https://reading.snssdk.com/novel/player/multi_video_model/player/v1';
 const VIDEO_API_FALLBACK = 'https://api5-normal-sinfonlinea.fqnovel.com/novel/player/multi_video_model/player/v1';
+// 【2026-11-16 多集群 fallback】上游网关会静默丢弃 multi_video_model 请求
+// （HTTP 200 / 0 字节 EMPTY_RESPONSE），单个/双域名容易全军覆没。
+// 移植自 zfdang/hongguo-open-player PR #104 的集群清单。
+const VIDEO_APIS = [
+  VIDEO_API,
+  VIDEO_API_FALLBACK,
+  'https://api5-normal-lq.fqnovel.com/novel/player/multi_video_model/player/v1',
+  'https://is.snssdk.com/novel/player/multi_video_model/player/v1',
+  'https://api5-normal-hl.fqnovel.com/novel/player/multi_video_model/player/v1',
+];
 const SHORTPLAY_API = 'https://api3-normal-sinfonlinea.fqnovel.com/novel/player/video_model/v1/';
+const SHORTPLAY_APIS = [
+  SHORTPLAY_API,
+  'https://api5-normal-lq.fqnovel.com/novel/player/video_model/v1/',
+  'https://reading.snssdk.com/novel/player/video_model/v1/',
+];
 const PLAYBACK_UA = 'com.phoenix.read/74332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
 const SHORTPLAY_UA = 'com.dragon.read';
 const PLAYBACK_DEVICE_74332 = {
@@ -533,7 +548,7 @@ function playbackRequest(payload, device, apiBase = VIDEO_API) {
   if (device.cookie) headers.Cookie = device.cookie;
   return { url, body, headers };
 }
-function shortplayRequest(vid, device) {
+function shortplayRequest(vid, device, apiBase = SHORTPLAY_API) {
   const khronos = Math.floor(Date.now() / 1000);
   const query = pythonUrlEncode({
     iid: device.iid, device_id: device.device_id, aid: '1967', app_name: 'novelapp',
@@ -551,7 +566,7 @@ function shortplayRequest(vid, device) {
   });
   const body = Buffer.from(payload);
   return {
-    url: `${SHORTPLAY_API}?${query}`,
+    url: `${apiBase}?${query}`,
     body,
     headers: {
       'User-Agent': SHORTPLAY_UA,
@@ -1722,15 +1737,20 @@ async function videoModel(videoId, config = {}) {
     biz_param: { detail_page_version: 0, device_level: 3, disable_digg_stat: false, need_all_video_definition: true, need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024 },
     mixed_video_id_map: { '1004': [String(videoId)] },
   });
-  const attempts = [
-    () => playbackRequest(payload, device, VIDEO_API),
-    () => playbackRequest(payload, device, VIDEO_API_FALLBACK),
+  // 【2026-11-16 多集群 fallback】multi_video_model 5 个集群 + shortplay 3 个集群，
+  // 任一集群返回有效模型即命中；全部空体再判定失败（移植自 PR #104）。
+  const steps = [
+    ...VIDEO_APIS.map(apiBase => ({ kind: 'multi', apiBase })),
+    ...SHORTPLAY_APIS.map(apiBase => ({ kind: 'shortplay', apiBase })),
   ];
   let lastReason = '';
-  for (const build of attempts) {
+  let allEmpty = true;
+  for (const step of steps) {
     try {
-      const signed = build();
-      await log('info', `[hg][model] vid=${videoId} POST ${new URL(signed.url).host}${new URL(signed.url).pathname} gzip=${signed.body.length}`);
+      const signed = step.kind === 'multi'
+        ? playbackRequest(payload, device, step.apiBase)
+        : shortplayRequest(videoId, device, step.apiBase);
+      await log('info', `[hg][model] vid=${videoId} ${step.kind} POST ${new URL(signed.url).host}${new URL(signed.url).pathname}`);
       const response = await httpRequest(signed.url, {
         method: 'POST', headers: signed.headers, body: signed.body, timeout: 30000,
         agent: new URL(signed.url).protocol === 'https:' ? APP_HTTPS_AGENT : undefined,
@@ -1742,36 +1762,42 @@ async function videoModel(videoId, config = {}) {
       let model = entry?.video_model ?? data.video_model ?? entry;
       if (typeof model === 'string') model = parseJSON(model, {});
       if (model && typeof model === 'object' && Object.keys(model).length) {
-        await log('info', `[hg][model] vid=${videoId} 命中播放模型 keys=${Object.keys(model).length}`);
+        allEmpty = false;
+        await log('info', `[hg][model] vid=${videoId} 命中播放模型（${step.kind} ${new URL(step.apiBase).host}）keys=${Object.keys(model).length}`);
         modelCache.set(cacheKey, { model, expires: Date.now() + MODEL_CACHE_TTL });
         while (modelCache.size > MODEL_CACHE_LIMIT) modelCache.delete(modelCache.keys().next().value);
         return model;
       }
-      lastReason = `HTTP ${response.status} 空体`;
+      lastReason = `HTTP ${response.status} 空体（${new URL(step.apiBase).host}）`;
     } catch (err) {
-      lastReason = err.message || String(err);
+      allEmpty = false;
+      lastReason = `${new URL(step.apiBase).host}: ${err.message || String(err)}`;
     }
   }
-  // 终极兜底：番茄小说客户端短剧接口 (aid:1967)
-  try {
-    const signed = shortplayRequest(videoId, device);
-    const response = await httpRequest(signed.url, {
-      method: 'POST', headers: signed.headers, body: signed.body, timeout: 30000,
-      agent: new URL(signed.url).protocol === 'https:' ? APP_HTTPS_AGENT : undefined,
-    });
-    const root = objectOf(responsePayload(response));
-    const data = root.data && typeof root.data === 'object' ? root.data : root;
-    const entry = data[videoId] || data.video_model || data;
-    let model = entry?.video_model ?? entry;
-    if (typeof model === 'string') model = parseJSON(model, {});
-    if (model && typeof model === 'object' && Object.keys(model).length) {
-      await log('info', `[hg][model] vid=${videoId} 命中 SHORTPLAY 兜底模型`);
-      modelCache.set(cacheKey, { model, expires: Date.now() + MODEL_CACHE_TTL });
-      while (modelCache.size > MODEL_CACHE_LIMIT) modelCache.delete(modelCache.keys().next().value);
-      return model;
+  // 新设备刚注册可能仍在跨集群同步，等 1.5s 用 lq 集群重试一次（PR #104）
+  if (allEmpty) {
+    await new Promise(r => setTimeout(r, 1500));
+    for (const apiBase of [VIDEO_APIS[2], VIDEO_API, SHORTPLAY_APIS[1]]) {
+      try {
+        const signed = apiBase.includes('video_model/v1')
+          ? shortplayRequest(videoId, device, apiBase)
+          : playbackRequest(payload, device, apiBase);
+        const response = await httpRequest(signed.url, {
+          method: 'POST', headers: signed.headers, body: signed.body, timeout: 30000,
+          agent: new URL(signed.url).protocol === 'https:' ? APP_HTTPS_AGENT : undefined,
+        });
+        const root = objectOf(responsePayload(response));
+        const data = root.data && typeof root.data === 'object' ? root.data : root;
+        const entry = data[videoId] || Object.values(data).find(v => v && typeof v === 'object' && !Array.isArray(v)) || data;
+        let model = entry?.video_model ?? data.video_model ?? entry;
+        if (typeof model === 'string') model = parseJSON(model, {});
+        if (model && typeof model === 'object' && Object.keys(model).length) {
+          await log('info', `[hg][model] vid=${videoId} 同步窗口重试命中（${new URL(apiBase).host}）`);
+          modelCache.set(cacheKey, { model, expires: Date.now() + MODEL_CACHE_TTL });
+          return model;
+        }
+      } catch (_) {}
     }
-  } catch (err) {
-    lastReason = err.message || String(err);
   }
   await log('error', `[hg][model] vid=${videoId} 播放模型为空: ${lastReason}`);
   throw new Error(`红果 video_model 为空（${lastReason}）`);
