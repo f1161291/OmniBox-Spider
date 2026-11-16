@@ -1,7 +1,7 @@
 // @name 海角社区
 // @author 宝宝巴士
-// @description 海角社区（hjsqn.com）：从地址发布页 hjsq2.co 自动获取最新域名并健康轮转；首页排行/往期列表/搜索/详情/播放；DPlayer data-config 取 /media/m3u8/ 代理直链；封面图床 AES-128-CBC 内联解密
-// @version 1.0.1
+// @description 海角社区（hjsqn.com）：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默）；从地址发布页 hjsq2.co 自动获取最新域名并健康轮转；首页排行/往期列表/搜索/详情/播放；DPlayer data-config 取 /media/m3u8/ 代理直链；封面图床 AES-128-CBC 内联解密
+// @version 1.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角社区.js
 // @dependencies crypto
 /**
@@ -134,6 +134,19 @@ function decompress(buf, encoding) {
   } catch (_) {}
   return buf;
 }
+/** 硬超时包装：宿主 OmniBox.request 不受 timeout 约束时会挂住，必须自己 race */
+const REQUEST_HARD_TIMEOUT = Math.max(3000, Number(process.env.HJ_REQUEST_TIMEOUT || 12000) || 12000);
+function withHardTimeout(promise, ms, label) {
+  let timer = null;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`请求超时(${ms}ms) ${label || ""}`)), ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, guard]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 function nodeRequest(urlStr, options = {}, redirects = 0) {
   return new Promise((resolve, reject) => {
     if (redirects > 4) return reject(new Error('重定向过多'));
@@ -177,19 +190,28 @@ function nodeRequest(urlStr, options = {}, redirects = 0) {
   });
 }
 async function httpGet(url, options = {}) {
+  const timeout = Math.max(3000, Number(options.timeout) || REQUEST_HARD_TIMEOUT);
   if (OmniBox && typeof OmniBox.request === 'function') {
     try {
-      const r = await OmniBox.request(url, {
-        method: 'GET',
-        headers: Object.assign({ 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
-          COOKIE ? { Cookie: COOKIE } : {}, options.headers || {}),
-        timeout: options.timeout || 20000,
-      });
+      const r = await withHardTimeout(
+        Promise.resolve(OmniBox.request(url, {
+          method: 'GET',
+          headers: Object.assign({ 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
+            COOKIE ? { Cookie: COOKIE } : {}, options.headers || {}),
+          timeout,
+        })),
+        timeout,
+        `sdk ${url}`
+      );
       const body = typeof r.body === 'string' ? r.body : JSON.stringify(r.body || '');
       if (body) return { statusCode: Number(r.statusCode) || 200, body, headers: r.headers || {} };
     } catch (e) { logI(`SDK 请求失败，转直连: ${e.message}`); }
   }
-  return nodeRequest(url, options);
+  return withHardTimeout(
+    nodeRequest(url, Object.assign({}, options, { timeout })),
+    timeout,
+    `node ${url}`
+  );
 }
 
 /* ---------------- 发布页域名发现（被动触发） ----------------

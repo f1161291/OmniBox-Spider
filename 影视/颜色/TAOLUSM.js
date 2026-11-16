@@ -1,7 +1,7 @@
 // @name TAOLUSM
 // @author 宝宝巴士
-// @description taolusm.com（套路调教视频）：从地址发布页 itaolu.com 被动拉取备用域名（全部域名失败才拉，分批 10 个探测）；首页/分类/搜索/详情/播放；列表 module-poster-item 取封面；详情 const source 取 preview_mp4，免费或有权限时补 /v/{id}/manifest 完整 m3u8
-// @version 1.0.0
+// @description taolusm.com（套路调教视频）：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默 + 探测超时 6s）；从地址发布页 itaolu.com 被动拉取备用域名（全部域名失败才拉，分批 10 个探测）；首页/分类/搜索/详情/播放；列表 module-poster-item 取封面；详情 const source 取 preview_mp4，免费或有权限时补 /v/{id}/manifest 完整 m3u8
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/TAOLUSM.js
 // @dependencies []
 /**
@@ -93,6 +93,7 @@ const PROBE_BATCH_SIZE = (() => {
   return Number.isFinite(n) && n > 0 ? Math.min(20, Math.floor(n)) : 10;
 })();
 const PROBE_BATCH_DELAY = 200;
+const PROBE_TIMEOUT = Math.max(3000, Number(process.env.TAOLU_PROBE_TIMEOUT || 6000) || 6000);
 
 const HOST_POOL = (() => {
   const primary = normalizeHost(process.env.TAOLU_HOST || "https://taolusm.com");
@@ -127,6 +128,19 @@ function decompressText(buf, encoding) {
   } catch (_) {}
   return buf;
 }
+/** 硬超时包装：宿主 OmniBox.request 不受 timeout 参数约束时会一直挂住，必须自己 race */
+const REQUEST_HARD_TIMEOUT = Math.max(3000, Number(process.env.TAOLU_REQUEST_TIMEOUT || 12000) || 12000);
+function withHardTimeout(promise, ms, label) {
+  let timer = null;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`请求超时(${ms}ms) ${label || ""}`)), ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, guard]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 function nodeRequest(urlStr, options = {}, redirects = 0) {
   return new Promise((resolve, reject) => {
     if (redirects > 4) return reject(new Error("重定向过多"));
@@ -211,10 +225,14 @@ function extractSectionHosts(html, sectionName) {
 /** 同构校验：首页能抓到 /v/{id} 才算真站 */
 async function probeHost(host) {
   try {
-    const r = await nodeRequest(`${host}/`, {
-      timeout: 12000,
-      headers: { "User-Agent": UA, Referer: `${host}/` },
-    });
+    const r = await withHardTimeout(
+      nodeRequest(`${host}/`, {
+        timeout: PROBE_TIMEOUT,
+        headers: { "User-Agent": UA, Referer: `${host}/` },
+      }),
+      PROBE_TIMEOUT,
+      `probe ${host}`
+    );
     const body = String(r.body || "");
     return r.statusCode >= 200 && r.statusCode < 400
       && body.length > 3000
@@ -364,22 +382,31 @@ async function requestOnce(url, options, host) {
   const cookie = buildCookie(options.cookie);
   if (cookie) headers.Cookie = cookie;
 
+  const timeout = Math.max(3000, Number(options.timeout) || REQUEST_HARD_TIMEOUT);
   let res = null;
+  // 宿主 SDK 加硬超时：实测宿主 request 在网络卡住时会挂 100s+ 且无视 timeout
   if (OmniBox && typeof OmniBox.request === "function") {
     try {
-      res = await OmniBox.request(url, {
-        method: options.method || "GET",
-        headers,
-        timeout: options.timeout || 20000,
-      });
-    } catch (_) { res = null; }
+      res = await withHardTimeout(
+        Promise.resolve(OmniBox.request(url, {
+          method: options.method || "GET",
+          headers,
+          timeout,
+        })),
+        timeout,
+        `sdk ${url}`
+      );
+    } catch (e) {
+      logI(`[request] SDK 失败(${host}): ${e?.message || e}`);
+      res = null;
+    }
   }
   if (!res) {
-    res = await nodeRequest(url, {
-      method: options.method || "GET",
-      headers,
-      timeout: options.timeout || 20000,
-    });
+    res = await withHardTimeout(
+      nodeRequest(url, { method: options.method || "GET", headers, timeout }),
+      timeout,
+      `node ${url}`
+    );
   }
   if (!res || Number(res.statusCode) !== 200) {
     throw new Error(`HTTP ${res?.statusCode ?? "unknown"} @ ${url}`);
@@ -406,7 +433,7 @@ async function requestText(url, options = {}) {
         lastErr = e;
         hostHealth[host] = hostHealth[host] || { fail: 0 };
         hostHealth[host].fail += 1;
-        if (hosts.length > 1) logI(`[hosts] ${host} 失败: ${e?.message || e}`);
+        logI(`[hosts] ${host} 失败: ${e?.message || e}`);
       }
     }
     throw lastErr || new Error("请求失败");

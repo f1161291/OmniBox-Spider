@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # @name 海角社区
-# @version 1.3.1
+# @version 1.3.2
 # @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角论坛.py
 # 地址发布页：https://hjsq2.co/ + https://gitlab.com/hjsqn-com1/hjsqn-com
 #   启动后首次请求即抓发布页解析最新域名，同构校验（首页含 /archives/{id}）后并入候选池；
@@ -53,6 +53,9 @@ PUBLISH_PAGES = [
 _HOSTS_CACHE_KEY = "haijiao:py:hosts:v1"
 _PROBE_BATCH_SIZE = max(1, min(20, int(float(os.environ.get("HJSQN_PROBE_BATCH") or 10))))
 _PROBE_BATCH_DELAY = 0.2  # 秒
+# 单次请求硬超时（秒）：宿主 OmniBox.request 在网络卡住时会挂很久且无视自身超时，
+# 这里用 asyncio.wait_for 兜底，保证能轮到域名切换 / 发布页拉取。
+_REQUEST_HARD_TIMEOUT = max(3.0, float(os.environ.get("HJSQN_REQUEST_TIMEOUT") or 12))
 _DISCOVERED_HOSTS = []
 _HOSTS_REFRESH_TASK = None
 
@@ -660,8 +663,9 @@ async def _request_ex(url, attempts=2):
                         "info",
                         "[hjsq][request] %s (try %d)" % (candidate, attempt),
                     )
-                    res = await OmniBox.request(
-                        candidate, {"method": "GET", "headers": HEADERS}
+                    res = await asyncio.wait_for(
+                        OmniBox.request(candidate, {"method": "GET", "headers": HEADERS}),
+                        timeout=_REQUEST_HARD_TIMEOUT,
                     )
                     if not isinstance(res, dict):
                         raise RuntimeError("返回结构异常")
@@ -678,10 +682,12 @@ async def _request_ex(url, attempts=2):
                     raise RuntimeError("空响应")
                 except Exception as exc:
                     last_error = exc
+                    is_timeout = isinstance(exc, asyncio.TimeoutError)
                     await OmniBox.log(
                         "warn",
-                        "[hjsq][request] 失败(%s, 第%d次): %s"
-                        % (candidate, attempt, exc),
+                        "[hjsq][request] %s(%s, 第%d次): %s"
+                        % ("超时" if is_timeout else "失败", candidate, attempt,
+                           "超过 %.0fs 未返回" % _REQUEST_HARD_TIMEOUT if is_timeout else exc),
                     )
                     if attempt < max_attempts:
                         await asyncio.sleep(float(attempt))
