@@ -1,7 +1,7 @@
 /**
  * @name 吃瓜
- * @version 1.3.1
- * @description 吃瓜 (chigua.com / 51cg)：修复封面（CDN 图片为 AES-128-CBC 加密的密文，脚本内解密还原为 data:image；详情页改取 itemprop="image" 主图）、内置多域名容灾与动态跳转解析、自适应 Node.js http/https 回退机制、Mirages文章列表解析与 DPlayer m3u8 双码率提取
+ * @version 1.4.0
+ * @description 吃瓜 (chigua.com / 51cg)：【新增】从官方发布页 https://www.dafxtlve.cc/ 自动获取最新地址（默认每 6 小时刷新，全挂时立即强制刷新，死域名自动清理，防失联）；修复封面（CDN 图片为 AES-128-CBC 加密的密文，脚本内解密还原为 data:image；详情页改取 itemprop="image" 主图）、内置多域名容灾与动态跳转解析、自适应 Node.js http/https 回退机制、Mirages文章列表解析与 DPlayer m3u8 双码率提取
  * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/51吃瓜.js
  * @dependencies crypto
  *
@@ -12,6 +12,20 @@
  *  CHIGUA_COVER_TIMEOUT      封面二进制抓取/解密超时毫秒，默认 8000
  *  CHIGUA_COVER_CONCURRENCY  封面并发数，默认 6
  *  CHIGUA_COVER_DISABLE      设为 1 关闭封面解密（回退原始 URL，仅排障用）
+ *
+ * 【自动获取最新地址 / 防失联】
+ *  CHIGUA_PUBLISH_PAGE       发布页地址，默认 https://www.dafxtlve.cc/
+ *  CHIGUA_HOSTS_REFRESH      刷新间隔（小时），默认 6；设 0 = 每次请求都刷新
+ *  CHIGUA_HOST_FAIL_THRESHOLD 某域名连续失败多少次后提前刷新发布页，默认 3
+ *
+ *  机制：
+ *   1) 首次请求即从发布页拉取最新地址，只并入「实测同构」的域名（能抓到
+ *      post-card / archives / Mirages 才算同构，广告/统计/停放页一律跳过）；
+ *   2) 之后每 CHIGUA_HOSTS_REFRESH 小时自动刷新一次；
+ *   3) 全部域名不可达时立即强制刷新（60s 内最多一次），并用新域名重试本次请求；
+ *   4) 刷新时清理「既不在发布页候选、又探测不通」的死域名；
+ *   5) 刷新时间戳与域名池写入 SDK 持久缓存 chigua:hosts:v1（TTL 30 天），
+ *      跨进程/重启不丢；新进程先恢复缓存时间戳再判断间隔，不会重复刷新。
  */
 
 let OmniBox;
@@ -72,6 +86,204 @@ const INITIAL_MIRRORS = (() => {
 
 let activeMirrors = [...INITIAL_MIRRORS];
 let currentActiveBase = INITIAL_MIRRORS[0];
+
+/* ==================== 官方发布页自动获取最新地址 ==================== */
+/**
+ * 发布页（防失联入口）：https://www.dafxtlve.cc/
+ * 实测结构（2026-11-15，16.5KB，title「51吃瓜 - 官方入口」）：
+ *   <a data-entry-key="main"   href="https://51cg1.com">          主站入口
+ *   <a data-entry-key="backup" href="https://rmfdrwpef.bmyufdzkj.cc"> 备用入口
+ *   <a data-entry-key="latest" href="https://skhruz.bjvhhsgnb.cc">    最新地址
+ * 三个域名实测全部可用且同构（227KB / post-card 274 / archives 70 / Mirages 121）。
+ * 另有 og:url / og:image 也含站点域名，作为兜底信号。
+ */
+const PUBLISH_PAGE = (process.env.CHIGUA_PUBLISH_PAGE || 'https://www.dafxtlve.cc/').trim();
+// 刷新间隔（小时），默认 6；设 0 表示每次请求都刷新
+const HOSTS_REFRESH_INTERVAL = (() => {
+  const raw = String(process.env.CHIGUA_HOSTS_REFRESH || '').trim();
+  const h = raw === '' ? 6 : Number(raw);
+  return Math.max(0, Number.isFinite(h) ? h : 6) * 3600 * 1000;
+})();
+const HOSTS_CACHE_KEY = 'chigua:hosts:v1';
+const HOSTS_CACHE_TTL = 30 * 24 * 3600; // 30 天
+let lastHostsRefresh = 0;
+let hostsRefreshInFlight = null;
+let hostsCacheRestored = false;
+
+/** 从发布页 HTML 解析候选域名（按 main > latest > backup 优先级排序） */
+function parsePublishPage(html) {
+  const s = String(html || '');
+  const out = [];
+  const seen = new Set();
+  const add = (raw, prio) => {
+    if (!raw) return;
+    let origin = '';
+    try {
+      const withProto = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+      origin = new URL(withProto).origin;
+    } catch (_) { return; }
+    if (!origin || seen.has(origin)) return;
+    // 排除统计/广告/图片/第三方
+    if (/googletagmanager|google-analytics|ads\.|doubleclick|facebook|twitter\.com|t\.me/i.test(origin)) return;
+    seen.add(origin);
+    // 注意：不能写 Number(prio) || 99 —— main 的 prio 是 0，
+    // Number(0) || 99 会被 || 吃成 99，导致主站入口反而排到最后。
+    const p = Number(prio);
+    out.push({ origin, prio: Number.isFinite(p) ? p : 99 });
+  };
+  // 1) 主解析：data-entry-key 明确标注入口类型
+  const entryRe = /<a[^>]*data-entry-key=["']([^"']+)["'][^>]*href=["']([^"']+)["']/gi;
+  let m;
+  while ((m = entryRe.exec(s)) !== null) {
+    const key = m[1].toLowerCase();
+    const prio = key === 'main' ? 0 : key === 'latest' ? 1 : key === 'backup' ? 2 : 5;
+    add(m[2], prio);
+  }
+  // 2) 兜底：href 反过来写的形态
+  const entryRe2 = /<a[^>]*href=["']([^"']+)["'][^>]*data-entry-key=["']([^"']+)["']/gi;
+  while ((m = entryRe2.exec(s)) !== null) {
+    const key = m[2].toLowerCase();
+    const prio = key === 'main' ? 0 : key === 'latest' ? 1 : key === 'backup' ? 2 : 5;
+    add(m[1], prio);
+  }
+  // 3) 兜底：og:url / og:image 里的域名
+  const ogRe = /<meta[^>]*property=["']og:(?:url|image)["'][^>]*content=["']([^"']+)["']/gi;
+  while ((m = ogRe.exec(s)) !== null) add(m[1], 8);
+  out.sort((a, b) => a.prio - b.prio);
+  return out.map((x) => x.origin);
+}
+
+/** 验证某域名是否为同构吃瓜站（返回 true/false） */
+async function probeChiguaHost(origin) {
+  try {
+    const body = await fetchSingle(`${origin}/`);
+    const b = String(body || '');
+    if (b.length < 5000) return false;
+    return b.includes('post-card') || b.includes('archives') || b.includes('Mirages');
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * 从发布页拉取最新地址并并入轮换池。
+ * 只把「实测同构」的域名加进来，避免把广告/统计/停放页混进池。
+ * 返回新增数量。
+ */
+async function refreshHostsFromPublishPage() {
+  let html = '';
+  try {
+    html = await fetchSingle(PUBLISH_PAGE);
+  } catch (e) {
+    await OmniBox.log('info', `[chigua] [hosts] 发布页拉取失败: ${e.message}`);
+    return 0;
+  }
+  const candidates = parsePublishPage(html);
+  if (!candidates.length) {
+    await OmniBox.log('info', `[chigua] [hosts] 发布页未解析到候选域名（${String(html || '').length}B）`);
+    return 0;
+  }
+  await OmniBox.log('info', `[chigua] [hosts] 发布页解析到 ${candidates.length} 个候选: ${candidates.join(', ')}`);
+  let added = 0;
+  for (const origin of candidates) {
+    if (activeMirrors.includes(origin)) continue;
+    const ok = await probeChiguaHost(origin);
+    if (!ok) {
+      await OmniBox.log('info', `[chigua] [hosts] 跳过非同构域名 -> ${origin}`);
+      continue;
+    }
+    activeMirrors.push(origin);
+    added++;
+    await OmniBox.log('info', `[chigua] [hosts] 发现可用最新地址 -> ${origin}`);
+  }
+  // 清理已失效的旧域名：站点换域名后旧缓存会留下死域名，一直拖慢每轮请求。
+  // 只清理「既不在发布页候选里、又探测不通」的，避免误删刚生效但发布页还没更新的。
+  let removed = 0;
+  for (let i = activeMirrors.length - 1; i >= 0; i--) {
+    const h = activeMirrors[i];
+    if (candidates.includes(h)) continue; // 发布页仍在推荐，保留
+    if (h === currentActiveBase) continue; // 当前在用，保留
+    const alive = await probeChiguaHost(h);
+    if (!alive) {
+      activeMirrors.splice(i, 1);
+      removed++;
+      await OmniBox.log('info', `[chigua] [hosts] 移除失效域名 -> ${h}`);
+    }
+  }
+  if (removed) await OmniBox.log('info', `[chigua] [hosts] 清理失效域名 ${removed} 个，池剩 ${activeMirrors.length} 个`);
+  if (added) await OmniBox.log('info', `[chigua] [hosts] 本次新增 ${added} 个，池共 ${activeMirrors.length} 个`);
+  return added;
+}
+
+/** 从 SDK 持久缓存恢复时间戳与域名池（进程内只做一次） */
+async function restoreHostsCache() {
+  if (hostsCacheRestored) return;
+  hostsCacheRestored = true;
+  try {
+    const saved = await OmniBox.getCache(HOSTS_CACHE_KEY);
+    let obj = saved;
+    if (typeof saved === 'string') { try { obj = JSON.parse(saved); } catch (_) { obj = null; } }
+    if (obj && Array.isArray(obj.hosts)) {
+      for (const h of obj.hosts) {
+        if (typeof h === 'string' && /^https?:\/\//i.test(h) && !activeMirrors.includes(h)) activeMirrors.push(h);
+      }
+    }
+    if (obj && Number(obj.at) > lastHostsRefresh) lastHostsRefresh = Number(obj.at);
+    if (lastHostsRefresh) {
+      await OmniBox.log('info', `[chigua] [hosts] 已从缓存恢复域名池（${activeMirrors.length} 个），上次刷新 ${new Date(lastHostsRefresh).toISOString()}`);
+    }
+  } catch (_) {}
+}
+
+/**
+ * 定期主动刷新：距上次成功刷新超过间隔就重新拉发布页。
+ * 必须先恢复缓存时间戳再判断间隔，否则新进程每次都重刷。
+ */
+async function ensureHostsFresh(force) {
+  await restoreHostsCache();
+  if (!force && lastHostsRefresh && Date.now() - lastHostsRefresh < HOSTS_REFRESH_INTERVAL) return 0;
+  if (hostsRefreshInFlight) return hostsRefreshInFlight;
+  hostsRefreshInFlight = (async () => {
+    try {
+      await OmniBox.log('info', `[chigua] [hosts] 定时刷新开始（间隔 ${HOSTS_REFRESH_INTERVAL / 3600000}h，上次 ${lastHostsRefresh ? new Date(lastHostsRefresh).toISOString() : '无'}）`);
+      const added = await refreshHostsFromPublishPage();
+      lastHostsRefresh = Date.now();
+      await OmniBox.setCache(HOSTS_CACHE_KEY, { at: lastHostsRefresh, hosts: activeMirrors.slice() }, HOSTS_CACHE_TTL);
+      await OmniBox.log('info', `[chigua] [hosts] 定时刷新完成，新增 ${added} 个，池共 ${activeMirrors.length} 个`);
+      return added;
+    } catch (e) {
+      await OmniBox.log('info', `[chigua] [hosts] 定时刷新异常: ${e.message}`);
+      return 0;
+    } finally {
+      hostsRefreshInFlight = null;
+    }
+  })();
+  return hostsRefreshInFlight;
+}
+
+/**
+ * 域名失效计数：某域名连接失败就记一笔。
+ * 目的：站点换域名后，缓存里的死域名会一直拖慢每轮请求（每个都要等超时）。
+ * 累计失败达到阈值时，允许**提前**刷新发布页（不等 6 小时），把死域名清掉。
+ */
+const HOST_FAIL_THRESHOLD = (() => {
+  const raw = String(process.env.CHIGUA_HOST_FAIL_THRESHOLD || '').trim();
+  const n = raw === '' ? 3 : Number(raw);
+  return Math.max(1, Number.isFinite(n) ? n : 3);
+})();
+const hostFailCount = Object.create(null);
+function noteHostFail(base) {
+  if (!base) return;
+  hostFailCount[base] = (hostFailCount[base] || 0) + 1;
+  if (hostFailCount[base] >= HOST_FAIL_THRESHOLD) {
+    // 达到阈值：标记需要提前刷新（下一轮请求会触发）
+    globalThis.__chiguaForceAt = 0;
+    lastHostsRefresh = 0;
+    hostFailCount[base] = 0;
+    try { Promise.resolve(OmniBox.log('info', `[chigua] [hosts] ${base} 连续失败 ${HOST_FAIL_THRESHOLD} 次，将提前刷新发布页`)).catch(() => {}); } catch (_) {}
+  }
+}
+/* ==================== 发布页自动获取结束 ==================== */
 
 const DEFAULT_CLASSES = [
   { type_id: 'all', type_name: '全部最新' },
@@ -344,24 +556,52 @@ async function fetchHtmlWithFailover(pathOrUrl) {
   }
   if (!relativePath.startsWith('/')) relativePath = '/' + relativePath;
 
-  const candidates = [currentActiveBase, ...activeMirrors.filter((m) => m !== currentActiveBase)];
+  // 定期主动刷新（默认 6 小时）：首次调用即触发，不阻塞主请求
+  try { ensureHostsFresh(false); } catch (_) {}
 
-  for (let i = 0; i < candidates.length; i++) {
-    const base = candidates[i];
-    const fullUrl = base + relativePath;
-    try {
-      await OmniBox.log('info', `[chigua] 尝试拉取 [${i + 1}/${candidates.length}]: ${fullUrl}`);
-      let body = await fetchSingle(fullUrl);
-      body = await resolvePageContent(body);
+  const tryAll = async () => {
+    const candidates = [currentActiveBase, ...activeMirrors.filter((m) => m !== currentActiveBase)];
+    for (let i = 0; i < candidates.length; i++) {
+      const base = candidates[i];
+      const fullUrl = base + relativePath;
+      try {
+        await OmniBox.log('info', `[chigua] 尝试拉取 [${i + 1}/${candidates.length}]: ${fullUrl}`);
+        let body = await fetchSingle(fullUrl);
+        body = await resolvePageContent(body);
 
-      if (body && (body.includes('post-card') || body.includes('archives') || body.includes('Mirages') || body.length > 500)) {
-        currentActiveBase = base;
-        return body;
+        if (body && (body.includes('post-card') || body.includes('archives') || body.includes('Mirages') || body.length > 500)) {
+          currentActiveBase = base;
+          return body;
+        }
+        await OmniBox.log('info', `[chigua] ${base} 返回内容未匹配到文章或结构 (长度: ${body ? body.length : 0})`);
+      } catch (err) {
+        await OmniBox.log('error', `[chigua] ${base} 连接失败: ${err.message}`);
+        noteHostFail(base);
       }
-      await OmniBox.log('info', `[chigua] ${base} 返回内容未匹配到文章或结构 (长度: ${body ? body.length : 0})`);
-    } catch (err) {
-      await OmniBox.log('error', `[chigua] ${base} 连接失败: ${err.message}`);
     }
+    return '';
+  };
+
+  let body = await tryAll();
+  if (body) return body;
+
+  // 全部失败：立即强制刷新发布页（不等 6 小时间隔），并用新域名重试一次。
+  // 关键：不能因为「距上次刷新 <60s」就跳过刷新——缓存时间戳可能很新，
+  // 但里面全是站点换域名后失效的旧域名，此时必须真的重拉发布页才能自愈。
+  // 节流改用进程内标志：同一轮（60s 内）只强制刷新一次，避免多请求反复打发布页。
+  const nowTs = Date.now();
+  const recentlyForced = globalThis.__chiguaForceAt && (nowTs - globalThis.__chiguaForceAt) < 60000;
+  if (!recentlyForced) {
+    globalThis.__chiguaForceAt = nowTs;
+    await OmniBox.log('info', `[chigua] 所有候选域名均不可达，强制刷新发布页域名池`);
+    await ensureHostsFresh(true);
+    // 即使新增为 0 也要重试：可能只是当前 base 选错，别的域名其实活着。
+    if (activeMirrors.length) {
+      body = await tryAll();
+      if (body) return body;
+    }
+  } else {
+    await OmniBox.log('info', `[chigua] 所有候选域名均不可达（60s 内已强制刷新过，本轮不重复刷新发布页）`);
   }
 
   await OmniBox.log('error', `[chigua] 所有候选域名均不可达`);
