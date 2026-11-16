@@ -1,7 +1,7 @@
 // @name TAOLUSM
 // @author 宝宝巴士
 // @description taolusm.com（套路调教视频）：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默 + 探测超时 6s）；从地址发布页 itaolu.com 被动拉取备用域名（全部域名失败才拉，分批 10 个探测）；首页/分类/搜索/详情/播放；列表 module-poster-item 取封面；详情 const source 取 preview_mp4，免费或有权限时补 /v/{id}/manifest 完整 m3u8
-// @version 1.0.3
+// @version 1.1.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/TAOLUSM.js
 // @dependencies []
 /**
@@ -269,6 +269,10 @@ async function probeHost(host) {
   } catch (_) { return false; }
 }
 
+/**
+ * 恢复域名池：以「上次成功域」优先，并剔除已确认失效的域。
+ * 目标：避免每次启动都从头扫描、重复探测死域名。
+ */
 async function restoreHostCache() {
   if (HOST_POOL_READY) return;
   HOST_POOL_READY = true;
@@ -276,14 +280,85 @@ async function restoreHostCache() {
     const saved = await OmniBox.getCache(HOSTS_CACHE_KEY);
     let obj = saved;
     if (typeof saved === "string") { try { obj = JSON.parse(saved); } catch (_) { obj = null; } }
-    if (obj && Array.isArray(obj.hosts)) {
-      for (const h of obj.hosts) {
-        if (typeof h !== "string" || !/^https?:\/\//i.test(h)) continue;
-        const host = normalizeHost(h);
-        if (!HOST_POOL.includes(host)) HOST_POOL.push(host);
+    if (!obj || typeof obj !== "object") return;
+
+    const dead = new Set(
+      (Array.isArray(obj.dead) ? obj.dead : [])
+        .filter((h) => typeof h === "string")
+        .map(normalizeHost)
+    );
+
+    const merged = [];
+    const push = (h) => {
+      if (typeof h !== "string" || !/^https?:\/\//i.test(h)) return;
+      const host = normalizeHost(h);
+      if (dead.has(host) || merged.includes(host)) return;
+      merged.push(host);
+    };
+    if (typeof obj.active === "string") push(obj.active);
+    (Array.isArray(obj.hosts) ? obj.hosts : []).forEach(push);
+
+    if (merged.length) {
+      const seen = new Set(HOST_POOL);
+      HOST_POOL.push(...merged.filter((h) => !seen.has(h)));
+      if (typeof obj.active === "string") {
+        const active = normalizeHost(obj.active);
+        const idx = HOST_POOL.indexOf(active);
+        if (idx > 0) { HOST_POOL.splice(idx, 1); HOST_POOL.unshift(active); }
+        HOST = HOST_POOL[0];
       }
+      logI(`[hosts] 恢复缓存池: ${HOST_POOL.length} 个，当前=${HOST}`);
     }
   } catch (_) {}
+}
+
+/** 持久化池状态：active + hosts + dead */
+let persistTimer = null;
+function schedulePersistHosts() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    Promise.resolve(OmniBox.setCache(
+      HOSTS_CACHE_KEY,
+      {
+        at: Date.now(),
+        active: (Object.entries(hostHealth).filter(([,v]) => v && v.okAt).sort((a,b)=>b[1].okAt-a[1].okAt)[0]||[])[0] || HOST,
+        hosts: HOST_POOL.slice(),
+        dead: Object.keys(hostHealth).filter((h) => hostHealth[h] && hostHealth[h].dead),
+      },
+      HOSTS_CACHE_TTL
+    )).catch(() => {});
+  }, 500);
+  if (persistTimer.unref) persistTimer.unref();
+}
+
+/** 域名失效：连续失败 2 次移出池并记入 dead */
+function markHostDead(host, reason) {
+  if (!host) return;
+  const h = hostHealth[host] || (hostHealth[host] = { fail: 0 });
+  h.fail = Number(h.fail || 0) + 1;
+  h.lastReason = String(reason || "").slice(0, 120);
+  if (h.fail >= 2 && !h.dead) {
+    h.dead = true;
+    h.deadAt = Date.now();
+    const idx = HOST_POOL.indexOf(host);
+    if (idx >= 0 && HOST_POOL.length > 1) HOST_POOL.splice(idx, 1);
+    logI(`[hosts] ${host} 连续失败 ${h.fail} 次，移出轮换池（${h.lastReason}）`);
+    schedulePersistHosts();
+  }
+}
+
+/** 域名可用：清零失败、提为当前域并持久化 */
+function markHostAlive(host) {
+  if (!host) return;
+  hostHealth[host] = { fail: 0, okAt: Date.now(), dead: false };
+  if (HOST !== host) {
+    logI(`[hosts] 切换到可用域名 ${host}`);
+    HOST = host;
+  }
+  const idx = HOST_POOL.indexOf(host);
+  if (idx > 0) { HOST_POOL.splice(idx, 1); HOST_POOL.unshift(host); }
+  schedulePersistHosts();
 }
 
 /**
@@ -371,7 +446,7 @@ async function discoverHosts() {
       if (results[k].status !== "fulfilled" || !results[k].value) continue;
       const host = batch[k];
       HOST_POOL.push(host);
-      hostHealth[host] = { fail: 0, okAt: Date.now() };
+      hostHealth[host] = { fail: 0, okAt: Date.now(), dead: false };
       added++;
       logI(`[hosts] 发现可用站点 -> ${host}`);
     }
@@ -504,17 +579,12 @@ async function requestText(url, options = {}) {
       const target = swapHost(url, HOST, host);
       try {
         const body = await requestOnce(target, options, host);
-        if (host !== HOST) {
-          logI(`[hosts] 切换到可用域名 ${host}`);
-          HOST = host;
-        }
-        hostHealth[host] = { fail: 0, okAt: Date.now() };
+        markHostAlive(host);
         return body;
       } catch (e) {
         lastErr = e;
-        hostHealth[host] = hostHealth[host] || { fail: 0 };
-        hostHealth[host].fail += 1;
         logI(`[hosts] ${host} 失败: ${e?.message || e}`);
+        markHostDead(host, e?.message || e);
       }
     }
     throw lastErr || new Error("请求失败");

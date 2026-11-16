@@ -1,5 +1,5 @@
 // @name GCAV
-// @version 1.2.3
+// @version 1.3.0
 // @author omnibox-spider
 // @description gcav.me 采集源：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默 + 探测超时 6s）；新增地址发布页 itaolu.com 被动拉取备用域名（全部域名失败才拉，分批 10 个探测，13 个 gcav 备用域）；修复宿主缺 cheerio 时列表返回 0 条导致封面全空（新增正则兜底解析 + Node 直连兜底）；六大频道 + 排序筛选 + 搜索分页；列表 a.cover-group 取标题/封面/时长/热度；详情页 const source 解析 cloudfront / bunny 双线路预览直链，免费或带登录态时补 /v/{id}/manifest 完整 m3u8；播放直链→sniff→parse=1 三段式兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/GCAV.js
@@ -359,6 +359,10 @@ async function probeGcavHost(host) {
   } catch (_) { return false; }
 }
 
+/**
+ * 恢复域名池：以「上次成功域」优先，并剔除已确认失效的域。
+ * 目标：避免每次启动都从头扫描发布页，减少无谓探测。
+ */
 async function restoreHostCache() {
   if (HOST_POOL_READY) return;
   HOST_POOL_READY = true;
@@ -366,14 +370,98 @@ async function restoreHostCache() {
     const saved = await OmniBox.getCache(HOSTS_CACHE_KEY);
     let obj = saved;
     if (typeof saved === "string") { try { obj = JSON.parse(saved); } catch (_) { obj = null; } }
-    if (obj && Array.isArray(obj.hosts)) {
-      for (const h of obj.hosts) {
-        if (typeof h !== "string" || !/^https?:\/\//i.test(h)) continue;
-        const host = normalizeHost(h);
-        if (!HOST_POOL.includes(host)) HOST_POOL.push(host);
+    if (!obj || typeof obj !== "object") return;
+
+    const dead = new Set(
+      (Array.isArray(obj.dead) ? obj.dead : [])
+        .filter((h) => typeof h === "string")
+        .map(normalizeHost)
+    );
+
+    // 先合并历史域，再把 dead 剔除
+    const merged = [];
+    const push = (h) => {
+      if (typeof h !== "string" || !/^https?:\/\//i.test(h)) return;
+      const host = normalizeHost(h);
+      if (dead.has(host) || merged.includes(host)) return;
+      merged.push(host);
+    };
+    // 上次成功的域排最前
+    if (typeof obj.active === "string") push(obj.active);
+    (Array.isArray(obj.hosts) ? obj.hosts : []).forEach(push);
+
+    if (merged.length) {
+      // 保留原 PRIMARY 在主位，再把缓存域接在后面（去重）
+      const seen = new Set(HOST_POOL);
+      const extras = merged.filter((h) => !seen.has(h));
+      HOST_POOL.push(...extras);
+      // 上次成功域提到最前
+      if (typeof obj.active === "string") {
+        const active = normalizeHost(obj.active);
+        const idx = HOST_POOL.indexOf(active);
+        if (idx > 0) {
+          HOST_POOL.splice(idx, 1);
+          HOST_POOL.unshift(active);
+        }
+        HOST = HOST_POOL[0];
       }
+      log("info", `[hosts] 恢复缓存池: ${HOST_POOL.length} 个，当前=${HOST}`);
     }
   } catch (_) {}
+}
+
+/** 持久化池状态：active（当前可用）+ hosts（全量）+ dead（已失效） */
+let persistTimer = null;
+function schedulePersistHosts() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    OmniBox.setCache(
+      HOSTS_CACHE_KEY,
+      {
+        at: Date.now(),
+        active: (Object.entries(hostHealth).filter(([,v]) => v && v.okAt).sort((a,b)=>b[1].okAt-a[1].okAt)[0]||[])[0] || HOST,
+        hosts: HOST_POOL.slice(),
+        dead: Object.keys(hostHealth).filter((h) => hostHealth[h] && hostHealth[h].dead),
+      },
+      HOSTS_CACHE_TTL
+    ).catch(() => {});
+  }, 500);
+  if (persistTimer.unref) persistTimer.unref();
+}
+
+/** 标记域名失效：移出轮换池并落到 dead 集合，下次启动不再优先尝试 */
+function markHostDead(host, reason) {
+  if (!host) return;
+  const h = hostHealth[host] || (hostHealth[host] = { fail: 0 });
+  h.fail = Number(h.fail || 0) + 1;
+  h.lastReason = String(reason || "").slice(0, 120);
+  // 连续失败 2 次才判死，避免瞬时抖动误杀
+  if (h.fail >= 2 && !h.dead) {
+    h.dead = true;
+    h.deadAt = Date.now();
+    const idx = HOST_POOL.indexOf(host);
+    if (idx >= 0 && HOST_POOL.length > 1) HOST_POOL.splice(idx, 1);
+    log("info", `[hosts] ${host} 连续失败 ${h.fail} 次，移出轮换池（${h.lastReason}）`);
+    schedulePersistHosts();
+  }
+}
+
+/** 标记域名可用：清零失败计数、提升为当前域并持久化 */
+function markHostAlive(host) {
+  if (!host) return;
+  hostHealth[host] = { fail: 0, okAt: Date.now(), dead: false };
+  if (HOST !== host) {
+    log("info", `[hosts] 切换到可用域名 ${host}`);
+    HOST = host;
+  }
+  // 提到池首，后续优先使用
+  const idx = HOST_POOL.indexOf(host);
+  if (idx > 0) {
+    HOST_POOL.splice(idx, 1);
+    HOST_POOL.unshift(host);
+  }
+  schedulePersistHosts();
 }
 
 /** 分批探测候选域名：每批 PROBE_BATCH_SIZE 个，批间 sleep */
@@ -585,17 +673,13 @@ async function requestText(url, options = {}) {
       const target = swapHost(url, HOST, host);
       try {
         const body = await requestOnce(target, options, host);
-        if (host !== HOST) {
-          log("info", `[hosts] 切换到可用域名 ${host}`);
-          HOST = host;
-        }
-        hostHealth[host] = { fail: 0, okAt: Date.now() };
+        // 成功即提升为当前域并持久化，下次直接用，不再从头扫
+        markHostAlive(host);
         return body;
       } catch (e) {
         lastErr = e;
-        hostHealth[host] = hostHealth[host] || { fail: 0 };
-        hostHealth[host].fail += 1;
         log("info", `[hosts] ${host} 失败: ${e?.message || e}`);
+        markHostDead(host, e?.message || e);
       }
     }
     throw lastErr || new Error("请求失败");

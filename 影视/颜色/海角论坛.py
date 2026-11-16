@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # @name 海角社区
-# @version 1.3.2
+# @version 1.4.0
 # @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角论坛.py
 # 地址发布页：https://hjsq2.co/ + https://gitlab.com/hjsqn-com1/hjsqn-com
 #   启动后首次请求即抓发布页解析最新域名，同构校验（首页含 /archives/{id}）后并入候选池；
@@ -67,6 +67,10 @@ _HOST_BLOCKLIST = re.compile(
 )
 
 _ACTIVE_HOST = ""
+# 已判定失效的域名（连续失败 2 次），下次启动不再优先尝试
+_DEAD_HOSTS = set()
+_HOST_FAIL_COUNT = {}
+
 
 HEADERS = {
     "User-Agent": (
@@ -533,6 +537,13 @@ async def _discover_hosts(force=False):
             if isinstance(saved, dict):
                 hosts = [h for h in (saved.get("hosts") or []) if isinstance(h, str)]
                 _DISCOVERED_HOSTS = hosts
+                # 恢复判死集合与上次成功域
+                for d in (saved.get("dead") or []):
+                    if isinstance(d, str):
+                        _DEAD_HOSTS.add(d.rstrip("/"))
+                act = str(saved.get("active") or "").strip().rstrip("/")
+                if act and act not in _DEAD_HOSTS:
+                    globals()["_ACTIVE_HOST"] = act
         except Exception:
             pass
 
@@ -613,22 +624,86 @@ async def _discover_hosts(force=False):
 
 
 def _site_hosts():
-    hosts = [HOST]
+    """候选域名：上次成功域置顶、已判死的域剔除。"""
+    raw = [HOST]
     for item in str(os.environ.get("HJSQN_HOSTS") or "").split(","):
         item = item.strip().rstrip("/")
-        if item and item not in hosts:
-            hosts.append(item)
-    # 发布页发现的域名优先于内置备用列表
+        if item and item not in raw:
+            raw.append(item)
     for item in _DISCOVERED_HOSTS:
-        if item and item not in hosts:
-            hosts.append(item)
+        if item and item not in raw:
+            raw.append(item)
     for item in BACKUP_HOSTS:
-        if item not in hosts:
-            hosts.append(item)
-    if _ACTIVE_HOST and _ACTIVE_HOST in hosts:
-        hosts.remove(_ACTIVE_HOST)
-        hosts.insert(0, _ACTIVE_HOST)
-    return hosts
+        if item not in raw:
+            raw.append(item)
+
+    # 剔除判死的域（但如果全死光了，就保留全部，避免彻底不可用）
+    alive = [h for h in raw if h not in _DEAD_HOSTS]
+    if not alive:
+        alive = raw
+        _DEAD_HOSTS.clear()
+
+    if _ACTIVE_HOST and _ACTIVE_HOST in alive:
+        alive.remove(_ACTIVE_HOST)
+        alive.insert(0, _ACTIVE_HOST)
+    return alive
+
+
+def _mark_host_ok(host):
+    """域名可用：清零失败、设为当前域、并触发持久化。"""
+    global _ACTIVE_HOST
+    if not host:
+        return
+    _HOST_FAIL_COUNT[host] = 0
+    _DEAD_HOSTS.discard(host)
+    _ACTIVE_HOST = host
+    _schedule_persist_hosts()
+
+
+def _mark_host_dead(host, reason=""):
+    """域名失败：连续 2 次判死并移出候选池。"""
+    if not host:
+        return
+    n = _HOST_FAIL_COUNT.get(host, 0) + 1
+    _HOST_FAIL_COUNT[host] = n
+    if n >= 2 and host not in _DEAD_HOSTS:
+        _DEAD_HOSTS.add(host)
+        _PERSIST_DEAD[host] = str(reason or "")[:120]
+        _schedule_persist_hosts()
+
+
+_PERSIST_DEAD = {}
+_PERSIST_TIMER = None
+
+
+def _schedule_persist_hosts():
+    """把 active / hosts / dead 落 SDK 缓存（去抖 0.5s）。"""
+    global _PERSIST_TIMER
+    if _PERSIST_TIMER is not None:
+        return
+
+    async def _flush():
+        global _PERSIST_TIMER
+        _PERSIST_TIMER = None
+        try:
+            await OmniBox.setCache(
+                _HOSTS_CACHE_KEY,
+                {
+                    "at": time.time(),
+                    "active": _ACTIVE_HOST or HOST,
+                    "hosts": _site_hosts(),
+                    "dead": sorted(_DEAD_HOSTS),
+                },
+                30 * 24 * 3600,
+            )
+        except Exception:
+            pass
+
+    try:
+        loop = asyncio.get_event_loop()
+        _PERSIST_TIMER = loop.call_later(0.5, lambda: asyncio.ensure_future(_flush()))
+    except Exception:
+        _PERSIST_TIMER = None
 
 
 def _candidate_urls(url):
@@ -675,13 +750,16 @@ async def _request_ex(url, attempts=2):
                         )
                     body = res.get("body", "")
                     if body:
-                        global _ACTIVE_HOST
                         parsed = urlsplit(candidate)
-                        _ACTIVE_HOST = "%s://%s" % (parsed.scheme, parsed.netloc)
+                        _mark_host_ok("%s://%s" % (parsed.scheme, parsed.netloc))
                         return body, candidate
                     raise RuntimeError("空响应")
                 except Exception as exc:
                     last_error = exc
+                    parsed_fail = urlsplit(candidate)
+                    _mark_host_dead(
+                        "%s://%s" % (parsed_fail.scheme, parsed_fail.netloc), exc
+                    )
                     is_timeout = isinstance(exc, asyncio.TimeoutError)
                     await OmniBox.log(
                         "warn",

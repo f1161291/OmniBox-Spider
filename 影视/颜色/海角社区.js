@@ -1,7 +1,7 @@
 // @name 海角社区
 // @author 宝宝巴士
 // @description 海角社区（hjsqn.com）：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默）；从地址发布页 hjsq2.co 自动获取最新域名并健康轮转；首页排行/往期列表/搜索/详情/播放；DPlayer data-config 取 /media/m3u8/ 代理直链；封面图床 AES-128-CBC 内联解密
-// @version 1.0.3
+// @version 1.1.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角社区.js
 // @dependencies crypto
 /**
@@ -127,9 +127,29 @@ function buildHostOrder() {
 function markHost(host, ok, reason) {
   if (!host) return;
   const h = hostHealth[host] || (hostHealth[host] = { fail: 0, okAt: 0, blockAt: 0 });
-  if (ok) { h.fail = 0; h.okAt = Date.now(); h.blockAt = 0; return; }
+  if (ok) {
+    h.fail = 0; h.okAt = Date.now(); h.blockAt = 0; h.dead = false;
+    // 成功的域提到池首并持久化，下次直接用
+    const idx = HOSTS.indexOf(host);
+    if (idx > 0) { HOSTS.splice(idx, 1); HOSTS.unshift(host); PREFERRED = 0; }
+    schedulePersistHosts();
+    return;
+  }
   h.fail = Number(h.fail || 0) + 1;
+  h.lastReason = String(reason || '').slice(0, 120);
   if (/403|拦截|blocked/i.test(String(reason || ''))) h.blockAt = Date.now();
+  // 连续失败 2 次判死并移出池（避免瞬时抖动误杀）
+  if (h.fail >= 2 && !h.dead) {
+    h.dead = true;
+    h.deadAt = Date.now();
+    const idx = HOSTS.indexOf(host);
+    if (idx >= 0 && HOSTS.length > 1) {
+      HOSTS.splice(idx, 1);
+      if (PREFERRED >= HOSTS.length) PREFERRED = 0;
+    }
+    logI(`[hosts] ${host} 连续失败 ${h.fail} 次，移出轮换池（${h.lastReason}）`);
+    schedulePersistHosts();
+  }
 }
 
 /* ---------------- HTTP ---------------- */
@@ -320,6 +340,10 @@ async function discoverHosts() {
   if (added) logI(`[hosts] 本次新增 ${added} 个，池共 ${HOSTS.length} 个`);
   return added;
 }
+/**
+ * 恢复域名池：上次成功域置顶、剔除已判死的域。
+ * 避免每次启动都重新扫描/探测失效域名。
+ */
 async function restoreHostsCache() {
   if (hostsCacheRestored) return;
   hostsCacheRestored = true;
@@ -327,13 +351,51 @@ async function restoreHostsCache() {
     const saved = await OmniBox.getCache(HOSTS_CACHE_KEY);
     let obj = saved;
     if (typeof saved === 'string') { try { obj = JSON.parse(saved); } catch (_) { obj = null; } }
-    if (obj && Array.isArray(obj.hosts)) {
-      for (const h of obj.hosts) {
-        if (typeof h === 'string' && /^https?:\/\//i.test(h) && !HOSTS.includes(h)) HOSTS.push(h);
+    if (!obj || typeof obj !== 'object') return;
+
+    const norm = (u) => String(u || '').replace(/\/+$/, '');
+    const dead = new Set((Array.isArray(obj.dead) ? obj.dead : []).map(norm));
+    const merged = [];
+    const push = (h) => {
+      if (typeof h !== 'string' || !/^https?:\/\//i.test(h)) return;
+      const host = norm(h);
+      if (dead.has(host) || merged.includes(host)) return;
+      merged.push(host);
+    };
+    if (typeof obj.active === 'string') push(obj.active);
+    (Array.isArray(obj.hosts) ? obj.hosts : []).forEach(push);
+
+    if (merged.length) {
+      for (const h of merged) if (!HOSTS.includes(h)) HOSTS.push(h);
+      if (typeof obj.active === 'string') {
+        const active = norm(obj.active);
+        const idx = HOSTS.indexOf(active);
+        if (idx > 0) { HOSTS.splice(idx, 1); HOSTS.unshift(active); }
+        PREFERRED = 0;
       }
+      logI(`[hosts] 恢复缓存池: ${HOSTS.length} 个，当前=${HOSTS[0]}`);
     }
-    // at 字段保留但不再用于定时判断（策略改为被动触发）
   } catch (_) {}
+}
+
+/** 持久化：active + hosts + dead */
+let hjPersistTimer = null;
+function schedulePersistHosts() {
+  if (hjPersistTimer) return;
+  hjPersistTimer = setTimeout(() => {
+    hjPersistTimer = null;
+    Promise.resolve(OmniBox.setCache(
+      HOSTS_CACHE_KEY,
+      {
+        at: Date.now(),
+        active: HOSTS[PREFERRED] || HOSTS[0],
+        hosts: HOSTS.slice(),
+        dead: Object.keys(hostHealth).filter((h) => hostHealth[h] && hostHealth[h].dead),
+      },
+      HOSTS_CACHE_TTL
+    )).catch(() => {});
+  }, 500);
+  if (hjPersistTimer.unref) hjPersistTimer.unref();
 }
 /**
  * 拉取新域名（被动触发模式）。
