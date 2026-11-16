@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 # @name 海角社区
-# @version 1.3.0
+# @version 1.3.1
 # @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角论坛.py
 # 地址发布页：https://hjsq2.co/ + https://gitlab.com/hjsqn-com1/hjsqn-com
 #   启动后首次请求即抓发布页解析最新域名，同构校验（首页含 /archives/{id}）后并入候选池；
-#   默认 6 小时刷新（HJSQN_HOSTS_REFRESH 可调，0=每次），结果写 SDK 缓存跨进程复用。
+#   不再定时刷新：只有所有域名都访问失败时才去发布页拉取新域名；候选域名分批探测（每批 10 个）。
 
 import asyncio
 import base64
@@ -47,13 +47,13 @@ PUBLISH_PAGES = [
     if item.strip()
 ]
 
-# 发布页拉取间隔（秒），默认 6 小时；设 0 表示每次都刷
-_HOSTS_REFRESH_SECONDS = int(
-    float(os.environ.get("HJSQN_HOSTS_REFRESH") or 6) * 3600
-)
+# 发布页域名发现（被动触发）：不做定时刷新。
+# 只有所有已知域名都访问失败时，才去发布页拉取新域名；候选域名分批探测，
+# 每批 10 个，批间隔 0.2 秒，避免一次打太多请求。
 _HOSTS_CACHE_KEY = "haijiao:py:hosts:v1"
+_PROBE_BATCH_SIZE = max(1, min(20, int(float(os.environ.get("HJSQN_PROBE_BATCH") or 10))))
+_PROBE_BATCH_DELAY = 0.2  # 秒
 _DISCOVERED_HOSTS = []
-_HOSTS_LAST_REFRESH = 0.0
 _HOSTS_REFRESH_TASK = None
 
 # 不当作站点主域的域名（第三方 / 图床 / 社交 / 统计）
@@ -508,14 +508,17 @@ async def _probe_main_site(host):
 
 async def _discover_hosts(force=False):
     """
-    抓发布页解析最新域名并做同构校验。
-    结果写入 _DISCOVERED_HOSTS，并由 _site_hosts() 合并进候选池。
-    带 SDK 缓存（跨进程复用）与 6 小时间隔。
+    从发布页拉新域名（被动触发）：只有 force=True 才真正拉取。
+    定时刷新已取消；调用方仅在「所有已知域名都失败」时传 force=True。
+    候选域名每批 _PROBE_BATCH_SIZE 个探测，批间 sleep 避免一次打太多。
     """
-    global _DISCOVERED_HOSTS, _HOSTS_LAST_REFRESH, _HOSTS_REFRESH_TASK
-    now = time.time()
+    global _DISCOVERED_HOSTS, _HOSTS_REFRESH_TASK
+    if not force:
+        return 0
+    if _HOSTS_REFRESH_TASK is not None and not _HOSTS_REFRESH_TASK.done():
+        return 0
 
-    # 从 SDK 缓存恢复上一次的发现结果
+    # 从 SDK 缓存恢复已知域名（跨进程复用）
     if not _DISCOVERED_HOSTS:
         try:
             saved = await OmniBox.getCache(_HOSTS_CACHE_KEY)
@@ -526,21 +529,12 @@ async def _discover_hosts(force=False):
                     saved = None
             if isinstance(saved, dict):
                 hosts = [h for h in (saved.get("hosts") or []) if isinstance(h, str)]
-                if hosts:
-                    _DISCOVERED_HOSTS = hosts
-                at = float(saved.get("at") or 0)
-                if at > _HOSTS_LAST_REFRESH:
-                    _HOSTS_LAST_REFRESH = at
+                _DISCOVERED_HOSTS = hosts
         except Exception:
             pass
 
-    if not force and _HOSTS_LAST_REFRESH and (now - _HOSTS_LAST_REFRESH) < _HOSTS_REFRESH_SECONDS:
-        return 0
-    if _HOSTS_REFRESH_TASK is not None and not force:
-        return 0
-
     async def _run():
-        global _DISCOVERED_HOSTS, _HOSTS_LAST_REFRESH, _HOSTS_REFRESH_TASK
+        global _DISCOVERED_HOSTS, _HOSTS_REFRESH_TASK
         added = 0
         try:
             candidates = []
@@ -562,36 +556,57 @@ async def _discover_hosts(force=False):
                         "warn", "[hjsq][hosts] 拉取失败 %s: %s" % (page, exc)
                     )
 
-            for host in candidates:
-                if host in _DISCOVERED_HOSTS:
-                    continue
-                if not await _probe_main_site(host):
-                    continue
-                _DISCOVERED_HOSTS.append(host)
-                added += 1
-                await OmniBox.log("info", "[hjsq][hosts] 发现可用主站 -> %s" % host)
+            new_ones = [h for h in candidates if h not in _site_hosts()]
+            if not new_ones:
+                await OmniBox.log("info", "[hjsq][hosts] 发布页无新域名，无需探测")
+                return 0
 
-            _HOSTS_LAST_REFRESH = time.time()
+            await OmniBox.log(
+                "info", "[hjsq][hosts] 待探测 %d 个新域名，每批 %d 个"
+                % (len(new_ones), _PROBE_BATCH_SIZE)
+            )
+            for i in range(0, len(new_ones), _PROBE_BATCH_SIZE):
+                batch = new_ones[i:i + _PROBE_BATCH_SIZE]
+                batch_no = i // _PROBE_BATCH_SIZE + 1
+                await OmniBox.log(
+                    "info", "[hjsq][hosts] 探测批次 %d: %d 个" % (batch_no, len(batch))
+                )
+                results = await asyncio.gather(
+                    *[_probe_main_site(h) for h in batch], return_exceptions=True
+                )
+                for host, ok in zip(batch, results):
+                    if ok is not True:
+                        continue
+                    if host in _DISCOVERED_HOSTS:
+                        continue
+                    _DISCOVERED_HOSTS.append(host)
+                    added += 1
+                    await OmniBox.log("info", "[hjsq][hosts] 发现可用主站 -> %s" % host)
+                if i + _PROBE_BATCH_SIZE < len(new_ones):
+                    await asyncio.sleep(_PROBE_BATCH_DELAY)
+
+            if added:
+                await OmniBox.log(
+                    "info", "[hjsq][hosts] 本次新增 %d 个，池共 %d 个"
+                    % (added, len(_site_hosts()))
+                )
             try:
                 await OmniBox.setCache(
                     _HOSTS_CACHE_KEY,
-                    {"at": _HOSTS_LAST_REFRESH, "hosts": list(_DISCOVERED_HOSTS)},
+                    {"at": time.time(), "hosts": list(_DISCOVERED_HOSTS)},
                     30 * 24 * 3600,
                 )
             except Exception:
                 pass
-            await OmniBox.log(
-                "info", "[hjsq][hosts] 刷新完成，新增 %d 个，池共 %d 个"
-                % (added, len(_DISCOVERED_HOSTS))
-            )
         except Exception as exc:
-            await OmniBox.log("warn", "[hjsq][hosts] 刷新异常: %s" % exc)
+            await OmniBox.log("warn", "[hjsq][hosts] 拉取异常: %s" % exc)
         finally:
             _HOSTS_REFRESH_TASK = None
         return added
 
     _HOSTS_REFRESH_TASK = asyncio.ensure_future(_run())
     return 0
+
 
 
 def _site_hosts():
@@ -632,54 +647,67 @@ def _candidate_urls(url):
 
 
 async def _request_ex(url, attempts=2):
+    """遍历所有已知域名请求；全部失败时才从发布页拉新域名并重试一次。"""
     last_error = None
-    for index, candidate in enumerate(_candidate_urls(url)):
-        max_attempts = attempts if index == 0 else 1
-        for attempt in range(1, max_attempts + 1):
-            try:
-                await OmniBox.log(
-                    "info",
-                    "[hjsq][request] %s (try %d)" % (candidate, attempt),
-                )
-                res = await OmniBox.request(
-                    candidate,
-                    {
-                        "method": "GET",
-                        "headers": HEADERS,
-                    },
-                )
-                if not isinstance(res, dict):
-                    raise RuntimeError("返回结构异常")
-                if res.get("statusCode") != 200:
-                    raise RuntimeError(
-                        "HTTP %s: %s" % (res.get("statusCode"), candidate)
+
+    async def _try_all():
+        nonlocal last_error
+        for index, candidate in enumerate(_candidate_urls(url)):
+            max_attempts = attempts if index == 0 else 1
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    await OmniBox.log(
+                        "info",
+                        "[hjsq][request] %s (try %d)" % (candidate, attempt),
                     )
-                body = res.get("body", "")
-                if body:
-                    global _ACTIVE_HOST
-                    parsed = urlsplit(candidate)
-                    _ACTIVE_HOST = "%s://%s" % (parsed.scheme, parsed.netloc)
-                    return body, candidate
-                raise RuntimeError("空响应")
-            except Exception as exc:
-                last_error = exc
-                await OmniBox.log(
-                    "warn",
-                    "[hjsq][request] 失败(%s, 第%d次): %s"
-                    % (candidate, attempt, exc),
-                )
-                if attempt < max_attempts:
-                    await asyncio.sleep(float(attempt))
+                    res = await OmniBox.request(
+                        candidate, {"method": "GET", "headers": HEADERS}
+                    )
+                    if not isinstance(res, dict):
+                        raise RuntimeError("返回结构异常")
+                    if res.get("statusCode") != 200:
+                        raise RuntimeError(
+                            "HTTP %s: %s" % (res.get("statusCode"), candidate)
+                        )
+                    body = res.get("body", "")
+                    if body:
+                        global _ACTIVE_HOST
+                        parsed = urlsplit(candidate)
+                        _ACTIVE_HOST = "%s://%s" % (parsed.scheme, parsed.netloc)
+                        return body, candidate
+                    raise RuntimeError("空响应")
+                except Exception as exc:
+                    last_error = exc
+                    await OmniBox.log(
+                        "warn",
+                        "[hjsq][request] 失败(%s, 第%d次): %s"
+                        % (candidate, attempt, exc),
+                    )
+                    if attempt < max_attempts:
+                        await asyncio.sleep(float(attempt))
+        return None
+
+    hit = await _try_all()
+    if hit:
+        return hit
+
+    # 所有已知域名都失败 → 去发布页拉新域名（被动触发），再重试一次
+    await OmniBox.log("warn", "[hjsq][request] 所有域名不可达，从发布页拉取新域名")
+    try:
+        await _discover_hosts(force=True)
+        if _HOSTS_REFRESH_TASK is not None:
+            await _HOSTS_REFRESH_TASK
+    except Exception as exc:
+        await OmniBox.log("warn", "[hjsq][request] 拉取新域名异常: %s" % exc)
+
+    hit = await _try_all()
+    if hit:
+        return hit
     raise RuntimeError("请求失败: %s" % last_error)
 
 
 async def home(params, context):
     try:
-        # 首次/到期时从发布页刷新域名池（不阻塞本轮回退，下一轮生效）
-        try:
-            await _discover_hosts()
-        except Exception:
-            pass
         html_text, final_url = await _request_ex(HOST + "/")
         videos = _parse_cards(html_text, final_url)
         await _fill_covers(videos, final_url)
@@ -697,10 +725,6 @@ async def category(params, context):
         params.get("categoryId") or params.get("category_id") or "/"
     ).strip()
     try:
-        try:
-            await _discover_hosts()
-        except Exception:
-            pass
         url = _category_url(category_id, page)
         await OmniBox.log(
             "info",
@@ -740,10 +764,6 @@ async def detail(params, context):
     if not raw_id:
         return {"list": []}
     try:
-        try:
-            await _discover_hosts()
-        except Exception:
-            pass
         page_url = urljoin(HOST + "/", raw_id)
         await OmniBox.log("info", "[hjsq][detail] page_url=%s" % page_url)
         html_text, page_url = await _request_ex(page_url)
@@ -850,10 +870,6 @@ async def search(params, context):
 
     limit = 20
     try:
-        try:
-            await _discover_hosts()
-        except Exception:
-            pass
         url = (
             "%s/Searchs/searchpagination/?keyword=%s&type=posts&page=%d&limit=%d"
             % (HOST, quote(keyword, safe=""), page, limit)

@@ -1,7 +1,7 @@
 // @name 海角社区
 // @author 宝宝巴士
 // @description 海角社区（hjsqn.com）：从地址发布页 hjsq2.co 自动获取最新域名并健康轮转；首页排行/往期列表/搜索/详情/播放；DPlayer data-config 取 /media/m3u8/ 代理直链；封面图床 AES-128-CBC 内联解密
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角社区.js
 // @dependencies crypto
 /**
@@ -192,15 +192,19 @@ async function httpGet(url, options = {}) {
   return nodeRequest(url, options);
 }
 
-/* ---------------- 发布页域名发现 ---------------- */
-const HOSTS_REFRESH_INTERVAL = (() => {
-  const raw = String(process.env.HJ_HOSTS_REFRESH || '').trim();
-  const h = raw === '' ? 6 : Number(raw);
-  return Math.max(0, Number.isFinite(h) ? h : 6) * 3600 * 1000;
-})();
+/* ---------------- 发布页域名发现（被动触发） ----------------
+ * 策略：不做定时刷新。每次请求先尝试所有已知域名；
+ * 全部失败时才去发布页拉新域名，分批探测（每批 10 个，批间间隔 200ms）
+ * 避免一次性打太多请求。
+ * HJ_PROBE_BATCH 控制批次大小，默认 10。
+ * =============================================================== */
 const HOSTS_CACHE_KEY = 'haijiao:hosts:v1';
 const HOSTS_CACHE_TTL = 30 * 24 * 3600;
-let lastHostsRefresh = 0;
+const PROBE_BATCH_SIZE = (() => {
+  const n = Number(String(process.env.HJ_PROBE_BATCH || '').trim() || 10);
+  return Number.isFinite(n) && n > 0 ? Math.min(20, Math.floor(n)) : 10;
+})();
+const PROBE_BATCH_DELAY = 200; // ms，批间间隔，避免一次性打太多
 let hostsRefreshInFlight = null;
 let hostsCacheRestored = false;
 
@@ -235,6 +239,16 @@ async function probeMainSite(host) {
       && /\/archives\/\d+/.test(b);
   } catch (_) { return false; }
 }
+/** 分批并发探测：每批 PROBE_BATCH_SIZE 个，批间间隔 PROBE_BATCH_DELAY ms */
+async function probeBatch(batch) {
+  const results = await Promise.allSettled(batch.map((h) => probeMainSite(h)));
+  const ok = [];
+  for (let i = 0; i < batch.length; i++) {
+    if (results[i].status === 'fulfilled' && results[i].value) ok.push(batch[i]);
+  }
+  return ok;
+}
+
 async function discoverHosts() {
   const candidates = new Set();
   for (const page of [PUBLISH_PAGE, GITLAB_ADDR]) {
@@ -249,15 +263,29 @@ async function discoverHosts() {
       logI(`[hosts] ${page} 拉取失败: ${e.message}`);
     }
   }
+
+  const newOnes = Array.from(candidates).filter((h) => !HOSTS.includes(h));
+  if (!newOnes.length) {
+    logI('[hosts] 发布页无新域名，无需探测');
+    return 0;
+  }
+  logI(`[hosts] 待探测 ${newOnes.length} 个新域名，每批 ${PROBE_BATCH_SIZE} 个`);
+
   let added = 0;
-  for (const h of candidates) {
-    if (HOSTS.includes(h)) continue;
-    const ok = await probeMainSite(h);
-    if (!ok) continue;
-    HOSTS.push(h);
-    hostHealth[h] = { fail: 0, okAt: 0, blockAt: 0 };
-    added++;
-    logI(`[hosts] 发现可用主站 -> ${h}`);
+  for (let i = 0; i < newOnes.length; i += PROBE_BATCH_SIZE) {
+    const batch = newOnes.slice(i, i + PROBE_BATCH_SIZE);
+    const batchNo = Math.floor(i / PROBE_BATCH_SIZE) + 1;
+    logI(`[hosts] 探测批次 ${batchNo}: ${batch.length} 个`);
+    const ok = await probeBatch(batch);
+    for (const h of ok) {
+      HOSTS.push(h);
+      hostHealth[h] = { fail: 0, okAt: 0, blockAt: 0 };
+      added++;
+      logI(`[hosts] 发现可用主站 -> ${h}`);
+    }
+    if (i + PROBE_BATCH_SIZE < newOnes.length) {
+      await new Promise((r) => setTimeout(r, PROBE_BATCH_DELAY));
+    }
   }
   if (added) logI(`[hosts] 本次新增 ${added} 个，池共 ${HOSTS.length} 个`);
   return added;
@@ -274,22 +302,30 @@ async function restoreHostsCache() {
         if (typeof h === 'string' && /^https?:\/\//i.test(h) && !HOSTS.includes(h)) HOSTS.push(h);
       }
     }
-    if (obj && Number(obj.at) > lastHostsRefresh) lastHostsRefresh = Number(obj.at);
+    // at 字段保留但不再用于定时判断（策略改为被动触发）
   } catch (_) {}
 }
+/**
+ * 拉取新域名（被动触发模式）。
+ * force=false 时直接返回（不做定时刷新）；
+ * force=true 时并发标记，避免重复触发。
+ */
 async function ensureHostsFresh(force) {
   await restoreHostsCache();
-  if (!force && lastHostsRefresh && Date.now() - lastHostsRefresh < HOSTS_REFRESH_INTERVAL) return 0;
+  if (!force) return 0;
   if (hostsRefreshInFlight) return hostsRefreshInFlight;
   hostsRefreshInFlight = (async () => {
     try {
-      logI(`[hosts] 定时刷新开始（间隔 ${HOSTS_REFRESH_INTERVAL / 3600000}h）`);
+      logI('[hosts] 全部域名不可达，从发布页拉取新域名');
       const added = await discoverHosts();
-      lastHostsRefresh = Date.now();
-      await OmniBox.setCache(HOSTS_CACHE_KEY, { at: lastHostsRefresh, hosts: HOSTS.slice() }, HOSTS_CACHE_TTL);
+      await OmniBox.setCache(
+        HOSTS_CACHE_KEY,
+        { at: Date.now(), hosts: HOSTS.slice() },
+        HOSTS_CACHE_TTL
+      );
       return added;
     } catch (e) {
-      logI(`[hosts] 定时刷新异常: ${e.message}`);
+      logI(`[hosts] 拉取新域名异常: ${e.message}`);
       return 0;
     } finally {
       hostsRefreshInFlight = null;
@@ -302,7 +338,7 @@ async function ensureHostsFresh(force) {
 async function fetchHtml(urlOrPath) {
   const isFull = /^https?:\/\//i.test(urlOrPath);
   const path = isFull ? new URL(urlOrPath).pathname + new URL(urlOrPath).search : urlOrPath;
-  try { ensureHostsFresh(false); } catch (_) {}
+  // 不做定时刷新；仅在全部域名失败时触发 discoverHosts（见下方重试逻辑）
 
   const tryAll = async () => {
     for (const idx of buildHostOrder()) {
