@@ -1,7 +1,7 @@
 // @name 91全集
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
-// @description 91quanji.com（木瓜视频/KVS Paysite）采集源：10 个真实分类 + 首页推荐 + 搜索分页；卡片解析封面/标题；详情页反混淆 eval(I(...)) 直取签名 m3u8；tag 分类 token 分页链（进程内+SDK 缓存）、搜索 p=N、三段式播放兜底
+// @description 91quanji.com（木瓜视频/KVS Paysite）采集源：修复封面（图床 pics.uoepp.com 有 Referer 防盗链，脚本内带 Referer 抓取并转 data:image 内联）+ 补 Node 直连兜底（宿主缺 OmniBox.request 时不再整体失败）；10 个真实分类 + 首页推荐 + 搜索分页；卡片解析封面/标题；详情页反混淆 eval(I(...)) 直取签名 m3u8；tag 分类 token 分页链（进程内+SDK 缓存）、搜索 p=N、三段式播放兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91全集.js
 // @dependencies []
 
@@ -48,6 +48,9 @@
  */
 
 const crypto = require('crypto');
+const https = require('https');
+const http = require('http');
+const zlib = require('zlib');
 
 let OmniBox;
 try { OmniBox = require('omnibox_sdk'); }
@@ -77,6 +80,109 @@ function safeLog(level, msg) {
 }
 function logI(m) { safeLog('info', m); }
 function logE(m) { safeLog('error', m); }
+
+/* ==================== 封面防盗链处理 ====================
+ * 站点图床 pics.uoepp.com 有 Referer 白名单：
+ *   带 Referer: https://91quanji.com/  →  200 image/jpeg
+ *   不带 Referer / 其它 Referer        →  403 text/html
+ * 宿主播放器直连图片时不会带该 Referer，表现为「封面全是空白」。
+ * 因此列表态把封面抓取后转成 data:image/*;base64 内联返回。
+ * 可用 QUANJI_COVER_INLINE=0 关闭（回退原始 URL），QUANJI_COVER_CONCURRENCY 调并发。
+ * ========================================================= */
+const COVER_INLINE = process.env.QUANJI_COVER_INLINE !== '0';
+const COVER_CONCURRENCY = (() => {
+  const n = Number(String(process.env.QUANJI_COVER_CONCURRENCY || '').trim() || 6);
+  return Number.isFinite(n) && n > 0 ? Math.min(12, Math.floor(n)) : 6;
+})();
+const COVER_TIMEOUT = 8000;
+const coverCache = new Map();
+const COVER_CACHE_LIMIT = 300;
+
+function sniffImageMime(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 4) return '';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.slice(0, 3).toString('ascii') === 'GIF') return 'image/gif';
+  if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return '';
+}
+/** 二进制抓图（保留原始 Buffer），带 Referer 绕过防盗链 */
+function fetchImageBinary(urlStr, referer, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 3) return reject(new Error('图片重定向过多'));
+    let u;
+    try { u = new URL(urlStr); } catch (e) { return reject(e); }
+    const isHttps = u.protocol === 'https:';
+    const client = isHttps ? https : http;
+    const req = client.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (isHttps ? 443 : 80),
+      path: u.pathname + u.search,
+      method: 'GET',
+      headers: {
+        'User-Agent': UA,
+        Referer: referer,
+        Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+      },
+      timeout: COVER_TIMEOUT,
+      rejectUnauthorized: false,
+    }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        return fetchImageBinary(new URL(res.headers.location, u.href).href, referer, redirects + 1)
+          .then(resolve).catch(reject);
+      }
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({
+        statusCode: res.statusCode,
+        body: decompressBody(Buffer.concat(chunks), res.headers['content-encoding']),
+      }));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(new Error('封面超时')); });
+    req.end();
+  });
+}
+/** 单张封面：抓取 + 转 data URI；失败回退原 URL */
+async function resolveCover(url, host) {
+  if (!url || !COVER_INLINE) return url || '';
+  if (coverCache.has(url)) return coverCache.get(url);
+  try {
+    const res = await fetchImageBinary(url, `${host}/`);
+    const mime = sniffImageMime(res.body);
+    if (res.statusCode === 200 && mime) {
+      const dataUri = `data:${mime};base64,${res.body.toString('base64')}`;
+      if (coverCache.size >= COVER_CACHE_LIMIT) coverCache.delete(coverCache.keys().next().value);
+      coverCache.set(url, dataUri);
+      return dataUri;
+    }
+    logI(`[cover] ${res.statusCode} 非图片 ${String(url).slice(0, 70)}`);
+  } catch (e) {
+    logI(`[cover] 抓取失败 ${String(url).slice(0, 70)}: ${e.message}`);
+  }
+  coverCache.set(url, url);
+  return url;
+}
+/** 限并发批量内联封面，失败不阻塞列表主链路 */
+async function resolveCovers(list, host) {
+  if (!COVER_INLINE || !Array.isArray(list) || !list.length) return list;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < list.length) {
+      const idx = cursor++;
+      const item = list[idx];
+      if (item && item.vod_pic) {
+        try { item.vod_pic = await resolveCover(item.vod_pic, host); } catch (_) {}
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(COVER_CONCURRENCY, list.length) }, () => worker()));
+  return list;
+}
 
 // ==================== 配置区域 ====================
 const DEFAULT_HOST = 'https://91quanji.com';
@@ -188,6 +294,69 @@ function decodeI(raw) {
 // ==================== 工具函数结束 ====================
 
 // ==================== 请求与缓存 ====================
+/**
+ * Node 直连兜底：部分宿主没有 OmniBox.request（或版本不提供），
+ * 只依赖 SDK 会让 home/detail 整体失败（表现为「列表 0 条 + 封面全空」）。
+ * 这里直接用 http/https 发请求，保留原始 header 与 cookie 捕获能力。
+ */
+function decompressBody(buf, encoding) {
+  const enc = String(encoding || '').toLowerCase();
+  try {
+    if (enc.includes('br')) return zlib.brotliDecompressSync(buf);
+    if (enc.includes('gzip')) return zlib.gunzipSync(buf);
+    if (enc.includes('deflate')) return zlib.inflateSync(buf);
+  } catch (_) {}
+  return buf;
+}
+function nodeRequest(urlStr, options = {}, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 4) return reject(new Error('重定向过多'));
+    let u;
+    try { u = new URL(urlStr); } catch (e) { return reject(e); }
+    const isHttps = u.protocol === 'https:';
+    const client = isHttps ? https : http;
+    const headers = Object.assign({}, options.headers || {}, { 'Accept-Encoding': 'gzip, deflate, br' });
+    const req = client.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (isHttps ? 443 : 80),
+      path: u.pathname + u.search,
+      method: options.method || 'GET',
+      headers,
+      timeout: options.timeout || 20000,
+      rejectUnauthorized: false,
+    }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        return nodeRequest(new URL(res.headers.location, u.href).href, options, redirects + 1)
+          .then(resolve).catch(reject);
+      }
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks);
+        resolve({
+          statusCode: res.statusCode,
+          headers: res.headers,
+          body: decompressBody(raw, res.headers['content-encoding']).toString('utf-8'),
+        });
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(new Error('请求超时')); });
+    req.end();
+  });
+}
+/** 统一请求：SDK 优先，不可用/失败时回落 Node 直连 */
+async function requestPage(url, host) {
+  const headers = buildHeaders(host);
+  if (OmniBox && typeof OmniBox.request === 'function') {
+    try {
+      return await OmniBox.request(url, { method: 'GET', headers });
+    } catch (_) { /* 回落直连 */ }
+  }
+  return nodeRequest(url, { method: 'GET', headers });
+}
 async function fetchPage(path) {
   const errors = [];
   for (let off = 0; off < HOSTS.length; off++) {
@@ -195,7 +364,7 @@ async function fetchPage(path) {
     const host = HOSTS[i];
     const url = absUrl(path, host);
     try {
-      const res = await OmniBox.request(url, { method: 'GET', headers: buildHeaders(host) });
+      const res = await requestPage(url, host);
       const text = bodyText(res);
       const code = Number(res && res.statusCode) || 0;
       if (code !== 200 || text.length < 300) { errors.push(`${host} HTTP ${code} len=${text.length}`); continue; }
@@ -398,7 +567,7 @@ async function home(params, context) {
   logI(`[home] 入口 params=${JSON.stringify(params || {})} from=${from}`);
   try {
     const res = await cachedPage('/', CACHE_TTL, 'home');
-    const list = parseCards(res.body, res.host);
+    const list = await resolveCovers(parseCards(res.body, res.host), res.host);
     logI(`[home] 返回 ${list.length} 条 cached=${res.cached}`);
     return { class: CATEGORIES, filters: {}, list };
   } catch (e) {
@@ -430,6 +599,7 @@ async function category(params, context) {
     let res = await cachedPage(path, CACHE_TTL, tag);
     let list = parseCards(res.body, res.host);
     if (!list.length) { res = await fetchPage(path); list = parseCards(res.body, res.host); }
+    list = await resolveCovers(list, res.host);
     const pg = parsePagination(res.body);
     if (pg.pagecount) {
       pagecount = Math.max(pagecount, pg.pagecount);
@@ -465,6 +635,7 @@ async function search(params, context) {
     let res = await cachedPage(path, CACHE_TTL, 'search');
     let list = parseCards(res.body, res.host);
     if (!list.length) { res = await fetchPage(path); list = parseCards(res.body, res.host); }
+    list = await resolveCovers(list, res.host);
     // 搜索页无分页区：本页有数据就认为还有下一页（空页时回退到当前页）
     const pagecount = list.length ? page + 1 : Math.max(1, page - 1);
     logI(`[search] "${kw}" 返回 ${list.length} 条 pagecount=${pagecount}`);
@@ -491,6 +662,9 @@ async function detail(params, context) {
   try {
     const res = await cachedPage(vodId, DETAIL_TTL, 'detail');
     const item = parseDetail(res.body, res.host, vodId);
+    if (item && item.vod_pic) {
+      try { item.vod_pic = await resolveCover(item.vod_pic, res.host); } catch (_) {}
+    }
     const direct = extractPlayUrl(res.body);
     logI(`[detail] 标题="${item.vod_name.slice(0, 60)}" 直链=${direct ? direct.slice(0, 100) : '无'}`);
     // 列表态已带封面，这里把已知直链透传进 playId 之外不做额外请求
