@@ -1,7 +1,7 @@
 /**
  * @name 吃瓜
- * @version 1.4.0
- * @description 吃瓜 (chigua.com / 51cg)：【新增】从官方发布页 https://www.dafxtlve.cc/ 自动获取最新地址（默认每 6 小时刷新，全挂时立即强制刷新，死域名自动清理，防失联）；修复封面（CDN 图片为 AES-128-CBC 加密的密文，脚本内解密还原为 data:image；详情页改取 itemprop="image" 主图）、内置多域名容灾与动态跳转解析、自适应 Node.js http/https 回退机制、Mirages文章列表解析与 DPlayer m3u8 双码率提取
+ * @version 1.5.0
+ * @description 吃瓜 (chigua.com / 51cg)：【新增】接入官方入口页 cg51.com（解析 main/latest/backup 三类入口，3 个内容站全部同构可用），支持多发布页按序兜底；域名池改为优胜劣汰（成功置顶持久化、连续失败移出池）；【新增】从官方发布页 https://www.dafxtlve.cc/ 自动获取最新地址（默认每 6 小时刷新，全挂时立即强制刷新，死域名自动清理，防失联）；修复封面（CDN 图片为 AES-128-CBC 加密的密文，脚本内解密还原为 data:image；详情页改取 itemprop="image" 主图）、内置多域名容灾与动态跳转解析、自适应 Node.js http/https 回退机制、Mirages文章列表解析与 DPlayer m3u8 双码率提取
  * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/51吃瓜.js
  * @dependencies crypto
  *
@@ -14,7 +14,8 @@
  *  CHIGUA_COVER_DISABLE      设为 1 关闭封面解密（回退原始 URL，仅排障用）
  *
  * 【自动获取最新地址 / 防失联】
- *  CHIGUA_PUBLISH_PAGE       发布页地址，默认 https://www.dafxtlve.cc/
+ *  CHIGUA_PUBLISH_PAGES      发布页列表（逗号分隔），默认 https://cg51.com/ 后跟 https://www.dafxtlve.cc/
+ *  CHIGUA_PUBLISH_PAGE       只指定首选发布页（兼容旧用法）
  *  CHIGUA_HOSTS_REFRESH      刷新间隔（小时），默认 6；设 0 = 每次请求都刷新
  *  CHIGUA_HOST_FAIL_THRESHOLD 某域名连续失败多少次后提前刷新发布页，默认 3
  *
@@ -97,7 +98,28 @@ let currentActiveBase = INITIAL_MIRRORS[0];
  * 三个域名实测全部可用且同构（227KB / post-card 274 / archives 70 / Mirages 121）。
  * 另有 og:url / og:image 也含站点域名，作为兜底信号。
  */
-const PUBLISH_PAGE = (process.env.CHIGUA_PUBLISH_PAGE || 'https://www.dafxtlve.cc/').trim();
+/**
+ * 发布页列表：按顺序尝试，任一成功即用。
+ *   cg51.com          —— 官方入口页（2026-11-18 实测，title「51吃瓜 - 官方入口」）
+ *                        结构同样是 <a data-entry-key="main|backup|latest" href="...">，
+ *                        实测给出 51cg1.com（主站）+ 两个反代节点，三个全部同构可用。
+ *   www.dafxtlve.cc   —— 原发布页，保留作为兜底。
+ * 可用 CHIGUA_PUBLISH_PAGES（逗号分隔）整体覆盖，或 CHIGUA_PUBLISH_PAGE 只改首选。
+ */
+const PUBLISH_PAGES = (() => {
+  const multi = String(process.env.CHIGUA_PUBLISH_PAGES || '').trim();
+  if (multi) {
+    return multi.split(',').map((x) => x.trim()).filter(Boolean);
+  }
+  const single = String(process.env.CHIGUA_PUBLISH_PAGE || '').trim();
+  if (single) return [single];
+  return [
+    'https://cg51.com/',
+    'https://www.dafxtlve.cc/',
+  ];
+})();
+// 兼容旧变量引用
+const PUBLISH_PAGE = PUBLISH_PAGES[0];
 // 刷新间隔（小时），默认 6；设 0 表示每次请求都刷新
 const HOSTS_REFRESH_INTERVAL = (() => {
   const raw = String(process.env.CHIGUA_HOSTS_REFRESH || '').trim();
@@ -125,6 +147,8 @@ function parsePublishPage(html) {
     if (!origin || seen.has(origin)) return;
     // 排除统计/广告/图片/第三方
     if (/googletagmanager|google-analytics|ads\.|doubleclick|facebook|twitter\.com|t\.me/i.test(origin)) return;
+    // 发布页自身是入口站，不是内容站，不进轮换池
+    if (PUBLISH_PAGES.some((p) => p.replace(/\/+$/, '') === origin.replace(/\/+$/, ''))) return;
     seen.add(origin);
     // 注意：不能写 Number(prio) || 99 —— main 的 prio 是 0，
     // Number(0) || 99 会被 || 吃成 99，导致主站入口反而排到最后。
@@ -153,13 +177,22 @@ function parsePublishPage(html) {
   return out.map((x) => x.origin);
 }
 
-/** 验证某域名是否为同构吃瓜站（返回 true/false） */
+/**
+ * 验证某域名是否为同构吃瓜站（内容站）。
+ * 判定不能太宽松：发布页入口站（如 cg51.com）正文里会引用 51cg1.com 的主题图，
+ * 导致整页出现 "Mirages" 字样而被误判成同构站。
+ * 因此要求「真实文章卡片」或「多条 /archives/ 链接」这两个硬指标：
+ *   - post-card        卡片容器（内容站必有，实测首页 270 处）
+ *   - /archives/{数字}  文章链接（内容站必有，实测 54 条）
+ */
 async function probeChiguaHost(origin) {
   try {
     const body = await fetchSingle(`${origin}/`);
     const b = String(body || '');
     if (b.length < 5000) return false;
-    return b.includes('post-card') || b.includes('archives') || b.includes('Mirages');
+    const hasCard = b.includes('post-card');
+    const archiveCount = (b.match(/\/archives\/\d+/g) || []).length;
+    return hasCard || archiveCount >= 5;
   } catch (_) {
     return false;
   }
@@ -172,10 +205,23 @@ async function probeChiguaHost(origin) {
  */
 async function refreshHostsFromPublishPage() {
   let html = '';
-  try {
-    html = await fetchSingle(PUBLISH_PAGE);
-  } catch (e) {
-    await OmniBox.log('info', `[chigua] [hosts] 发布页拉取失败: ${e.message}`);
+  // 依次尝试各发布页，任一拿到候选即用
+  for (const page of PUBLISH_PAGES) {
+    try {
+      const body = await fetchSingle(page);
+      const parsed = parsePublishPage(body);
+      if (parsed.length) {
+        html = body;
+        await OmniBox.log('info', `[chigua] [hosts] 发布页 ${page} 解析成功`);
+        break;
+      }
+      await OmniBox.log('info', `[chigua] [hosts] 发布页 ${page} 未解析到候选（${String(body || '').length}B）`);
+    } catch (e) {
+      await OmniBox.log('info', `[chigua] [hosts] 发布页 ${page} 拉取失败: ${e.message}`);
+    }
+  }
+  if (!html) {
+    await OmniBox.log('info', '[chigua] [hosts] 所有发布页均不可用');
     return 0;
   }
   const candidates = parsePublishPage(html);
@@ -223,14 +269,28 @@ async function restoreHostsCache() {
     const saved = await OmniBox.getCache(HOSTS_CACHE_KEY);
     let obj = saved;
     if (typeof saved === 'string') { try { obj = JSON.parse(saved); } catch (_) { obj = null; } }
-    if (obj && Array.isArray(obj.hosts)) {
-      for (const h of obj.hosts) {
-        if (typeof h === 'string' && /^https?:\/\//i.test(h) && !activeMirrors.includes(h)) activeMirrors.push(h);
+    if (obj && typeof obj === 'object') {
+      // 恢复判死集合：下次启动直接跳过，不再浪费探测
+      for (const d of (Array.isArray(obj.dead) ? obj.dead : [])) {
+        if (typeof d === 'string') deadHosts.add(d);
+      }
+      if (Array.isArray(obj.hosts)) {
+        for (const h of obj.hosts) {
+          if (typeof h !== 'string' || !/^https?:\/\//i.test(h)) continue;
+          if (deadHosts.has(h)) continue;
+          if (!activeMirrors.includes(h)) activeMirrors.push(h);
+        }
+      }
+      // 上次成功的域置顶
+      if (typeof obj.active === 'string' && !deadHosts.has(obj.active)) {
+        const idx = activeMirrors.indexOf(obj.active);
+        if (idx > 0) { activeMirrors.splice(idx, 1); activeMirrors.unshift(obj.active); }
+        currentActiveBase = obj.active;
       }
     }
     if (obj && Number(obj.at) > lastHostsRefresh) lastHostsRefresh = Number(obj.at);
     if (lastHostsRefresh) {
-      await OmniBox.log('info', `[chigua] [hosts] 已从缓存恢复域名池（${activeMirrors.length} 个），上次刷新 ${new Date(lastHostsRefresh).toISOString()}`);
+      await OmniBox.log('info', `[chigua] [hosts] 已从缓存恢复域名池（${activeMirrors.length} 个，当前=${currentActiveBase}，判死 ${deadHosts.size} 个），上次刷新 ${new Date(lastHostsRefresh).toISOString()}`);
     }
   } catch (_) {}
 }
@@ -272,15 +332,63 @@ const HOST_FAIL_THRESHOLD = (() => {
   return Math.max(1, Number.isFinite(n) ? n : 3);
 })();
 const hostFailCount = Object.create(null);
+const deadHosts = new Set();
+
+/** 持久化域名池：active + hosts + dead（去抖 500ms） */
+let chiguaPersistTimer = null;
+function persistHostsSoon() {
+  if (chiguaPersistTimer) return;
+  chiguaPersistTimer = setTimeout(() => {
+    chiguaPersistTimer = null;
+    Promise.resolve(OmniBox.setCache(
+      HOSTS_CACHE_KEY,
+      {
+        at: lastHostsRefresh || Date.now(),
+        active: currentActiveBase,
+        hosts: activeMirrors.slice(),
+        dead: Array.from(deadHosts),
+      },
+      HOSTS_CACHE_TTL
+    )).catch(() => {});
+  }, 500);
+  if (chiguaPersistTimer.unref) chiguaPersistTimer.unref();
+}
+
+/** 域名可用：清零失败、提为当前域并置顶持久化 */
+function noteHostOk(base) {
+  if (!base) return;
+  hostFailCount[base] = 0;
+  deadHosts.delete(base);
+  if (currentActiveBase !== base) {
+    currentActiveBase = base;
+    try { Promise.resolve(OmniBox.log('info', `[chigua] [hosts] 切换到可用域名 ${base}`)).catch(() => {}); } catch (_) {}
+  }
+  const idx = activeMirrors.indexOf(base);
+  if (idx > 0) { activeMirrors.splice(idx, 1); activeMirrors.unshift(base); }
+  persistHostsSoon();
+}
+
+/**
+ * 域名失败：连续 HOST_FAIL_THRESHOLD 次判死并移出池（下次启动直接跳过），
+ * 同时标记需要提前刷新发布页。
+ */
 function noteHostFail(base) {
   if (!base) return;
   hostFailCount[base] = (hostFailCount[base] || 0) + 1;
   if (hostFailCount[base] >= HOST_FAIL_THRESHOLD) {
-    // 达到阈值：标记需要提前刷新（下一轮请求会触发）
     globalThis.__chiguaForceAt = 0;
     lastHostsRefresh = 0;
     hostFailCount[base] = 0;
-    try { Promise.resolve(OmniBox.log('info', `[chigua] [hosts] ${base} 连续失败 ${HOST_FAIL_THRESHOLD} 次，将提前刷新发布页`)).catch(() => {}); } catch (_) {}
+    // 判死并移出轮换池（保留至少一个，避免全清空）
+    if (!deadHosts.has(base) && activeMirrors.length > 1) {
+      deadHosts.add(base);
+      const idx = activeMirrors.indexOf(base);
+      if (idx >= 0) activeMirrors.splice(idx, 1);
+      try { Promise.resolve(OmniBox.log('info', `[chigua] [hosts] ${base} 连续失败 ${HOST_FAIL_THRESHOLD} 次，移出轮换池并提前刷新发布页`)).catch(() => {}); } catch (_) {}
+      persistHostsSoon();
+    } else {
+      try { Promise.resolve(OmniBox.log('info', `[chigua] [hosts] ${base} 连续失败 ${HOST_FAIL_THRESHOLD} 次，将提前刷新发布页`)).catch(() => {}); } catch (_) {}
+    }
   }
 }
 /* ==================== 发布页自动获取结束 ==================== */
@@ -570,7 +678,7 @@ async function fetchHtmlWithFailover(pathOrUrl) {
         body = await resolvePageContent(body);
 
         if (body && (body.includes('post-card') || body.includes('archives') || body.includes('Mirages') || body.length > 500)) {
-          currentActiveBase = base;
+          noteHostOk(base);
           return body;
         }
         await OmniBox.log('info', `[chigua] ${base} 返回内容未匹配到文章或结构 (长度: ${body ? body.length : 0})`);
