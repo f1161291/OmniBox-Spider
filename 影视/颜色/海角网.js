@@ -1,7 +1,7 @@
 // @name 海角网
 // @author 宝宝巴士
-// @description hjw01.com（海角网）：首页/分类/标签/分页/详情/播放；列表 xqbj-list-rows 取标题/封面；详情页 DPlayer data-config 直取带签名 m3u8；封面图床 pic.gyezbp.cn 为 AES-128-CBC 密文，脚本内解密转 data:image
-// @version 1.1.0
+// @description hjw01.com（海角网）：首页/分类/标签/分页/详情/播放；列表 xqbj-list-rows 取标题/封面；详情页 DPlayer data-config 直取带签名 m3u8；封面图床 pic.gyezbp.cn 为 AES-128-CBC 密文，脚本内解密转 data:image；域名池软隔离（本机 DNS 黑洞/连接重置不计失败，永不删空池）+ 裸域自动补 www.
+// @version 1.1.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角网.js
 // @dependencies crypto
 /**
@@ -105,6 +105,7 @@ const REQUEST_HARD_TIMEOUT = Math.max(3000, Number(process.env.HJW_REQUEST_TIMEO
 /** 内置已知可用域名（发布页拉不到时兜底） */
 const BUILTIN_HOSTS = String(process.env.HJW_NO_BUILTIN || '') === '1' ? [] : [
   'https://www.hjw01.com',
+  'https://hjw01.com',
   'https://haijiaowang.com',
 ];
 
@@ -118,6 +119,45 @@ const HOST_POOL = (() => {
 let HOST_POOL_READY = false;
 let hostsRefreshInFlight = null;
 const hostHealth = Object.create(null);
+
+/**
+ * 判定「本机环境不可达」而不是「站点挂了」的错误特征。
+ * 这类失败不该计入连续失败次数，也不该把域名移出轮换池：
+ *   · ECONNREFUSED 0.0.0.0 / ::  —— DNS 被黑洞（运营商/本地 hosts/安全软件）
+ *   · ENOTFOUND / EAI_AGAIN      —— DNS 解析失败
+ *   · ECONNRESET / EPIPE / ETIMEDOUT —— Cloudflare 边缘到本机链路被 RST（常见于跨网）
+ */
+const ENV_ERR_RE = /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNRESET|EPIPE|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|0\.0\.0\.0|::|socket hang up|请求超时/i;
+function isEnvError(msg) {
+  const s = String(msg || '');
+  if (!s) return false;
+  // 0.0.0.0 只有出现在连接目标里才算黑洞；错误文案里带 0.0.0.0 一律算
+  return ENV_ERR_RE.test(s);
+}
+
+/** 域名归一化：裸域补 www.（hjw01.com 301→www.hjw01.com，裸域直连拿不到内容） */
+function normalizeOrigin(u) {
+  let s = String(u || '').trim();
+  if (!s) return '';
+  if (!/^https?:\/\//i.test(s)) s = `https://${s}`;
+  try {
+    const o = new URL(s);
+    return `${o.protocol}//${o.hostname}`.replace(/\/+$/, '');
+  } catch (_) { return s.replace(/\/+$/, ''); }
+}
+/** 生成探测候选：自身 + 裸域/www 互换 */
+function originVariants(origin) {
+  const base = normalizeOrigin(origin);
+  if (!base) return [];
+  const out = [base];
+  try {
+    const o = new URL(base);
+    const host = o.hostname;
+    if (/^www\./i.test(host)) out.push(`${o.protocol}//${host.replace(/^www\./i, '')}`);
+    else out.push(`${o.protocol}//www.${host}`);
+  } catch (_) {}
+  return Array.from(new Set(out));
+}
 
 /** 硬超时包装：宿主 request 不认 timeout 参数，网络卡住会挂很久 */
 function withHardTimeout(promise, ms, label) {
@@ -245,19 +285,27 @@ async function fetchHtml(url) {
         markHostDead(host, lastErr.message);
       } catch (e) {
         lastErr = e;
-        logI(`[hosts] ${host} 失败: ${e.message}`);
-        markHostDead(host, e.message);
+        const msg = String(e && e.message || e);
+        logI(`[hosts] ${host} 失败: ${msg}`);
+        markHostDead(host, msg);
       }
     }
     throw lastErr || new Error('请求失败');
   };
 
-  const ordered = [HOST, ...HOST_POOL.filter((h) => h !== HOST)];
+  const orderPool = () => {
+    const rest = HOST_POOL.filter((h) => h !== HOST);
+    const alive = rest.filter((h) => !(hostHealth[h] && hostHealth[h].dead));
+    const deadOnes = rest.filter((h) => hostHealth[h] && hostHealth[h].dead);
+    return [HOST, ...alive, ...deadOnes];
+  };
+
+  const ordered = orderPool();
   try {
     return await tryHosts(ordered);
   } catch (firstErr) {
     await ensureHostsFresh(true);
-    const more = [HOST, ...HOST_POOL.filter((h) => h !== HOST)];
+    const more = orderPool();
     try {
       return await tryHosts(more);
     } catch (_) {
@@ -287,21 +335,30 @@ function extractPublishHosts(text) {
 
 /** 同构校验：首页必须能抓到 /archives/{id} 与列表容器 */
 async function probeHost(origin) {
-  try {
-    const r = await withHardTimeout(
-      nodeRequest(`${origin}/`, {
-        timeout: PROBE_TIMEOUT,
-        headers: { 'User-Agent': UA, Referer: `${origin}/` },
-      }),
-      PROBE_TIMEOUT,
-      `probe ${origin}`
-    );
-    const body = String(r.body || '');
-    if (r.statusCode < 200 || r.statusCode >= 400) return false;
-    if (body.length < 20000) return false;
-    const archiveCount = (body.match(/\/archives\/\d+/g) || []).length;
-    return archiveCount >= 10 && (body.includes('xqbj-list') || body.includes('海角'));
-  } catch (_) { return false; }
+  const variants = originVariants(origin);
+  for (const v of variants) {
+    let body = '';
+    try {
+      // 优先走 SDK（与主链路同一条网络通道）；SDK 不可用才回落 Node 直连
+      body = await withHardTimeout(requestOnce(`${v}/`, v), PROBE_TIMEOUT, `probe ${v}`);
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      logI(`[hosts] 探测 ${v} 异常: ${msg}${isEnvError(msg) ? '（本机网络不可达，不计失败）' : ''}`);
+      continue;
+    }
+    const text = String(body || '');
+    if (text.length < 20000) {
+      logI(`[hosts] 探测 ${v} 内容过短 ${text.length}B`);
+      continue;
+    }
+    const archiveCount = (text.match(/\/archives\/\d+/g) || []).length;
+    if (archiveCount >= 10 && (text.includes('xqbj-list') || text.includes('海角'))) {
+      if (v !== normalizeOrigin(origin)) logI(`[hosts] ${origin} 归一化为 ${v}（裸域/www 互换命中）`);
+      return v;
+    }
+    logI(`[hosts] 探测 ${v} 非同构: archives=${archiveCount} xqbj=${text.includes('xqbj-list')} 海角=${text.includes('海角')}`);
+  }
+  return '';
 }
 
 async function restoreHostCache() {
@@ -312,16 +369,20 @@ async function restoreHostCache() {
     let obj = saved;
     if (typeof saved === 'string') { try { obj = JSON.parse(saved); } catch (_) { obj = null; } }
     if (!obj || typeof obj !== 'object') return;
-    const dead = new Set((Array.isArray(obj.dead) ? obj.dead : []).map((h) => String(h).replace(/\/+$/, '')));
+    // 注意：缓存里的 dead 只做降权（排到池尾），不再剔除。
+    // 历史 bug：dead 列表会把可用域名永久排除，重启后池直接空掉。
+    const dead = new Set((Array.isArray(obj.dead) ? obj.dead : []).map((h) => normalizeOrigin(h)));
     const merged = [];
     const push = (h) => {
       if (typeof h !== 'string' || !/^https?:\/\//i.test(h)) return;
-      const host = h.replace(/\/+$/, '');
-      if (dead.has(host) || merged.includes(host)) return;
+      const host = normalizeOrigin(h);
+      if (!host || merged.includes(host)) return;
       merged.push(host);
     };
     if (typeof obj.active === 'string') push(obj.active);
     (Array.isArray(obj.hosts) ? obj.hosts : []).forEach(push);
+    // 非 dead 的排前面
+    merged.sort((a, b) => (dead.has(a) ? 1 : 0) - (dead.has(b) ? 1 : 0));
     if (merged.length) {
       const seen = new Set(HOST_POOL);
       HOST_POOL.push(...merged.filter((h) => !seen.has(h)));
@@ -367,17 +428,46 @@ function markHostAlive(host) {
   schedulePersistHosts();
 }
 
+/**
+ * 标记域名失败。
+ * 关键改动：**永不从池里删除**，只做「软隔离」——
+ *   把域名挪到池尾 + 打 dead 标记，下次轮换仍然会重试。
+ * 原因：池被删空后脚本会彻底失去入口（实测 haijiaowang.com DNS 黑洞 +
+ *       www.hjw01.com 一次 ECONNRESET 就把池清空，随后 category 全挂）。
+ * 另外：本机网络类错误（DNS 黑洞 / 连接被 RST）不计入连续失败次数，
+ *       避免「用户网络抖动」被误判成「站点挂了」。
+ */
 function markHostDead(host, reason) {
   if (!host) return;
+  const msg = String(reason || '');
   const h = hostHealth[host] || (hostHealth[host] = { fail: 0 });
+  h.lastReason = msg.slice(0, 120);
+
+  if (isEnvError(msg)) {
+    h.envFail = Number(h.envFail || 0) + 1;
+    h.lastEnvReason = msg.slice(0, 120);
+    logI(`[hosts] ${host} 本机网络不可达（${msg.slice(0, 60)}），保留在池中`);
+    return;
+  }
+
   h.fail = Number(h.fail || 0) + 1;
-  h.lastReason = String(reason || '').slice(0, 120);
   if (h.fail >= 2 && !h.dead) {
     h.dead = true;
     h.deadAt = Date.now();
+    // 软隔离：挪到池尾，不删除
     const idx = HOST_POOL.indexOf(host);
-    if (idx >= 0 && HOST_POOL.length > 1) HOST_POOL.splice(idx, 1);
-    logI(`[hosts] ${host} 连续失败 ${h.fail} 次，移出轮换池（${h.lastReason}）`);
+    if (idx >= 0 && HOST_POOL.length > 1) {
+      HOST_POOL.splice(idx, 1);
+      HOST_POOL.push(host);
+    }
+    if (HOST === host) {
+      const next = HOST_POOL.find((x) => !(hostHealth[x] && hostHealth[x].dead));
+      if (next && next !== HOST) {
+        logI(`[hosts] 当前域名不可用，切换到 ${next}`);
+        HOST = next;
+      }
+    }
+    logI(`[hosts] ${host} 连续失败 ${h.fail} 次，隔离到池尾（${h.lastReason}）`);
     schedulePersistHosts();
   }
 }
@@ -422,11 +512,16 @@ async function discoverHosts() {
     logI(`[hosts] 探测批次 ${batchNo}: ${batch.length} 个`);
     const results = await Promise.allSettled(batch.map((h) => probeHost(h)));
     for (let k = 0; k < batch.length; k++) {
-      if (results[k].status !== 'fulfilled' || !results[k].value) {
+      const resolved = results[k].status === 'fulfilled' ? results[k].value : '';
+      if (!resolved) {
         logI(`[hosts] 跳过非同构域名 ${batch[k]}`);
         continue;
       }
-      const host = batch[k];
+      const host = normalizeOrigin(resolved);
+      if (HOST_POOL.includes(host)) {
+        logI(`[hosts] ${batch[k]} 归一化后 ${host} 已在池中，跳过`);
+        continue;
+      }
       HOST_POOL.push(host);
       hostHealth[host] = { fail: 0, okAt: Date.now(), dead: false };
       added++;
