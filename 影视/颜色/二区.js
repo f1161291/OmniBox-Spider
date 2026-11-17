@@ -1,7 +1,7 @@
 // @name 二区
 // @version 1.0.0
 // @author omnibox-spider
-// @description 二区（618303.xyz）OmniBox 采集源：MacCMS 魔改路由，XOR128 标题混淆；列表 kd= 直连 m3u8，含 qrtuv.com 时切 61800XX.xyz 备用域名池；封面明文直出，无本地代理
+// @description 二区 OmniBox 采集源（原二区 618303.xyz + 原五区 618406.xyz 同源合并，域名轮换）：MacCMS 魔改路由，XOR128 标题混淆；列表 kd= 直连、id= cloudfront 截 /m3u8/ 换备用域、v= 直连、m= reqplay API；含 qrtuv.com 时切 61800XX.xyz 备用域名池；封面明文直出，无本地代理
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/二区.js
 
 /**
@@ -10,7 +10,9 @@
  * ============================================================================
  *
  * 【实站事实（2026-11-17 实测）】
- *   主站：https://618303.xyz（导航页仅壳，真实内容在 /index.php/vod/type/id/{tid}.html）
+ *   主站：https://618303.xyz（原二区）与 https://618406.xyz（原五区）内容字节级完全一致，
+ *         两者为同一站的轮换域名 → 合并进本源，按请求轮换，分散单域名失效风险。
+ *         导航页仅壳，真实内容在 /index.php/vod/type/id/{tid}.html
  *   分类：链接 /index.php/vod/type/id/{tid}.html，锚文本为 XOR128 混淆，逐字符 ^128 还原
  *   列表：<a class="vodbox" href="/html/{cat}/{混淆标题}.html?{参数}">
  *         封面 <img data-original="...">，标题 <p class="km-script">（同为 XOR128）
@@ -19,7 +21,7 @@
  *   播放参数（列表 href 的 query，实测多种并存）：
  *     v=  直连 m3u8（一区实测为 master playlist，含 RESOLUTION=1920x1080）
  *     kd= 直连 m3u8（二区/五区实测为 IP:Port 直链；含 qrtuv.com 时换备用域名池）
- *     id= cloudfront 完整 m3u8 URL（五区：截 /m3u8/ 之后拼 61800XX.xyz 备用域）
+ *     id= cloudfront 完整 m3u8 URL（截 /m3u8/ 之后拼 61800XX.xyz 备用域，随合并一并启用）
  *     m=  播放 API 编号 → https://h5.xxoo475.org/api/v2/vod/reqplay/{m}
  *         （实测 retcode=0，data.httpurl 为可播 m3u8；短时高频会 302/403，重试一次）
  *     b=  封面 URL（二区/五区列表未带，脚本按 Python 逻辑自动补写）
@@ -38,7 +40,7 @@
  *      统一 try/catch，异常返回空结构不崩溃。
  *
  * 【环境变量】
- *   SITE_HOST                 站点地址，默认 https://618303.xyz
+ *   SITE_HOST                 强制指定单域名（关闭轮换），缺省时在 618303/618406 间轮换
  *   Z2_UA             自定义 User-Agent
  *   Z2_REQUEST_TIMEOUT 普通请求超时毫秒，默认 25000
  *   Z2_COVER_TIMEOUT    manifest 探测超时毫秒，默认 12000
@@ -91,7 +93,22 @@ function normalizeHost(value, fallback) {
   catch (_) { return fallback; }
 }
 
-const HOST = normalizeHost(process.env.SITE_HOST || '', 'https://618303.xyz');
+// 原二区(618303) 与原五区(618406) 实测内容字节级一致，合并为同源域名池轮换。
+// SITE_HOST 显式指定时退化为单域名（关闭轮换）；否则每次 handler 调用轮换一个域名，
+// 单域名失效时下一次调用自动落到另一个，且让 vod_id 中的封面/播放链接随之更新。
+const SITE_HOST = normalizeHost(process.env.SITE_HOST || '', '');
+const HOST_POOL = SITE_HOST ? [SITE_HOST] : ['https://618303.xyz', 'https://618406.xyz'];
+let hostCursor = Math.floor(Math.random() * HOST_POOL.length);
+let HOST = HOST_POOL[hostCursor];
+
+/** 轮换到下一个域名，返回新 HOST */
+function rotateHost() {
+  if (HOST_POOL.length <= 1) { HOST = HOST_POOL[0]; return HOST; }
+  hostCursor = (hostCursor + 1) % HOST_POOL.length;
+  HOST = HOST_POOL[hostCursor];
+  return HOST;
+}
+
 const UA = process.env[`${ENV}_UA`]
   || 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
 const REQUEST_TIMEOUT = numEnv(`${ENV}_REQUEST_TIMEOUT`, 25000, 3000, 120000);
@@ -101,7 +118,7 @@ const PLAY_API = 'https://h5.xxoo475.org/api/v2/vod/reqplay/';
 const KD_DOMAINS = Array.from({ length: 29 }, (_, i) => `61800${String(i + 11).padStart(2, '0')}`);
 const CFG = {
   fixKd: true,
-  fixId: false,
+  fixId: true, // 合并原五区后启用：id= cloudfront 截 /m3u8/ 换备用域（kd=/v=/m= 分支不受影响）
   homeFallbackTids: [],
 };
 
@@ -395,7 +412,8 @@ async function resolveApiPlay(apiUrl) {
 async function home(params, context) {
   try {
     const from = (context && context.from) || 'web';
-    log('info', `[home] from=${from}`);
+    rotateHost();
+    log('info', `[home] from=${from} host=${HOST}`);
     let html = '';
     try { html = await fetchHtml(`${HOST}/index.php/vod/type/id/1.html`); }
     catch (_) {}
@@ -424,8 +442,9 @@ async function category(params, context) {
   if (!Number.isFinite(page) || page < 1) page = 1;
   const tid = String(p.categoryId || p.typeId || p.type_id || '1').trim();
   try {
+    rotateHost();
     const url = `${HOST}/index.php/vod/type/id/${encodeURIComponent(tid)}/page/${page}.html`;
-    log('info', `[category] tid=${tid} page=${page}`);
+    log('info', `[category] tid=${tid} page=${page} host=${HOST}`);
     let html = '';
     try { html = await fetchHtml(url); } catch (_) {}
     let list = parseList(html);
@@ -486,8 +505,9 @@ async function search(params, context) {
   if (!Number.isFinite(page) || page < 1) page = 1;
   if (!keyword) return { list: [], page, pagecount: 0, total: 0 };
   try {
+    rotateHost();
     const url = `${HOST}/index.php/vod/type/id/1/wd/${encodeURIComponent(keyword)}/page/${page}.html`;
-    log('info', `[search] keyword=${keyword} page=${page}`);
+    log('info', `[search] keyword=${keyword} page=${page} host=${HOST}`);
     let html = '';
     try { html = await fetchHtml(url); } catch (_) {}
     const list = parseList(html);
