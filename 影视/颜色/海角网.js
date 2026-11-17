@@ -1,7 +1,7 @@
 // @name 海角网
 // @author 宝宝巴士
 // @description hjw01.com（海角网）：首页/分类/标签/分页/详情/播放；列表 xqbj-list-rows 取标题/封面；详情页 DPlayer data-config 直取带签名 m3u8；封面图床 pic.gyezbp.cn 为 AES-128-CBC 密文，脚本内解密转 data:image
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角网.js
 // @dependencies crypto
 /**
@@ -45,6 +45,7 @@
  * 【环境变量】
  *   HJW_HOST         站点地址，默认 https://www.hjw01.com
  *   HJW_COVER_INLINE 封面内联解密，默认 1；设 0 关闭（回退原始 URL）
+ *   HJW_COVER_FILL   无封面卡片从详情页补图的数量，默认 8；设 0 关闭
  *   HJW_UA           自定义 User-Agent
  * ============================================================================
  */
@@ -273,6 +274,37 @@ async function resolveCovers(list) {
   return list;
 }
 
+/**
+ * 给「无封面」的卡片从详情页 og:image 补图。
+ * 站点首页的「换一换」推荐列表是纯文本锚链接（<a class="item">标题</a>），
+ * 本身不带图片，但对应详情页有 og:image。
+ * 只补前 N 条（HJW_COVER_FILL，默认 8，设 0 关闭），限并发 4，失败不影响列表。
+ */
+const COVER_FILL_COUNT = (() => {
+  const raw = String(process.env.HJW_COVER_FILL || '').trim();
+  const n = raw === '' ? 8 : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.min(20, Math.floor(n)) : 8;
+})();
+async function fillMissingCovers(list) {
+  if (!COVER_INLINE || !COVER_FILL_COUNT || !Array.isArray(list) || !list.length) return list;
+  const targets = list.filter((v) => v && !v.vod_pic && v.vod_id).slice(0, COVER_FILL_COUNT);
+  if (!targets.length) return list;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < targets.length) {
+      const item = targets[cursor++];
+      try {
+        const html = await fetchHtml(`${HOST}/archives/${item.vod_id}/`);
+        if (!html) continue;
+        let pic = parseCover(html);
+        if (pic) item.vod_pic = await resolveCover(pic);
+      } catch (_) {}
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => worker()));
+  return list;
+}
+
 /* ---------------- 分类 ---------------- */
 const CLASSES = [
   { type_id: 'home', type_name: '首页推荐' },
@@ -304,9 +336,17 @@ function parseList(html) {
     const openTag = m[0].slice(0, m[0].indexOf('>') + 1);
     const block = m[2];
 
+    // 标题优先级：a[title] → 块内 h3 → a 标签自身的纯文本
+    // （「换一换」推荐列表是 <a href="/archives/x/" class="item">标题文字</a>，
+    //   没有 title 属性也没有 h3，必须回退到锚文本，否则会漏掉一半卡片）
     const titleAttr = /\btitle="([^"]*)"/i.exec(openTag);
     const h3 = /<h3[^>]*>([\s\S]*?)<\/h3>/i.exec(block);
     let title = cleanText((titleAttr && titleAttr[1]) || (h3 && h3[1]) || '');
+    if (!title) {
+      // 块内若只有纯文本（无子标签），直接用锚文本
+      const plain = cleanText(block);
+      if (plain && !/^</.test(block.trim())) title = plain;
+    }
     if (!title) continue;
     // 过滤「回家的路」这类公告卡片
     if (/回家的路|认准官方|安全直达/.test(title)) continue;
@@ -477,8 +517,9 @@ async function home(params, context) {
     logI(`home from=${(context && context.from) || 'web'}`);
     const html = await fetchHtml(`${HOST}/`);
     let list = parseList(html);
+    list = await fillMissingCovers(list);
     list = await resolveCovers(list);
-    logI(`home 返回 ${list.length} 条`);
+    logI(`home 返回 ${list.length} 条（有封面 ${list.filter((v) => v.vod_pic).length}）`);
     return { class: CLASSES, filters: {}, list, parse: 0, jx: 0 };
   } catch (e) {
     logE(`home 失败: ${e.message}`);
@@ -499,6 +540,7 @@ async function category(params, context) {
       : '/';
     const html = await fetchHtml(`${HOST}${path}`);
     let list = parseList(html);
+    list = await fillMissingCovers(list);
     list = await resolveCovers(list);
     const pagecount = 1;
     logI(`category 返回 ${list.length} 条（分类页无分页，pagecount=1）`);
@@ -540,6 +582,7 @@ async function search(params, context) {
     if (page > 1) url = `${HOST}/search/${encodeURIComponent(wd)}/page/${page}/`;
     const html = await fetchHtml(url);
     let list = parseList(html);
+    list = await fillMissingCovers(list);
     list = await resolveCovers(list);
     // 搜索结果页若有 /page/N/ 链接才认多页，否则单页
     const pagecount = parsePageCount(html, 1);
