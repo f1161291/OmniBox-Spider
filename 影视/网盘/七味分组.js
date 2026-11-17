@@ -1,8 +1,8 @@
 // @name 七味分组
 // @author https://github.com/hjdhnx/drpy-node/blob/main/spider/js/%E4%B8%83%E5%91%B3%5B%E4%BC%98%5D.js
-// @description 刮削：支持，弹幕：支持，嗅探：支持，仅保留七味网盘线路的分组版本
+// @description 刮削：支持，弹幕：支持，嗅探：支持，仅保留七味网盘线路的分组版本；新增可选 FlareSolverr 绕过 CF/JS 挑战（配置 FLARESOLVERR_URL 才启用，页面级缓存）
 // @dependencies: axios, cheerio
-// @version 1.6.23
+// @version 1.6.24
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/七味分组.js
 
 const axios = require("axios");
@@ -143,6 +143,83 @@ const axiosInstance = axios.create({
     responseType: "text",
 });
 
+/* ==================== CF / JS 挑战绕过（可选，需配置 FlareSolverr） ====================
+ * 2026-11-17 实测：七味 7 个域名全部被 CF「Just a moment...」或 JS Cookie
+ * 挑战拦截（www.qnmp4.com 返回 JS challenge 跳转页），普通 HTTP 请求拿不到数据。
+ * 仅在配置了 FLARESOLVERR_URL（或 QIWEI_FLARESOLVERR_URL）时才启用；
+ * 未配置时零成本，保持原有请求流程不变。
+ *
+ * 方案：直接用 FlareSolverr 返回的完整页面（solution.response），并按 URL 做
+ * 页面级缓存；不再只缓存 cookie 后自建请求重试（那样多数仍会 403）。
+ * ============================================================================ */
+const QIWEI_FLARESOLVERR_URL = String(process.env.QIWEI_FLARESOLVERR_URL || process.env.FLARESOLVERR_URL || "").trim();
+const QIWEI_CF_PAGE_TTL = Math.max(60, Number(process.env.QIWEI_CF_PAGE_TTL || 3600) || 3600) * 1000;
+const QIWEI_CF_PAGE_PREFIX = String(process.env.QIWEI_CF_PAGE_KEY || "qiwei:cf:page:");
+const QIWEI_FLARESOLVERR_TIMEOUT = Math.max(10000, Number(process.env.QIWEI_FLARESOLVERR_TIMEOUT || 60000) || 60000);
+const qiweiCfMemory = new Map();
+
+function isQiweiBlocked(body) {
+  const low = String(body || "").toLowerCase();
+  if (!low) return false;
+  return low.includes("just a moment")
+    || low.includes("cf-browser-verification")
+    || low.includes("cf_chl_")
+    || low.includes("challenge-platform")
+    || low.includes("router.parklogic.com")
+    || low.includes("document.cookie")
+      && low.includes("window.location")
+    || low.includes("captcha")
+    || low.includes("访问验证");
+}
+
+async function qiweiGetCachedPage(url) {
+  const key = QIWEI_CF_PAGE_PREFIX + crypto.createHash("md5").update(url).digest("hex");
+  let hit = qiweiCfMemory.get(key);
+  if (hit && Date.now() - hit.at < QIWEI_CF_PAGE_TTL) return hit.body;
+  try {
+    const saved = await OmniBox.getCache(key);
+    if (typeof saved === "string") {
+      const obj = JSON.parse(saved);
+      if (obj && obj.body && Date.now() - (obj.at || 0) < QIWEI_CF_PAGE_TTL) {
+        qiweiCfMemory.set(key, { at: obj.at, body: obj.body });
+        return obj.body;
+      }
+    }
+  } catch (_) {}
+  return "";
+}
+async function qiweiSetCachedPage(url, body) {
+  const key = QIWEI_CF_PAGE_PREFIX + crypto.createHash("md5").update(url).digest("hex");
+  const at = Date.now();
+  qiweiCfMemory.set(key, { at, body });
+  try { await OmniBox.setCache(key, JSON.stringify({ at, body }), Math.ceil(QIWEI_CF_PAGE_TTL / 1000)); } catch (_) {}
+}
+
+async function qiweiFetchViaFlareSolverr(url) {
+  if (!QIWEI_FLARESOLVERR_URL) throw new Error("未配置 FLARESOLVERR_URL");
+  const payload = { cmd: "request.get", url, maxTimeout: QIWEI_FLARESOLVERR_TIMEOUT };
+  if (String(process.env.QIWEI_FLARESOLVERR_SESSION || "").trim()) {
+    payload.session = String(process.env.QIWEI_FLARESOLVERR_SESSION).trim();
+  }
+  const res = await axios.post(QIWEI_FLARESOLVERR_URL, payload, {
+    timeout: QIWEI_FLARESOLVERR_TIMEOUT + 5000,
+    headers: { "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" },
+    validateStatus: () => true,
+  });
+  if (res.status !== 200 || !res.data || res.data.status !== "ok") {
+    throw new Error(`FlareSolverr HTTP ${res.status}`);
+  }
+  const solution = res.data.solution || {};
+  const body = String(solution.response || "");
+  logInfo("[cf] FlareSolverr 返回页面", {
+    cookies: (solution.cookies || []).length,
+    bodyLen: body.length,
+    message: String(res.data.message || "").slice(0, 80),
+  });
+  if (!body) throw new Error("FlareSolverr 未返回页面内容");
+  return body;
+}
+
 const panRouteCache = new Map();
 
 function logInfo(message, data = null) {
@@ -257,14 +334,30 @@ async function requestWithHost(host, path, options = {}) {
             ...(options.headers || {}),
         },
     });
-    if (response.status >= 400) {
+    let html = typeof response.data === "string" ? response.data : JSON.stringify(response.data || {});
+
+    // CF / JS 挑战：优先命中页面缓存，否则交给 FlareSolverr（仅在配置了才生效）
+    if (isQiweiBlocked(html) && QIWEI_FLARESOLVERR_URL) {
+        logInfo("[cf] 检测到拦截页，尝试绕过", { host, url: url.slice(0, 100) });
+        const cached = await qiweiGetCachedPage(url);
+        if (cached) {
+            logInfo("[cf] 命中页面缓存", { url: url.slice(0, 100), len: cached.length });
+            html = cached;
+        } else {
+            try {
+                const solved = await qiweiFetchViaFlareSolverr(url);
+                await qiweiSetCachedPage(url, solved);
+                html = solved;
+            } catch (e) {
+                logWarn("[cf] 绕过失败", { error: e.message || String(e) });
+            }
+        }
+    }
+
+    if (response.status >= 400 && !html) {
         throw new Error(`HTTP ${response.status}`);
     }
-    return {
-        html: typeof response.data === "string" ? response.data : JSON.stringify(response.data || {}),
-        host,
-        url,
-    };
+    return { html, host, url };
 }
 
 async function requestHtmlWithFailover(path, options = {}) {

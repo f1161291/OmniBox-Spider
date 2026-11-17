@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 # @name 盘尊社区
+# 1.0.7 修复拉取不到数据：站点把 Flarum API 从 /api 改成伪装路径 /2k（从首页 apiUrl 动态发现），
+#       且需先访问首页拿 JS 挑战 cookie + csrfToken；旧版直接打 /api/discussions 恒 403/404。
 # @author 梦
 # @description 网盘源：https://www.panzun.cc/ ，Python版，接入首页、分类、搜索、详情与播放，支持 a.7u9.cn 短链解析到真实网盘分享
-# @version 1.0.6
+# @version 1.0.7
 # @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/盘尊社区.py
 # @dependencies requests,curl_cffi
 
@@ -34,7 +36,13 @@ def split_config_list(value: str):
 # 站点基础地址。
 BASE_URL = str(os.environ.get("PANZUN_HOST") or "https://www.panzun.cc").rstrip("/")
 # 站点 API 地址。
-API_URL = f"{BASE_URL}/api"
+# 2026-11-17 实测：站点把 Flarum API 藏到了伪装路径（首页配置里 apiUrl = BASE_URL + "/2k"），
+# 旧的 BASE_URL + "/api" 已全部 404/403。改为启动时从首页动态提取 apiUrl，
+# 提取失败再回退到 /api。同时需带首页下发的 csrfToken 与 cookie。
+API_URL = str(os.environ.get("PANZUN_API_URL") or "").strip().rstrip("/") or f"{BASE_URL}/api"
+_SESSION_READY = False
+_SESSION_COOKIE = ""
+_SESSION_CSRF = ""
 # 默认请求头 UA。
 UA = str(os.environ.get("PANZUN_UA") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
 # SDK 缓存默认 TTL（秒）。
@@ -105,18 +113,131 @@ def abs_url(url: str) -> str:
     return f"{BASE_URL}/{raw.lstrip('./')}"
 
 
-async def request_json(url: str):
-    await log("info", f"[盘尊][json] GET {url}")
-    res = await OmniBox.request(url, {
-        "method": "GET",
-        "headers": {
-            "User-Agent": UA,
-            "Accept": "application/json",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Referer": f"{BASE_URL}/",
-        },
+async def _raw_request(url: str, extra_headers=None, method: str = "GET"):
+    headers = {
+        "User-Agent": UA,
+        "Accept": "application/json, text/html, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": f"{BASE_URL}/",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    return await OmniBox.request(url, {
+        "method": method,
+        "headers": headers,
         "timeout": 20000,
     })
+
+
+def _header_value(headers, name):
+    if not headers:
+        return ""
+    if hasattr(headers, "get"):
+        try:
+            return str(headers.get(name) or "")
+        except Exception:
+            pass
+    if isinstance(headers, dict):
+        for k, v in headers.items():
+            if str(k).lower() == name.lower():
+                return str(v or "")
+    return ""
+
+
+async def ensure_session():
+    """
+    首次访问首页：拿 set-cookie（JS 挑战）与 csrfToken，并发现真实 apiUrl。
+    站点对无 cookie 的 API 请求返回 403；对旧 /api 路径返回 404。
+    """
+    global _SESSION_READY, _SESSION_COOKIE, _SESSION_CSRF, API_URL
+    if _SESSION_READY:
+        return
+    _SESSION_READY = True  # 防止并发重复预热
+    try:
+        res = await _raw_request(f"{BASE_URL}/")
+        body = res.get("body", "") if isinstance(res, dict) else ""
+        if isinstance(body, (bytes, bytearray)):
+            body = body.decode("utf-8", "ignore")
+        body = str(body or "")
+        headers = res.get("headers") if isinstance(res, dict) else None
+
+        # 收集 set-cookie（可能是字符串、列表，或 dict 里的 list）
+        cookies = []
+        for key in ("set-cookie", "Set-Cookie"):
+            v = _header_value(headers, key)
+            if v:
+                cookies.append(v)
+        if isinstance(headers, dict):
+            for k, v in headers.items():
+                if str(k).lower() == "set-cookie":
+                    if isinstance(v, (list, tuple)):
+                        cookies.extend([str(x) for x in v])
+                    else:
+                        cookies.append(str(v))
+        jar = []
+        skip_attrs = {"expires", "path", "domain", "max-age", "secure", "httponly", "samesite", "priority"}
+        for c in cookies:
+            # 每个 Set-Cookie 只取第一段 name=value；后面的是 expires/path 等属性，不是 cookie
+            first = str(c).split(";", 1)[0].strip()
+            if "=" not in first:
+                continue
+            name, value = first.split("=", 1)
+            name = name.strip()
+            if not name or name.lower() in skip_attrs:
+                continue
+            if not any(existing == name for existing, _ in jar):
+                jar.append((name, value.strip()))
+        _SESSION_COOKIE = "; ".join(f"{k}={v}" for k, v in jar)
+        if not _SESSION_COOKIE:
+            cookie_obj = res.get("cookies") if isinstance(res, dict) else None
+            if cookie_obj:
+                try:
+                    items = cookie_obj.get_dict() if hasattr(cookie_obj, "get_dict") else cookie_obj
+                    _SESSION_COOKIE = "; ".join(f"{k}={v}" for k, v in dict(items).items())
+                except Exception:
+                    pass
+
+        # 若首屏是 JS 挑战页（没有 csrfToken），带拿到的 cookie 再请求一次
+        if _SESSION_COOKIE and 'csrfToken' not in body:
+            try:
+                retry = await _raw_request(f"{BASE_URL}/", {"Cookie": _SESSION_COOKIE})
+                rbody = retry.get("body", "") if isinstance(retry, dict) else ""
+                if isinstance(rbody, (bytes, bytearray)):
+                    rbody = rbody.decode("utf-8", "ignore")
+                if rbody:
+                    body = str(rbody)
+                    await log("info", f"[盘尊][session] 带 cookie 重试首页 len={len(body)}")
+            except Exception:
+                pass
+
+        # csrfToken（首页内嵌 JSON）
+        m = re.search(r'"csrfToken"\s*:\s*"([^"]+)"', body)
+        if m:
+            _SESSION_CSRF = m.group(1)
+        # 动态 apiUrl
+        m2 = re.search(r'"apiUrl"\s*:\s*"([^"]+)"', body)
+        if m2:
+            found = m2.group(1).replace("\\/", "/").rstrip("/")
+            if found.startswith("http"):
+                API_URL = found
+            elif found.startswith("/"):
+                API_URL = f"{BASE_URL}{found}"
+        if not os.environ.get("PANZUN_API_URL"):
+            await log("info", f"[盘尊][session] apiUrl={API_URL} csrf={'有' if _SESSION_CSRF else '无'} cookie={'有' if _SESSION_COOKIE else '无'}")
+    except Exception as e:
+        await log("warn", f"[盘尊][session] 预热失败: {e}")
+
+
+async def request_json(url: str):
+    await ensure_session()
+    await log("info", f"[盘尊][json] GET {url}")
+    extra = {}
+    if _SESSION_COOKIE:
+        extra["Cookie"] = _SESSION_COOKIE
+    if _SESSION_CSRF:
+        extra["X-CSRF-Token"] = _SESSION_CSRF
+    extra["X-Requested-With"] = "XMLHttpRequest"
+    res = await _raw_request(url, extra)
     status = int(res.get("statusCode") or 0)
     body = res.get("body", "")
     text = body.decode("utf-8", "ignore") if isinstance(body, (bytes, bytearray)) else str(body or "")
