@@ -1,7 +1,7 @@
 // @name 街射
 // @author 宝宝巴士
 // @description 街射(jieshee.cc，入口 account.jieshee.cc)：首页/分类/搜索/详情/播放；播放直接从详情 window.__ARCHIVE_PLAYER__(cdnLine+rawPath) 取 m3u8；封面图床 content-type 异常，脚本内联 data:image；多 CDN 线路兜底
-// @version 1.0.2
+// @version 1.1.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/街射.js
 // @dependencies axios,cheerio
 /**
@@ -82,18 +82,48 @@ const http = axios.create({
   headers: { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
 });
 
+/* ---- 全局限速：站点对并发很敏感，>4 并发就开始 429 ---- */
+let RATE_CHAIN = Promise.resolve();
+function rateLimit(ms = 220) {
+  RATE_CHAIN = RATE_CHAIN.then(() => new Promise((r) => setTimeout(r, ms))).catch(() => {});
+  return RATE_CHAIN;
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function fetchText(url, options = {}) {
+  const maxRetry = Number(options.retry ?? 3);
   let lastErr = null;
   for (const host of HOSTS) {
     const full = /^https?:\/\//i.test(url) ? url : `${host}${url}`;
-    try {
-      const res = await http.get(full, {
-        headers: { Referer: `${host}/`, ...(options.headers || {}) },
-        responseType: 'text',
-      });
-      if (res.status >= 400) throw new Error(`HTTP ${res.status}`);
-      return typeof res.data === 'string' ? res.data : JSON.stringify(res.data || '');
-    } catch (e) { lastErr = e; }
+    for (let attempt = 0; attempt <= maxRetry; attempt++) {
+      try {
+        await rateLimit(options.rateGap ?? 220);
+        const res = await http.get(full, {
+          headers: { Referer: `${host}/`, ...(options.headers || {}) },
+          responseType: 'text',
+        });
+        // 429 限流：指数退避重试
+        if (res.status === 429) {
+          lastErr = new Error('HTTP 429');
+          if (attempt >= maxRetry) break;
+          const wait = 800 * Math.pow(2, attempt);
+          log('info', `429 限流，等待 ${wait}ms 重试(${attempt + 1}/${maxRetry}) ${full.slice(0, 70)}`);
+          await sleep(wait);
+          continue;
+        }
+        if (res.status >= 500 && attempt < maxRetry) {
+          await sleep(500 * (attempt + 1));
+          lastErr = new Error(`HTTP ${res.status}`);
+          continue;
+        }
+        if (res.status >= 400) throw new Error(`HTTP ${res.status}`);
+        return typeof res.data === 'string' ? res.data : JSON.stringify(res.data || '');
+      } catch (e) {
+        lastErr = e;
+        if (attempt < maxRetry && !/HTTP 4\d\d/.test(String(e.message))) { await sleep(400 * (attempt + 1)); continue; }
+        break;
+      }
+    }
   }
   throw lastErr || new Error('请求失败');
 }
@@ -119,7 +149,29 @@ function parseCards(html, base) {
   return dedupeBy(list, (x) => x.vod_id);
 }
 
-function parseCategories(html) {
+/**
+ * 二级分类：站点有 90+ 个扁平分类（动漫*、*传媒、乱伦*…），
+ * 直接铺在 class 里会让分类栏又长又乱。
+ * 这里归并成 10 个大类，子分类通过 filters 暴露：
+ *   class   = 大类（type_id = group:xxx）
+ *   filters = { "group:xxx": [{ key:"sub", name:"子分类", value:[{name,value:cateN}] }] }
+ *   category() 读到 filters.sub 就请求对应 cateN。
+ */
+const CATEGORY_GROUPS = [
+  { id: 'group:anime',     name: '动漫',     pattern: /动漫|里番|MMD|motion\s*anime|番剧|同人\s*COS|3D动漫|H动漫|原神|游戏国漫/i },
+  { id: 'group:media',     name: '传媒',     pattern: /传媒|傳媒|SWAG|91制片厂/i },
+  { id: 'group:tanhua',    name: '探花',     pattern: /探花|约啪|酒店开房/i },
+  { id: 'group:paparazzi', name: '偷拍街拍', pattern: /街射|厕拍|监控破解|户外搭讪/i },
+  { id: 'group:incest',    name: '乱伦',     pattern: /乱伦|母子|父女|兄妹|岳母|小姨子|嫂子|侄女|舅侄|兄弟姐妹|禁忌|变态家族/i },
+  { id: 'group:costume',   name: '制服角色', pattern: /制服|JK|OL|空姐|护士|警服|校园|丝袜|角色扮演|萝莉少女|新娘/i },
+  { id: 'group:hardcore',  name: '重口猎奇', pattern: /重口|猎奇|捆绑|屎尿|虐肛|拳交|性虐|人兽|孕妇|双龙/i },
+  { id: 'group:western',   name: '欧美',     pattern: /欧美|黑人/i },
+  { id: 'group:japan',     name: '日本AV',   pattern: /日本AV|素人FC2/i },
+  { id: 'group:amateur',   name: '素人自拍', pattern: /.*/ },   // 兜底
+];
+
+/** 抓站点真实分类（cateN -> 名称） */
+function parseRawCategories(html) {
   const $ = cheerio.load(String(html || ''), { decodeEntities: false });
   const seen = new Set(); const out = [];
   $('a[href*="/category/cate"]').each((_, el) => {
@@ -129,11 +181,52 @@ function parseCategories(html) {
     if (!m) return;
     const slug = m[1];
     const name = stripHtml($a.text() || $a.attr('aria-label') || '');
-    if (!name || seen.has(slug)) return;
+    // 过滤导航噪音：全部/更多/展开 等不是真实分类
+    if (!name || /^(全部|更多|展开|收起|查看更多|首页)$/.test(name) || seen.has(slug)) return;
     seen.add(slug);
     out.push({ type_id: slug, type_name: name });
   });
-  return out.slice(0, 100);
+  return out;
+}
+
+/** 把真实分类归并进大类，产出 class + filters */
+function buildGroupedCategories(rawList) {
+  const buckets = new Map(CATEGORY_GROUPS.map((g) => [g.id, []]));
+  for (const item of rawList || []) {
+    const g = CATEGORY_GROUPS.find((x) => x.pattern.test(item.type_name)) || CATEGORY_GROUPS[CATEGORY_GROUPS.length - 1];
+    buckets.get(g.id).push(item);
+  }
+  const classList = [];
+  const filters = {};
+  for (const g of CATEGORY_GROUPS) {
+    const items = buckets.get(g.id) || [];
+    if (!items.length) continue;
+    classList.push({ type_id: g.id, type_name: g.name });
+    filters[g.id] = [{
+      key: 'sub',
+      name: '子分类',
+      init: '',
+      value: [{ name: '全部', value: '' }, ...items.map((x) => ({ name: x.type_name, value: x.type_id }))],
+    }];
+  }
+  return { classList, filters };
+}
+
+/** 兼容旧调用名 */
+function parseCategories(html) {
+  return buildGroupedCategories(parseRawCategories(html)).classList;
+}
+
+/** 站点原始分类缓存（合并大类时避免反复抓首页） */
+let RAW_CATS_CACHE = null;
+let RAW_CATS_AT = 0;
+async function getRawCategoriesCached() {
+  if (RAW_CATS_CACHE && Date.now() - RAW_CATS_AT < 10 * 60 * 1000) return RAW_CATS_CACHE;
+  try {
+    const cats = parseRawCategories(await fetchText('/'));
+    if (cats.length) { RAW_CATS_CACHE = cats; RAW_CATS_AT = Date.now(); }
+    return cats;
+  } catch (_) { return RAW_CATS_CACHE || []; }
 }
 
 /* ---------------- 封面内联 ---------------- */
@@ -165,39 +258,115 @@ async function fillCovers(list) {
 async function home() {
   try {
     const html = await fetchText('/');
-    const classList = parseCategories(html);
+    const rawCats = parseRawCategories(html);
+    const { classList, filters } = buildGroupedCategories(rawCats);
     let list = parseCards(html, HOSTS[0]).slice(0, 60);
     list = await fillCovers(list);
-    log('info', `home class=${classList.length} list=${list.length}`);
-    return { class: classList, list };
+    log('info', `home 大类=${classList.length} 原始分类=${rawCats.length} list=${list.length}`);
+    return { class: classList, filters, list };
   } catch (e) {
     log('error', `home ${e.message}`);
-    return { class: [], list: [] };
+    return { class: [], filters: {}, list: [] };
   }
 }
 
+/** 从 params 各兼容字段里取出子分类 slug */
+function pickSubCategory(params) {
+  const p = params || {};
+  const cands = [p.filters, p.extend, p.ext, p.filter];
+  for (const c of cands) {
+    if (!c) continue;
+    let v = null;
+    if (typeof c === 'string') { try { v = JSON.parse(c); } catch (_) { v = null; } }
+    else if (typeof c === 'object') v = c;
+    if (!v) continue;
+    const sub = v.sub ?? v['子分类'] ?? v.subclass ?? v.class ?? v.cate;
+    const s = String(Array.isArray(sub) ? (sub[0] || '') : (sub || '')).trim();
+    if (/^cate\d+$/i.test(s)) return s;
+  }
+  return '';
+}
+
+/** 大类合并结果缓存：同一大类 10 分钟内直接复用，避免重复扫 15 个子分类 */
+const GROUP_MERGE_CACHE = new Map();
+const GROUP_MERGE_TTL = 10 * 60 * 1000;
+
 async function category(params) {
   const p = params || {};
-  const slug = String(p.categoryId || p.type_id || p.tid || '').trim();
+  const cid = String(p.categoryId || p.type_id || p.tid || '').trim();
   const page = Math.max(1, Number(p.page || 1) || 1);
-  if (!slug) return { page, pagecount: 0, total: 0, limit: 0, list: [] };
+  if (!cid) return { page, pagecount: 0, total: 0, limit: 0, list: [] };
+
+  // 大类 + 选了子分类 → 直接打子分类；没选则合并该大类下所有子分类
+  const isGroup = /^group:/i.test(cid);
+  const sub = pickSubCategory(p);
+
   try {
-    // 该站分类多为单页无限列表；page>1 尝试 /category/{slug}/{page}/
-    const path = page > 1 ? `/category/${slug}/${page}/` : `/category/${slug}/`;
-    const html = await fetchText(path);
-    let list = parseCards(html, HOSTS[0]);
+    let list = [];
     let pagecount = 1;
-    if (list.length) {
-      try {
-        const np = `/category/${slug}/${page + 1}/`;
-        if (parseCards(await fetchText(np), HOSTS[0]).length) pagecount = page + 1;
-      } catch (_) {}
+
+    if (sub) {
+      const path = page > 1 ? `/category/${sub}/${page}/` : `/category/${sub}/`;
+      let html = '';
+      try { html = await fetchText(path); }
+      catch (e) {
+        log('info', `子分类 ${sub} 失败(${e.message})，回退大类合并`);
+        html = '';
+      }
+      list = html ? parseCards(html, HOSTS[0]) : [];
+      if (list.length) {
+        try {
+          const np = `/category/${sub}/${page + 1}/`;
+          if (parseCards(await fetchText(np), HOSTS[0]).length) pagecount = page + 1;
+        } catch (_) {}
+      }
+      log('info', `category ${cid} sub=${sub} page=${page} list=${list.length}`);
+    } else if (isGroup) {
+      // 合并大类下所有子分类（并发抓第一页）
+      const cachedMerge = GROUP_MERGE_CACHE.get(cid);
+      if (cachedMerge && Date.now() - cachedMerge.at < GROUP_MERGE_TTL) {
+        log('info', `category ${cid} 命中合并缓存 list=${cachedMerge.list.length}`);
+        return { page, pagecount: 1, total: cachedMerge.list.length, limit: cachedMerge.list.length, list: cachedMerge.list };
+      }
+      const grp = CATEGORY_GROUPS.find((g) => g.id === cid);
+      const allCats = await getRawCategoriesCached();
+      const members = (allCats || []).filter((x) => (grp ? grp.pattern.test(x.type_name) : false));
+      const targets = (members.length ? members : allCats).map((x) => x.type_id);
+      const seen = new Set();
+      let ok = 0;
+      // 顺序抓取 + 全局限速，避免 429；命中缓存则很快
+      for (const c of targets) {
+        try {
+          const html = await fetchText(`/category/${c}/`);
+          ok++;
+          for (const it of parseCards(html, HOSTS[0])) {
+            if (seen.has(it.vod_id)) continue;
+            seen.add(it.vod_id);
+            list.push(it);
+          }
+        } catch (e) {
+          log('info', `子分类 ${c} 跳过: ${e.message}`);
+        }
+      }
+      log('info', `category ${cid} 合并 ${ok}/${targets.length} 个子分类 list=${list.length}`);
+      if (list.length) GROUP_MERGE_CACHE.set(cid, { at: Date.now(), list: list.slice() });
+    } else {
+      const path = page > 1 ? `/category/${cid}/${page}/` : `/category/${cid}/`;
+      const html = await fetchText(path);
+      list = parseCards(html, HOSTS[0]);
+      if (list.length) {
+        try {
+          const np = `/category/${cid}/${page + 1}/`;
+          if (parseCards(await fetchText(np), HOSTS[0]).length) pagecount = page + 1;
+        } catch (_) {}
+      }
+      log('info', `category ${cid} page=${page} list=${list.length}`);
     }
+
     list = await fillCovers(list);
-    log('info', `category ${slug} page=${page} list=${list.length} pagecount=${pagecount}`);
     return { page, pagecount, total: pagecount * list.length, limit: list.length, list };
   } catch (e) {
-    log('error', `category ${slug} ${e.message}`);
+    log('error', `category ${cid} ${e.message}`);
     return { page, pagecount: 0, total: 0, limit: 0, list: [] };
   }
 }
