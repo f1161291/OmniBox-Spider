@@ -2,7 +2,7 @@
 // @author 
 // @description
 // @dependencies: axios, crypto-js
-// @version 1.0.5
+// @version 1.1.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/短剧聚合.js
 
 /**
@@ -54,7 +54,10 @@ const aggConfig = {
             search: '/API/bddjss.php?name=**&page=fypage'
         },
         甜圈: {
-            host: 'https://mov.cenguigui.cn',
+            // 旧域名 mov.cenguigui.cn 已无法解析；新 API 与「嘟嘟短剧」同源
+            host: 'https://api-v2.cenguigui.cn',
+            hosts: ['https://api-v2.cenguigui.cn', 'https://mov.cenguigui.cn'],
+            newApi: '/api/duanju/baidu/',   // ?name=关键词&page=N
             url1: '/duanju/api.php?classname',
             url2: '/duanju/api.php?book_id',
             search: '/duanju/api.php?name'
@@ -84,7 +87,9 @@ const aggConfig = {
             search: '/xifan/search/getSearchList'
         },
         软鸭: {
-            host: 'https://api.xingzhige.com',
+            // 旧域名 api.xingzhige.com 已 403；新域名 soibyy.xingzhige.com
+            host: 'https://soibyy.xingzhige.com',
+            hosts: ['https://soibyy.xingzhige.com', 'https://api.xingzhige.com'],
             url1: '/API/playlet',
             search: '/API/playlet'
         },
@@ -115,9 +120,10 @@ const aggConfig = {
     },
     platformList: [
          { name: '七猫短剧', id: '七猫' },
-         { name: '软鸭短剧', id: '软鸭' },
-         { name: '西饭短剧', id: '西饭' },
-         { name: '甜圈短剧', id: '甜圈' }
+         { name: '西饭短剧', id: '西饭' }
+         // 软鸭(api.xingzhige.com 403)、甜圈(mov.cenguigui.cn DNS 失效) 域名已挂，
+         // 配置与新域名已保留在 platform 中，待其恢复后可加回 platformList：
+         // { name: '软鸭短剧', id: '软鸭' }, { name: '甜圈短剧', id: '甜圈' }
     ],
     search: { limit: 30, timeout: 6000 }
 };
@@ -425,6 +431,27 @@ const request = async function(url, options) {
  */
 const md5 = function(str) {
     return CryptoJS.MD5(str).toString();
+};
+
+/**
+ * 多域名请求兜底：依次尝试 hosts，任一成功即返回。
+ * 用于软鸭/甜圈这类域名频繁失效的平台。
+ */
+const requestWithHosts = async function(hosts, pathFn, options) {
+    options = options || {};
+    const list = Array.isArray(hosts) && hosts.length ? hosts : [(hosts || '')];
+    let lastErr = null;
+    for (const host of list) {
+        try {
+            const url = host.replace(/\/+$/, '') + pathFn(host);
+            const html = await request(url, options);
+            if (html && String(html).indexOf('"code":400') === -1 && String(html).indexOf('搜索失败') === -1) {
+                return html;
+            }
+            lastErr = new Error('无效响应: ' + String(html).slice(0, 80));
+        } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error('所有域名均失败');
 };
 
 /**
@@ -862,7 +889,7 @@ async function category(params) {
                     }
                 }
                 
-                const url = plat.host + plat.url1 + '?reqType=aggregationPage&offset=' + offset + '&categoryId=' + typeId + '&quickEngineVersion=-1&scene=&categoryNames=' + encodeURIComponent(typeName) + '&categoryVersion=1&density=1.5&pageID=page_theater&version=2001001&androidVersionCode=28&requestId=' + ts + 'aa498144140ef297&appId=drama&teenMode=false&userBaseMode=false&session=eyJpbmZvIjp7InVpZCI6IiIsInJ0IjoiMTc0MDY1ODI5NCIsInVuIjoiT1BHXzFlZGQ5OTZhNjQ3ZTQ1MjU4Nzc1MTE2YzFkNzViN2QwIiwiZnQiOiIxNzQwNjU4Mjk0In19&feedssession=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1dHlwIjowLCJidWlkIjoxNjMzOTY4MTI2MTQ4NjQxNTM2LCJhdWQiOiJkcmFtYSIsInZlciI6MiwicmF0IjoxNzQwNjU4Mjk0LCJ1bm0iOiJPUEdfMWVkZDk5NmE2NDdlNDUyNTg3NzUxMTZjMWQ3NWI3ZDAiLCJpZCI6IjNiMzViZmYzYWE0OTgxNDQxNDBlZjI5N2JkMDY5NGNhIiwiZXhwIjoxNzQxMjYzMDk0LCJkYyI6Imd6cXkifQ.JS3QY6ER0P2cQSxAE_OGKSMIWNAMsYUZ3mJTnEpf-Rc';
+                const url = plat.host + plat.url1 + '?reqType=aggregationPage&offset=' + offset + '&categoryId=' + typeId + '&quickEngineVersion=-1&scene=&categoryNames=' + encodeURIComponent(typeName) + '&categoryVersion=1&density=1.5&pageID=page_theater&version=2001001&androidVersionCode=28&requestId=' + ts + 'aa498144140ef297&appId=drama&teenMode=false&userBaseMode=false';
                 
                 const html = await request(url, { headers: xifanHeaders, timeout: 8000 });
                 
@@ -912,8 +939,9 @@ async function category(params) {
             }
             case '软鸭': {
                 presumedPageSize = 10;
-                const url = plat.host + plat.url1 + '/?keyword=' + encodeURIComponent(area) + '&page=' + MY_PAGE;
-                const html = await request(url, { headers: cfg.headers.default, timeout: 8000 });
+                const html = await requestWithHosts(plat.hosts || [plat.host],
+                    (h) => plat.url1 + '/?keyword=' + encodeURIComponent(area) + '&page=' + MY_PAGE,
+                    { headers: cfg.headers.default, timeout: 8000 });
                 
                 if (!html || html.indexOf('<html') !== -1) {
                     logError('软鸭返回异常', new Error('Invalid response'));
@@ -1208,7 +1236,8 @@ async function search(params) {
                 case '西饭': {
                     const ts = Math.floor(Date.now() / 1000);
                     const xifanHeaders = { 'User-Agent': 'okhttp/3.12.11' };
-                    const url = plat.host + plat.search + '?keyword=' + encodeURIComponent(keyword + '84') + '&pageIndex=' + pg + '&version=2001001&androidVersionCode=28&requestId=' + ts + 'ea3a14bc0317d76f&appId=drama&teenMode=false&userBaseMode=false&session=eyJpbmZvIjp7InVpZCI6IiIsInJ0IjoiMTc0MDY2ODk4NiIsInVuIjoiT1BHX2U5ODQ4NTgzZmM4ZjQzZTJhZjc5ZTcxNjRmZTE5Y2JjIiwiZnQiOiIxNzQwNjY4OTg2In19&feedssession=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1dHlwIjowLCJidWlkIjoxNjM0MDU3ODE4OTgxNDk5OTA0LCJhdWQiOiJkcmFtYSIsInZlciI6MiwicmF0IjoxNzQwNjY4OTg2LCJ1bm0iOiJPUEdfZTk4NDg1ODNmYzhmNDNlMmFmNzllNzE2NGZlMTljYmMiLCJpZCI6ImVhZGE1NmEyZWEzYTE0YmMwMzE3ZDc2ZmVjODJjNzc3IiwiZXhwIjoxNzQxMjczNzg2LCJkYyI6ImJqaHQifQ.IwuI0gK077RF4G10JRxgxx4GCG502vR8Z0W9EV4kd-c';
+                    // 修复：原 keyword+'84' 是错的；过期的 session/feedssession 也不再需要
+                    const url = plat.host + plat.search + '?keyword=' + encodeURIComponent(keyword) + '&pageIndex=' + pg + '&version=2001001&androidVersionCode=28&requestId=' + ts + 'ea3a14bc0317d76f&appId=drama&teenMode=false&userBaseMode=false';
                     
                     const html = await request(url, { headers: xifanHeaders, timeout: searchTimeout });
                     
@@ -1240,8 +1269,10 @@ async function search(params) {
                     break;
                 }
                 case '软鸭': {
-                    const url = plat.host + plat.search + '/?keyword=' + encodeURIComponent(keyword) + '&page=' + pg;
-                    const res = JSON.parse(await request(url, { headers: cfg.headers.default, timeout: searchTimeout }));
+                    const html = await requestWithHosts(plat.hosts || [plat.host],
+                        (h) => plat.search + '/?keyword=' + encodeURIComponent(keyword) + '&page=' + pg,
+                        { headers: cfg.headers.default, timeout: searchTimeout });
+                    const res = JSON.parse(html);
                     if (res && res.data) {
                         results = res.data.map(function(item) {
                             const purl = item.title + '@' + item.cover + '@' + item.author + '@' + item.type + '@' + item.desc + '@' + item.book_id;
@@ -1256,21 +1287,49 @@ async function search(params) {
                     break;
                 }
                 case '七猫': {
-                    let signStr = 'operation=2playlet_privacy=1search_word=' + keyword + cfg.keys;
-                    const sign = md5(signStr);
-                    const url = plat.host + plat.search + '?search_word=' + encodeURIComponent(keyword) + '&playlet_privacy=1&operation=2&sign=' + sign;
-                    const headers = Object.assign({}, await getHeaderX(), cfg.headers.default);
-                    const res = JSON.parse(await request(url, { method: 'GET', headers: headers, timeout: searchTimeout }));
-                    if (res && res.data && res.data.list) {
-                        results = res.data.list.map(function(item) {
-                            return {
-                                vod_id: '七猫@' + encodeURIComponent(item.playlet_id),
-                                vod_name: item.title || '未知标题',
-                                vod_pic: item.image_link || '',
-                                vod_remarks: '七猫短剧 | ' + (item.total_episode_num || 0) + '集'
-                            };
-                        });
+                    // 官方搜索接口 operation=2 已返回空(list:null)；先试一次，空则走分类接口兜底
+                    let qmList = [];
+                    try {
+                        let signStr = 'operation=2playlet_privacy=1search_word=' + keyword + cfg.keys;
+                        const sign = md5(signStr);
+                        const url = plat.host + plat.search + '?search_word=' + encodeURIComponent(keyword) + '&playlet_privacy=1&operation=2&sign=' + sign;
+                        const headers = Object.assign({}, await getHeaderX(), cfg.headers.default);
+                        const res = JSON.parse(await request(url, { method: 'GET', headers: headers, timeout: searchTimeout }));
+                        if (res && res.data && Array.isArray(res.data.list)) qmList = res.data.list;
+                    } catch (_) {}
+                    // 兜底：关键词映射到题材 tag，拉该题材列表（搜索接口已废）
+                    if (!qmList.length) {
+                        const tagMap = { '都市':'1','言情':'2','战神':'3','逆袭':'4','重生':'5','穿越':'6','古装':'7' };
+                        let tag = tagMap[keyword] || '';
+                        if (!tag) {
+                            for (const k of Object.keys(tagMap)) {
+                                if (keyword.indexOf(k) !== -1 || k.indexOf(keyword) !== -1) { tag = tagMap[k]; break; }
+                            }
+                        }
+                        const tags = tag ? [tag, '0'] : ['0', '1', '2', '3', '4', '5', '6', '7'];
+                        for (const tg of tags) {
+                            if (qmList.length >= searchLimit) break;
+                            try {
+                                const sg = md5('operation=1playlet_privacy=1tag_id=' + tg + cfg.keys);
+                                const ug = plat.host + plat.url1 + '?tag_id=' + tg + '&playlet_privacy=1&operation=1&sign=' + sg;
+                                const headers = Object.assign({}, await getHeaderX(), cfg.headers.default);
+                                const rr = JSON.parse(await request(ug, { method: 'GET', headers: headers, timeout: searchTimeout }));
+                                const lst = (rr && rr.data && rr.data.list) || [];
+                                for (const it of lst) {
+                                    if (qmList.length >= searchLimit) break;
+                                    qmList.push(it);
+                                }
+                            } catch (_) {}
+                        }
                     }
+                    results = qmList.map(function(item) {
+                        return {
+                            vod_id: '七猫@' + encodeURIComponent(item.playlet_id),
+                            vod_name: item.title || '未知标题',
+                            vod_pic: item.image_link || '',
+                            vod_remarks: '七猫短剧 | ' + (item.total_episode_num || 0) + '集'
+                        };
+                    });
                     break;
                 }
                 case '牛牛': {
@@ -1347,9 +1406,14 @@ async function search(params) {
         }
     }
 
+    // 修复：各平台已按关键词检索，不再强制标题包含关键词
+    // （西饭等平台返回的相关短剧标题未必含关键词，原过滤会把结果全清掉）
+    const seenIds = new Set();
     let finalResults = d.filter(function(item) {
-        const title = item.vod_name || '';
-        return title.toLowerCase().indexOf(keyword.toLowerCase()) !== -1;
+        const id = item.vod_id || (item.vod_name + '|' + item.vod_pic);
+        if (seenIds.has(id)) return false;
+        seenIds.add(id);
+        return true;
     });
     
     const totalResults = finalResults.length;
@@ -1537,7 +1601,7 @@ async function detail(params) {
                 const source = parts2[1];
                 const ts = Date.now();
                 const xifanHeaders = { 'User-Agent': 'okhttp/3.12.11' };
-                const url = plat.host + plat.url2 + '?duanjuId=' + duanjuId + '&source=' + source + '&openFrom=homescreen&type=&pageID=page_inner_flow&density=1.5&version=2001001&androidVersionCode=28&requestId=' + ts + 'aa498144140ef297&appId=drama&teenMode=false&userBaseMode=false&session=eyJpbmZvIjp7InVpZCI6IiIsInJ0IjoiMTc0MDY1ODI5NCIsInVuIjoiT1BHXzFlZGQ5OTZhNjQ3ZTQ1MjU4Nzc1MTE2YzFkNzViN2QwIiwiZnQiOiIxNzQwNjU4Mjk0In19&feedssession=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1dHlwIjowLCJidWlkIjoxNjMzOTY4MTI2MTQ4NjQxNTM2LCJhdWQiOiJkcmFtYSIsInZlciI6MiwicmF0IjoxNzQwNjU4Mjk0LCJ1bm0iOiJPUEdfMWVkZDk5NmE2NDdlNDUyNTg3NzUxMTZjMWQ3NWI3ZDAiLCJpZCI6IjNiMzViZmYzYWE0OTgxNDQxNDBlZjI5N2JkMDY5NGNhIiwiZXhwIjoxNzQxMjYzMDk0LCJkYyI6Imd6cXkifQ.JS3QY6ER0P2cQSxAE_OGKSMIWNAMsYUZ3mJTnEpf-Rc';
+                const url = plat.host + plat.url2 + '?duanjuId=' + duanjuId + '&source=' + source + '&openFrom=homescreen&type=&pageID=page_inner_flow&density=1.5&version=2001001&androidVersionCode=28&requestId=' + ts + 'aa498144140ef297&appId=drama&teenMode=false&userBaseMode=false';
                 const res = JSON.parse(await request(url, { headers: xifanHeaders }));
                 const data = res.result;
                 const episodes = [];
