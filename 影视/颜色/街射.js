@@ -1,7 +1,7 @@
 // @name 街射
 // @author 宝宝巴士
 // @description 街射(jieshee.cc，入口 account.jieshee.cc)：首页/分类/搜索/详情/播放；播放直接从详情 window.__ARCHIVE_PLAYER__(cdnLine+rawPath) 取 m3u8；封面图床 content-type 异常，脚本内联 data:image；多 CDN 线路兜底
-// @version 1.1.7
+// @version 1.1.8
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/街射.js
 // @dependencies axios,cheerio
 /**
@@ -206,11 +206,15 @@ function buildGroupedCategories(rawList) {
     const items = buckets.get(g.id) || [];
     if (!items.length) continue;
     classList.push({ type_id: g.id, type_name: g.name });
+    // 素人自拍(catchAll)组没有独立「全部」聚合能力，去掉「全部」选项避免选它时加载失败
+    const values = g.catchAll
+      ? items.map((x) => ({ name: x.type_name, value: x.type_id }))
+      : [{ name: '全部', value: '' }, ...items.map((x) => ({ name: x.type_name, value: x.type_id }))];
     filters[g.id] = [{
       key: 'sub',
       name: '子分类',
-      init: '',
-      value: [{ name: '全部', value: '' }, ...items.map((x) => ({ name: x.type_name, value: x.type_id }))],
+      init: g.catchAll ? (items[0] && items[0].type_id || '') : '',
+      value: values,
     }];
   }
   return { classList, filters };
@@ -330,7 +334,13 @@ async function category(params) {
       }
       const grp = CATEGORY_GROUPS.find((g) => g.id === cid);
       const allCats = await getRawCategoriesCached();
-      const members = (allCats || []).filter((x) => (grp ? grp.pattern.test(x.type_name) : false));
+      // catchAll 组（素人自拍）没有 pattern：其成员 = 不被任何其它组 pattern 命中的分类
+      const otherGroups = CATEGORY_GROUPS.filter((g) => g.id !== cid && g.pattern);
+      const members = (allCats || []).filter((x) => {
+        if (!grp) return false;
+        if (grp.pattern) return grp.pattern.test(x.type_name);
+        return !otherGroups.some((g) => g.pattern.test(x.type_name));
+      });
       const targets = (members.length ? members : allCats).map((x) => x.type_id);
       const seen = new Set();
       let used = '';
