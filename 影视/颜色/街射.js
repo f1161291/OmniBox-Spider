@@ -1,7 +1,7 @@
 // @name 街射
 // @author 宝宝巴士
 // @description 街射(jieshee.cc，入口 account.jieshee.cc)：首页/分类/搜索/详情/播放；播放直接从详情 window.__ARCHIVE_PLAYER__(cdnLine+rawPath) 取 m3u8；封面图床 content-type 异常，脚本内联 data:image；多 CDN 线路兜底
-// @version 1.1.4
+// @version 1.1.7
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/街射.js
 // @dependencies axios,cheerio
 /**
@@ -83,21 +83,20 @@ const http = axios.create({
 });
 
 /* ---- 全局限速：站点对并发很敏感，>4 并发就开始 429 ---- */
-let RATE_CHAIN = Promise.resolve();
-function rateLimit(ms = 220) {
-  RATE_CHAIN = RATE_CHAIN.then(() => new Promise((r) => setTimeout(r, ms))).catch(() => {});
-  return RATE_CHAIN;
-}
+// 不再用全局串行链（会让大类合并串行抓十几个分类，耗时 30-60s 导致前端超时）。
+// 并发由调用方按批次控制（每批 3 个 + 批间间隔），这里只保留简单 sleep。
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function rateLimit(ms = 0) { if (ms > 0) await sleep(ms); }
 
 async function fetchText(url, options = {}) {
   const maxRetry = Number(options.retry ?? 3);
   let lastErr = null;
   for (const host of HOSTS) {
     const full = /^https?:\/\//i.test(url) ? url : `${host}${url}`;
-    for (let attempt = 0; attempt <= maxRetry; attempt++) {
+    const retries = Math.min(maxRetry, 2);
+    for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        await rateLimit(options.rateGap ?? 220);
+        await rateLimit(options.rateGap ?? 0);
         const res = await http.get(full, {
           headers: { Referer: `${host}/`, ...(options.headers || {}) },
           responseType: 'text',
@@ -105,13 +104,9 @@ async function fetchText(url, options = {}) {
         // 429 限流：指数退避重试
         if (res.status === 429) {
           lastErr = new Error('HTTP 429');
-          if (attempt >= maxRetry) break;
-          const wait = 800 * Math.pow(2, attempt);
-          log('info', `429 限流，等待 ${wait}ms 重试(${attempt + 1}/${maxRetry}) ${full.slice(0, 70)}`);
-          await sleep(wait);
-          continue;
+          break;  // 不重试：限流时快速失败，让上层换子分类/域名
         }
-        if (res.status >= 500 && attempt < maxRetry) {
+        if (res.status >= 500 && attempt < retries) {
           await sleep(500 * (attempt + 1));
           lastErr = new Error(`HTTP ${res.status}`);
           continue;
@@ -120,7 +115,7 @@ async function fetchText(url, options = {}) {
         return typeof res.data === 'string' ? res.data : JSON.stringify(res.data || '');
       } catch (e) {
         lastErr = e;
-        if (attempt < maxRetry && !/HTTP 4\d\d/.test(String(e.message))) { await sleep(400 * (attempt + 1)); continue; }
+        if (attempt < retries && !/HTTP 4\d\d/.test(String(e.message))) { await sleep(300 * (attempt + 1)); continue; }
         break;
       }
     }
@@ -323,18 +318,14 @@ async function category(params) {
         html = '';
       }
       list = html ? parseCards(html, HOSTS[0]) : [];
-      if (list.length) {
-        try {
-          const np = `/category/${sub}/${page + 1}/`;
-          if (parseCards(await fetchText(np), HOSTS[0]).length) pagecount = page + 1;
-        } catch (_) {}
-      }
+      pagecount = list.length >= 20 ? page + 1 : page;
       log('info', `category ${cid} sub=${sub} page=${page} list=${list.length}`);
     } else if (isGroup) {
-      // 合并大类下所有子分类（并发抓第一页）
+      // 大类：只取第一个有效子分类的内容，秒回，避免聚合十几个请求导致 429/超时。
+      // 其余子分类通过 filters.sub 精确选择（见上方的 sub 分支）。
       const cachedMerge = GROUP_MERGE_CACHE.get(cid);
       if (cachedMerge && Date.now() - cachedMerge.at < GROUP_MERGE_TTL) {
-        log('info', `category ${cid} 命中合并缓存 list=${cachedMerge.list.length}`);
+        log('info', `category ${cid} 命中缓存 list=${cachedMerge.list.length}`);
         return { page, pagecount: 1, total: cachedMerge.list.length, limit: cachedMerge.list.length, list: cachedMerge.list };
       }
       const grp = CATEGORY_GROUPS.find((g) => g.id === cid);
@@ -342,33 +333,27 @@ async function category(params) {
       const members = (allCats || []).filter((x) => (grp ? grp.pattern.test(x.type_name) : false));
       const targets = (members.length ? members : allCats).map((x) => x.type_id);
       const seen = new Set();
-      let ok = 0;
-      // 顺序抓取 + 全局限速，避免 429；命中缓存则很快
-      for (const c of targets) {
+      let used = '';
+      // 依次尝试，取第一个能返回数据的子分类
+      for (const c of targets.slice(0, 6)) {
         try {
-          const html = await fetchText(`/category/${c}/`);
-          ok++;
-          for (const it of parseCards(html, HOSTS[0])) {
-            if (seen.has(it.vod_id)) continue;
-            seen.add(it.vod_id);
-            list.push(it);
+          const html = await fetchText(page > 1 ? `/category/${c}/${page}/` : `/category/${c}/`);
+          const cards = parseCards(html, HOSTS[0]);
+          if (cards.length) {
+            used = c;
+            for (const it of cards) { if (!seen.has(it.vod_id)) { seen.add(it.vod_id); list.push(it); } }
+            pagecount = cards.length >= 20 ? page + 1 : page;
+            break;
           }
-        } catch (e) {
-          log('info', `子分类 ${c} 跳过: ${e.message}`);
-        }
+        } catch (e) { log('info', `子类 ${c} 跳过: ${e.message}`); }
       }
-      log('info', `category ${cid} 合并 ${ok}/${targets.length} 个子分类 list=${list.length}`);
+      log('info', `category ${cid} 代表子类=${used} list=${list.length}`);
       if (list.length) GROUP_MERGE_CACHE.set(cid, { at: Date.now(), list: list.slice() });
     } else {
       const path = page > 1 ? `/category/${cid}/${page}/` : `/category/${cid}/`;
       const html = await fetchText(path);
       list = parseCards(html, HOSTS[0]);
-      if (list.length) {
-        try {
-          const np = `/category/${cid}/${page + 1}/`;
-          if (parseCards(await fetchText(np), HOSTS[0]).length) pagecount = page + 1;
-        } catch (_) {}
-      }
+      pagecount = list.length >= 20 ? page + 1 : page;
       log('info', `category ${cid} page=${page} list=${list.length}`);
     }
 
