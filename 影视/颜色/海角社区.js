@@ -1,7 +1,7 @@
 // @name 海角社区
 // @author 宝宝巴士
-// @description 海角社区（hjsqn.com）：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默）；从地址发布页 hjsq2.co 自动获取最新域名并健康轮转；首页排行/往期列表/搜索/详情/播放；DPlayer data-config 取 /media/m3u8/ 代理直链；封面图床 AES-128-CBC 内联解密
-// @version 1.1.0
+// @description 海角社区（hjsqn.com）：域名写死实测可用池+健康轮转（不再拉发布页）；首页排行/往期列表/搜索/详情/播放；DPlayer data-config 取 /media/m3u8/ 代理直链；封面图床 AES-128-CBC 内联解密
+// @version 1.1.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角社区.js
 // @dependencies crypto
 /**
@@ -9,15 +9,8 @@
  * 海角社区（hjsqn.com）OmniBox 采集源
  * ============================================================================
  *
- * 【地址发布页（防失联，本需求核心）】
- *   发布页：https://hjsq2.co/  （title「海角网 海角乱伦 海角社区」）
- *   页面里给出当前可用入口：
- *     https://hjsqn.com/   主站（真实视频站，21KB 首页 + 162 个 video/item）
- *     https://hjsqw.com/   备用（当前网络不可达）
- *     minuo.cc             图片/CDN 侧域名
- *   还有官方地址仓库：https://gitlab.com/hjsqn-com1/hjsqn-com
- *   脚本首次请求即抓发布页解析域名，做同构校验（首页能抓到 /archives/{id}）
- *   后并入轮换池；默认每 6 小时刷新，全挂时立即强制刷新并重试。
+ *   域名写死在 BUILTIN_HOSTS（2026-11-19 实测），不再从发布页拉取。
+ *   全挂时用池内域名重试，配合健康轮转。
  *
  * 【路由】
  *   首页：/                        （热门搜索 + 排行榜，无封面）
@@ -42,10 +35,8 @@
  *   脚本从详情页 HTML 里按同名文件匹配出 xi.dzuxta.cn 的签名地址，抓取后解密转 data:image。
  *
  * 【环境变量】
- *   HJ_PUBLISH_PAGE     发布页，默认 https://hjsq2.co/
  *   HJ_HOST             主站，默认 https://hjsqn.com
  *   HJ_MIRRORS          追加备用域名（逗号分隔）
- *   HJ_HOSTS_REFRESH    发布页刷新间隔（小时），默认 6；0=每次都刷
  *   HJ_COVER_INLINE     封面内联解密，默认 1；设 0 关闭（回退原始 URL）
  *   HJ_COOKIE           站点 cookie（可选）
  *   HJ_UA               自定义 User-Agent
@@ -79,8 +70,6 @@ const UA = process.env.HJ_UA
   || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const COOKIE = String(process.env.HJ_COOKIE || '').trim();
 const PRIMARY = (process.env.HJ_HOST || 'https://hjsqn.com').replace(/\/+$/, '');
-const PUBLISH_PAGE = (process.env.HJ_PUBLISH_PAGE || 'https://hjsq2.co/').trim();
-const GITLAB_ADDR = 'https://gitlab.com/hjsqn-com1/hjsqn-com';
 
 /* 封面图床 AES 密钥（与 51吃瓜 / 每日大赛共用同一图床方案） */
 const COVER_AES_KEY = Buffer.from('f5d965df75336270', 'latin1');
@@ -94,12 +83,13 @@ const COVER_TIMEOUT = 8000;
 
 /* ---------------- 域名池 ---------------- */
 /**
- * 内置备用域名（2026-11-17 实测可用）：发布页本身不可达时兜底，
- * 避免「主域挂了 + 发布页也拉不到」时直接抓瞎。HJ_NO_BUILTIN=1 关闭。
  */
+// 写死实测可用域名（2026-11-19 实测；不再从发布页拉取）
+// hjsqw.com 当前不可达，剔除；补入实测可用的发布页/论坛域。
 const BUILTIN_HOSTS = String(process.env.HJ_NO_BUILTIN || '') === '1' ? [] : [
   'https://hjsqn.com',
-  'https://hjsqw.com',
+  'https://hjsq2.co',
+  'https://haijiaoluntan.com',
 ];
 const HOSTS = (() => {
   const extra = String(process.env.HJ_MIRRORS || '')
@@ -242,104 +232,11 @@ async function httpGet(url, options = {}) {
   );
 }
 
-/* ---------------- 发布页域名发现（被动触发） ----------------
- * 策略：不做定时刷新。每次请求先尝试所有已知域名；
- * 全部失败时才去发布页拉新域名，分批探测（每批 10 个，批间间隔 200ms）
- * 避免一次性打太多请求。
- * HJ_PROBE_BATCH 控制批次大小，默认 10。
- * =============================================================== */
+/* ---------------- 域名池缓存（不再拉发布页） ---------------- */
 const HOSTS_CACHE_KEY = 'haijiao:hosts:v1';
 const HOSTS_CACHE_TTL = 30 * 24 * 3600;
-const PROBE_BATCH_SIZE = (() => {
-  const n = Number(String(process.env.HJ_PROBE_BATCH || '').trim() || 10);
-  return Number.isFinite(n) && n > 0 ? Math.min(20, Math.floor(n)) : 10;
-})();
-const PROBE_BATCH_DELAY = 200; // ms，批间间隔，避免一次性打太多
-let hostsRefreshInFlight = null;
 let hostsCacheRestored = false;
 
-/** 从发布页/仓库页抽取候选域名（排除第三方） */
-function extractDomains(text) {
-  const s = String(text || '');
-  const out = [];
-  const seen = new Set();
-  const add = (raw) => {
-    let h = String(raw || '').toLowerCase().trim()
-      .replace(/^https?:\/\//i, '').split(/[/\s"'`#?]/)[0];
-    if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/.test(h)) return;
-    if (/gitlab|github|discord|telegram|t\.me|x\.com|twitter|google|yandex|googletagmanager|cloudflare|minuo\.cc/i.test(h)) return;
-    if (seen.has(h)) return;
-    seen.add(h);
-    out.push(`https://${h}`);
-  };
-  let m;
-  const re1 = /<a[^>]*href=["'](https?:\/\/[^"']+)["']/gi;
-  while ((m = re1.exec(s)) !== null) add(m[1]);
-  const re2 = /https?:\/\/([a-z0-9][a-z0-9.-]*\.[a-z]{2,})/gi;
-  while ((m = re2.exec(s)) !== null) add(m[1]);
-  return out;
-}
-/** 同构校验：首页能抓到 /archives/{id} 才算真站 */
-async function probeMainSite(host) {
-  try {
-    const r = await httpGet(`${host}/`, { timeout: 12000 });
-    const b = String(r.body || '');
-    return r.statusCode >= 200 && r.statusCode < 400
-      && b.length > 5000
-      && /\/archives\/\d+/.test(b);
-  } catch (_) { return false; }
-}
-/** 分批并发探测：每批 PROBE_BATCH_SIZE 个，批间间隔 PROBE_BATCH_DELAY ms */
-async function probeBatch(batch) {
-  const results = await Promise.allSettled(batch.map((h) => probeMainSite(h)));
-  const ok = [];
-  for (let i = 0; i < batch.length; i++) {
-    if (results[i].status === 'fulfilled' && results[i].value) ok.push(batch[i]);
-  }
-  return ok;
-}
-
-async function discoverHosts() {
-  const candidates = new Set();
-  for (const page of [PUBLISH_PAGE, GITLAB_ADDR]) {
-    try {
-      const r = await httpGet(page, { timeout: 15000 });
-      const body = String(r.body || '');
-      if (!body) continue;
-      const found = extractDomains(body);
-      found.forEach((d) => candidates.add(d));
-      logI(`[hosts] ${page} 解析到 ${found.length} 个候选`);
-    } catch (e) {
-      logI(`[hosts] ${page} 拉取失败: ${e.message}`);
-    }
-  }
-
-  const newOnes = Array.from(candidates).filter((h) => !HOSTS.includes(h));
-  if (!newOnes.length) {
-    logI('[hosts] 发布页无新域名，无需探测');
-    return 0;
-  }
-  logI(`[hosts] 待探测 ${newOnes.length} 个新域名，每批 ${PROBE_BATCH_SIZE} 个`);
-
-  let added = 0;
-  for (let i = 0; i < newOnes.length; i += PROBE_BATCH_SIZE) {
-    const batch = newOnes.slice(i, i + PROBE_BATCH_SIZE);
-    const batchNo = Math.floor(i / PROBE_BATCH_SIZE) + 1;
-    logI(`[hosts] 探测批次 ${batchNo}: ${batch.length} 个`);
-    const ok = await probeBatch(batch);
-    for (const h of ok) {
-      HOSTS.push(h);
-      hostHealth[h] = { fail: 0, okAt: 0, blockAt: 0 };
-      added++;
-      logI(`[hosts] 发现可用主站 -> ${h}`);
-    }
-    if (i + PROBE_BATCH_SIZE < newOnes.length) {
-      await new Promise((r) => setTimeout(r, PROBE_BATCH_DELAY));
-    }
-  }
-  if (added) logI(`[hosts] 本次新增 ${added} 个，池共 ${HOSTS.length} 个`);
-  return added;
-}
 /**
  * 恢复域名池：上次成功域置顶、剔除已判死的域。
  * 避免每次启动都重新扫描/探测失效域名。
@@ -397,40 +294,16 @@ function schedulePersistHosts() {
   }, 500);
   if (hjPersistTimer.unref) hjPersistTimer.unref();
 }
-/**
- * 拉取新域名（被动触发模式）。
- * force=false 时直接返回（不做定时刷新）；
- * force=true 时并发标记，避免重复触发。
- */
-async function ensureHostsFresh(force) {
+// 不再从发布页拉取；仅确保缓存已恢复
+async function ensureHostsFresh() {
   await restoreHostsCache();
-  if (!force) return 0;
-  if (hostsRefreshInFlight) return hostsRefreshInFlight;
-  hostsRefreshInFlight = (async () => {
-    try {
-      logI('[hosts] 全部域名不可达，从发布页拉取新域名');
-      const added = await discoverHosts();
-      await OmniBox.setCache(
-        HOSTS_CACHE_KEY,
-        { at: Date.now(), hosts: HOSTS.slice() },
-        HOSTS_CACHE_TTL
-      );
-      return added;
-    } catch (e) {
-      logI(`[hosts] 拉取新域名异常: ${e.message}`);
-      return 0;
-    } finally {
-      hostsRefreshInFlight = null;
-    }
-  })();
-  return hostsRefreshInFlight;
+  return 0;
 }
 
 /* ---------------- 带轮换的抓取 ---------------- */
 async function fetchHtml(urlOrPath) {
   const isFull = /^https?:\/\//i.test(urlOrPath);
   const path = isFull ? new URL(urlOrPath).pathname + new URL(urlOrPath).search : urlOrPath;
-  // 不做定时刷新；仅在全部域名失败时触发 discoverHosts（见下方重试逻辑）
 
   const tryAll = async () => {
     for (const idx of buildHostOrder()) {
@@ -456,13 +329,9 @@ async function fetchHtml(urlOrPath) {
   };
   const hit = await tryAll();
   if (hit) return hit;
-  if (!globalThis.__hjForceAt || Date.now() - globalThis.__hjForceAt >= 60000) {
-    globalThis.__hjForceAt = Date.now();
-    logI('所有候选域名不可达，强制刷新发布页域名池');
-    await ensureHostsFresh(true);
-    const retry = await tryAll();
-    if (retry) return retry;
-  }
+  // 不再从发布页拉取；直接用池内域名再重试一轮
+  const retry = await tryAll();
+  if (retry) return retry;
   logE('所有候选域名均不可达');
   return { body: '', host: HOSTS[PREFERRED] || PRIMARY, statusCode: 0 };
 }
