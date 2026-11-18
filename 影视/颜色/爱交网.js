@@ -1,7 +1,7 @@
 // @name 爱交网
 // @author 宝宝巴士
-// @description 爱交网(aijiaox.com，发布页 aafd.shsivadqh.com/contact)：首页/分类/搜索/详情/播放；域名池被动发布页更新+软隔离；播放走 POST /videos/{数字ID}/playback 取签名 m3u8；分类名取链接文本(非父分组)，pic.qnlycc.cn 封面 AES 解密内联
-// @version 1.0.2
+// @description 爱交网(aijiaox.com，发布页 aafd.shsivadqh.com/contact)：首页/分类/搜索/详情/播放；域名池被动发布页更新+软隔离；播放走 POST /videos/{数字ID}/playback 取签名 m3u8；分类名取链接文本(非父分组)，qnlycc.cn 图床(new2 .webp / pic .jpeg)封面 AES 解密内联(JPEG/PNG/WebP)
+// @version 1.0.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/爱交网.js
 // @dependencies axios,cheerio,crypto
 /**
@@ -145,11 +145,14 @@ function decryptAesImage(buf) {
     const out = Buffer.concat([d.update(buf), d.final()]);
     if (out.length > 100 && out[0] === 0xff && out[1] === 0xd8) return `data:image/jpeg;base64,${out.toString('base64')}`;
     if (out.slice(0, 8).toString('hex') === '89504e470d0a1a0a') return `data:image/png;base64,${out.toString('base64')}`;
+    // WebP：RIFF....WEBP
+    if (out.slice(0, 4).toString() === 'RIFF' && out.slice(8, 12).toString() === 'WEBP') return `data:image/webp;base64,${out.toString('base64')}`;
   } catch (_) {}
   return '';
 }
 function isEncryptedCover(url) {
-  return /pic\.qnlycc\.cn/i.test(String(url || ''));
+  // new2.qnlycc.cn 的 .webp 与 pic.qnlycc.cn 的 .jpeg 都是 AES 密文
+  return /qnlycc\.cn/i.test(String(url || ''));
 }
 async function resolveCover(url) {
   const u = absUrl(url);
@@ -165,7 +168,10 @@ async function resolveCover(url) {
     if (res.status === 200 && res.data) {
       const buf = Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data);
       // 已是可直接显示的图片则直连
-      if (buf[0] === 0xff && buf[1] === 0xd8) { coverCache.set(u, u); return u; }
+      const plain = (buf[0] === 0xff && buf[1] === 0xd8)
+        || (buf.slice(0, 8).toString('hex') === '89504e470d0a1a0a')
+        || (buf.slice(0, 4).toString() === 'RIFF' && buf.slice(8, 12).toString() === 'WEBP');
+      if (plain) { coverCache.set(u, u); return u; }
       const inline = decryptAesImage(buf);
       if (inline) { coverCache.set(u, inline); return inline; }
     }
