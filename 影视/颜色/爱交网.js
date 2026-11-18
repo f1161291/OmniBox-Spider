@@ -1,9 +1,9 @@
 // @name 爱交网
 // @author 宝宝巴士
-// @description 爱交网(aijiaox.com，发布页 aafd.shsivadqh.com/contact)：首页/分类/搜索/详情/播放；域名池被动发布页更新+软隔离；播放走 POST /videos/{数字ID}/playback 取签名 m3u8；封面 new2.qnlycc.cn 直接可访问
-// @version 1.0.1
+// @description 爱交网(aijiaox.com，发布页 aafd.shsivadqh.com/contact)：首页/分类/搜索/详情/播放；域名池被动发布页更新+软隔离；播放走 POST /videos/{数字ID}/playback 取签名 m3u8；分类名取链接文本(非父分组)，pic.qnlycc.cn 封面 AES 解密内联
+// @version 1.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/爱交网.js
-// @dependencies axios,cheerio
+// @dependencies axios,cheerio,crypto
 /**
  * ============ 爱交网（aijiaox.com）OmniBox 采集源 ============
  *
@@ -37,6 +37,7 @@
  *   元数据还有 <script type="application/ld+json"> VideoObject（name/description/thumbnailUrl）
  */
 const axios = require('axios');
+const crypto = require('crypto');
 const cheerio = require('cheerio');
 const OmniBox = require('omnibox_sdk');
 const runner = require('spider_runner');
@@ -128,6 +129,61 @@ function absUrl(url) {
   if (value.startsWith('//')) return `https:${value}`;
   try { return new URL(value, `${HOST}/`).toString(); }
   catch (_) { return value; }
+}
+
+/* ---------------- 封面处理 ----------------
+ * pic.qnlycc.cn 返回 AES-128-CBC 密文（binary/octet-stream），需解密内联；
+ * new2.qnlycc.cn 等明文图床直接返回 URL。
+ */
+const COVER_AES_KEY = Buffer.from('f5d965df75336270', 'latin1');
+const COVER_AES_IV = Buffer.from('97b60394abc2fbe1', 'latin1');
+const COVER_INLINE = process.env.AJ_COVER_INLINE !== '0';
+const coverCache = new Map();
+function decryptAesImage(buf) {
+  try {
+    const d = crypto.createDecipheriv('aes-128-cbc', COVER_AES_KEY, COVER_AES_IV);
+    const out = Buffer.concat([d.update(buf), d.final()]);
+    if (out.length > 100 && out[0] === 0xff && out[1] === 0xd8) return `data:image/jpeg;base64,${out.toString('base64')}`;
+    if (out.slice(0, 8).toString('hex') === '89504e470d0a1a0a') return `data:image/png;base64,${out.toString('base64')}`;
+  } catch (_) {}
+  return '';
+}
+function isEncryptedCover(url) {
+  return /pic\.qnlycc\.cn/i.test(String(url || ''));
+}
+async function resolveCover(url) {
+  const u = absUrl(url);
+  if (!u || !COVER_INLINE || !/^https?:/i.test(u)) return u;
+  if (!isEncryptedCover(u)) return u; // 明文图床直连
+  if (coverCache.has(u)) return coverCache.get(u);
+  try {
+    const client = makeHttp(8000);
+    const res = await client.get(u, {
+      headers: { 'User-Agent': UA, Referer: `${HOST}/` },
+      responseType: 'arraybuffer',
+    });
+    if (res.status === 200 && res.data) {
+      const buf = Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data);
+      // 已是可直接显示的图片则直连
+      if (buf[0] === 0xff && buf[1] === 0xd8) { coverCache.set(u, u); return u; }
+      const inline = decryptAesImage(buf);
+      if (inline) { coverCache.set(u, inline); return inline; }
+    }
+  } catch (_) {}
+  coverCache.set(u, u);
+  return u;
+}
+async function fillCovers(list) {
+  if (!COVER_INLINE || !Array.isArray(list)) return list;
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(4, list.length) }, async () => {
+    while (idx < list.length) {
+      const i = idx++;
+      list[i].vod_pic = await resolveCover(list[i].vod_pic);
+    }
+  });
+  await Promise.all(workers);
+  return list;
 }
 function stripHtml(text) {
   return String(text || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ')
@@ -313,7 +369,15 @@ function parseCards(html) {
     const href = $el.find('a.video-card-link').first().attr('href') || '';
     const slug = (href.match(/\/watch\/([A-Za-z0-9_-]+)\//) || [])[1] || '';
     if (!slug) return;
-    const img = $el.find('img').first();
+    // 优先取真正的封面 img（排除 alt 含「横幅」或 hc237 占位图）
+    let img = $el.find('img').first();
+    $el.find('img').each((_, im) => {
+      const alt = String($(im).attr('alt') || '');
+      const src = String($(im).attr('x-image-loader-url') || '');
+      if (/横幅|banner|loading/i.test(alt) || /hc237|loading\.gif/i.test(src)) return;
+      img = $(im);
+      return false;
+    });
     const pic = img.attr('x-image-loader-url') || img.attr('data-fallback-src') || img.attr('data-original') || img.attr('src') || '';
     const title = stripHtml($el.find('h3.video-card-title').first().attr('title') || img.attr('alt') || $el.find('h3.video-card-title').first().text());
     const remarks = stripHtml($el.find('.video-card-time').first().text());
@@ -333,7 +397,12 @@ function parseCategories(html) {
     const m = href.match(/\/category\/([a-z0-9-]+)\//i);
     if (!m) return;
     const slug = m[1];
-    const name = stripHtml($a.attr('data-navigation_name') || $a.text() || '');
+    // data-navigation_name 是父分组（全是「热门」），真实分类名在链接文本里
+    let name = stripHtml($a.text() || '');
+    const navName = stripHtml($a.attr('data-navigation_name') || '');
+    if (!name || /^(热门|最新|推荐|精选)$/.test(name) || /^[a-z0-9-]+$/i.test(name)) {
+      name = navName && !/^(热门|最新|推荐|精选)$/.test(navName) ? navName : '';
+    }
     if (!name || seen.has(slug)) return;
     if (/^\d+$/.test(slug)) return;
     seen.add(slug);
@@ -360,7 +429,7 @@ async function home() {
   try {
     const html = await requestHtml('/');
     const classList = parseCategories(html);
-    const list = parseCards(html).slice(0, 60);
+    const list = await fillCovers(parseCards(html).slice(0, 60));
     log('info', `home class=${classList.length} list=${list.length}`);
     return { class: classList, list };
   } catch (e) {
@@ -377,7 +446,7 @@ async function category(params) {
   try {
     const path = page > 1 ? `/category/${slug}/${page}/` : `/category/${slug}/`;
     const html = await requestHtml(path);
-    const list = parseCards(html);
+    const list = await fillCovers(parseCards(html));
     const pagecount = await estimatePageCount(slug, page, html, list.length);
     log('info', `category ${slug} page=${page} list=${list.length} pagecount=${pagecount}`);
     return { page, pagecount, total: pagecount * list.length, limit: list.length, list };
@@ -447,7 +516,7 @@ async function detail(params) {
     log('info', `detail ${finalSlug} videoId=${videoId} title=${vodName} sources=${sources.length}`);
     return {
       list: [{
-        vod_id: finalSlug, vod_name: vodName, vod_pic: pic, type_name: typeName,
+        vod_id: finalSlug, vod_name: vodName, vod_pic: await resolveCover(pic), type_name: typeName,
         vod_actor: actor, vod_content: content, vod_remarks: '',
         vod_play_from: playFrom, vod_play_url: playUrl, vod_play_sources: sources,
         vod_video_id: videoId,
@@ -471,7 +540,7 @@ async function search(params) {
   try {
     const path = page > 1 ? `/search/${encodeURIComponent(kw)}/${page}/` : `/search/${encodeURIComponent(kw)}/`;
     const html = await requestHtml(path);
-    const list = parseCards(html);
+    const list = await fillCovers(parseCards(html));
     // 搜索页有分页时向后探一页
     let pagecount = page;
     if (list.length) {
