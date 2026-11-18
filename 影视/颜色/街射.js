@@ -1,7 +1,7 @@
 // @name 街射
 // @author 宝宝巴士
 // @description 街射(jieshee.cc，入口 account.jieshee.cc)：首页/分类/搜索/详情/播放；播放直接从详情 window.__ARCHIVE_PLAYER__(cdnLine+rawPath) 取 m3u8；封面图床 content-type 异常，脚本内联 data:image；多 CDN 线路兜底
-// @version 1.1.2
+// @version 1.1.4
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/街射.js
 // @dependencies axios,cheerio
 /**
@@ -158,16 +158,17 @@ function parseCards(html, base) {
  *   category() 读到 filters.sub 就请求对应 cateN。
  */
 const CATEGORY_GROUPS = [
-  { id: 'group:anime',     name: '动漫',     pattern: /动漫|里番|MMD|motion\s*anime|番剧|同人\s*COS|3D动漫|H动漫|原神|游戏国漫/i },
+  // 注意：数组顺序 = 展示顺序；catchAll 组不参与正则匹配，只收未被其它组命中的分类
+  { id: 'group:amateur',   name: '素人自拍', catchAll: true },
   { id: 'group:media',     name: '传媒',     pattern: /传媒|傳媒|SWAG|91制片厂/i },
   { id: 'group:tanhua',    name: '探花',     pattern: /探花|约啪|酒店开房/i },
   { id: 'group:paparazzi', name: '偷拍街拍', pattern: /街射|厕拍|监控破解|户外搭讪/i },
   { id: 'group:incest',    name: '乱伦',     pattern: /乱伦|母子|父女|兄妹|岳母|小姨子|嫂子|侄女|舅侄|兄弟姐妹|禁忌|变态家族/i },
   { id: 'group:costume',   name: '制服角色', pattern: /制服|JK|OL|空姐|护士|警服|校园|丝袜|角色扮演|萝莉少女|新娘/i },
   { id: 'group:hardcore',  name: '重口猎奇', pattern: /重口|猎奇|捆绑|屎尿|虐肛|拳交|性虐|人兽|孕妇|双龙/i },
-  { id: 'group:western',   name: '欧美',     pattern: /欧美|黑人/i },
+  { id: 'group:anime',     name: '动漫',     pattern: /动漫|里番|MMD|motion\s*anime|番剧|同人\s*COS|3D动漫|H动漫|原神|游戏国漫/i },
   { id: 'group:japan',     name: '日本AV',   pattern: /日本AV|素人FC2/i },
-  { id: 'group:amateur',   name: '素人自拍', pattern: /.*/ },   // 兜底
+  { id: 'group:western',   name: '欧美',     pattern: /欧美|黑人/i },
 ];
 
 /** 抓站点真实分类（cateN -> 名称） */
@@ -192,8 +193,16 @@ function parseRawCategories(html) {
 /** 把真实分类归并进大类，产出 class + filters */
 function buildGroupedCategories(rawList) {
   const buckets = new Map(CATEGORY_GROUPS.map((g) => [g.id, []]));
+  const catchAll = CATEGORY_GROUPS.find((g) => g.catchAll) || null;
+  const matchers = CATEGORY_GROUPS.filter((g) => !g.catchAll);
+  const animeGroup = CATEGORY_GROUPS.find((g) => g.id === 'group:anime');
   for (const item of rawList || []) {
-    const g = CATEGORY_GROUPS.find((x) => x.pattern.test(item.type_name)) || CATEGORY_GROUPS[CATEGORY_GROUPS.length - 1];
+    const nm = String(item.type_name || '');
+    // 「动漫*」前缀强制归动漫（否则「动漫乱伦」会被乱伦组、「动漫制服」会被制服组抢走）
+    let g = null;
+    if (animeGroup && /^动漫/.test(nm)) g = animeGroup;
+    if (!g) g = matchers.find((x) => x.pattern && x.pattern.test(nm)) || catchAll;
+    if (!g) continue;
     buckets.get(g.id).push(item);
   }
   const classList = [];
