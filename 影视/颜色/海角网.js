@@ -1,7 +1,7 @@
 // @name 海角网
 // @author 宝宝巴士
 // @description hjw01.com（海角网）：首页/分类/标签/分页/详情/播放；列表 xqbj-list-rows 取标题/封面；详情页 DPlayer data-config 直取带签名 m3u8；封面图床 pic.gyezbp.cn 为 AES-128-CBC 密文，脚本内解密转 data:image；域名池软隔离（本机 DNS 黑洞/连接重置不计失败，永不删空池）+ 裸域自动补 www.
-// @version 1.1.1
+// @version 1.1.4
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角网.js
 // @dependencies crypto
 /**
@@ -173,6 +173,55 @@ function withHardTimeout(promise, ms, label) {
 const UA = String(process.env.HJW_UA || '').trim()
   || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+/**
+ * 域名→可用 IP 列表（2026-11-19 实测）。
+ * 根因：这些域名 DNS 会返回多个 IP，其中部分是黑洞（ECONNRESET / 0.0.0.0），
+ * 系统 DNS 随机分配导致「域名轮换」无效。这里用 node https 的 lookup 回调
+ * 把连接绑定到实测可用 IP，SNI/hostname 保持原域名不变。
+ * 可用 IP 可用 HJW_HOST_IPS 覆盖：格式 "域名=ip1|ip2,域名2=ip1|ip2"
+ */
+const DEFAULT_HOST_IPS = {
+  'www.hjw01.com': ['104.21.77.76', '172.67.205.98'],
+  'hjw01.com': ['104.21.77.76', '172.67.205.98'],
+  'haijiaowang.com': ['43.229.39.238', '103.41.125.240', '103.41.185.242', '43.230.144.239'],
+};
+const HOST_IPS = (() => {
+  const map = Object.assign({}, DEFAULT_HOST_IPS);
+  const raw = String(process.env.HJW_HOST_IPS || '').trim();
+  if (raw) {
+    for (const pair of raw.split(',')) {
+      const [h, ips] = pair.split('=');
+      if (h && ips) map[h.trim().toLowerCase()] = ips.split('|').map((x) => x.trim()).filter(Boolean);
+    }
+  }
+  return map;
+})();
+/** 每个域名当前尝试到第几个 IP（失败时推进） */
+const ipCursor = Object.create(null);
+function lookupForHost(host) {
+  const ips = HOST_IPS[String(host || '').toLowerCase()];
+  if (!ips || !ips.length) return undefined; // 没配置就走系统 DNS
+  // 构造 lookup：(hostname, opts, cb) => cb(null, ip, family)
+  return (hostname, options, cb) => {
+    if (typeof options === 'function') { cb = options; options = {}; }
+    const cur = ipCursor[host] || 0;
+    const ip = ips[cur % ips.length];
+    const family = ip.includes(':') ? 6 : 4;
+    // Node 24 会用 all:true 调用，期望返回 [{address,family,...}] 数组
+    if (options && options.all) {
+      return cb(null, [{ address: ip, family, ttl: 300 }]);
+    }
+    cb(null, ip, family);
+  };
+}
+function advanceIp(host) {
+  const ips = HOST_IPS[String(host || '').toLowerCase()];
+  if (ips && ips.length > 1) {
+    ipCursor[host] = ((ipCursor[host] || 0) + 1) % ips.length;
+    logI(`[hosts] ${host} 切换 IP -> ${ips[ipCursor[host]]}`);
+  }
+}
+
 /* 封面图床 AES 密钥（与 51吃瓜 / 每日大赛 同一图床方案） */
 const COVER_AES_KEY = Buffer.from('f5d965df75336270', 'latin1');
 const COVER_AES_IV = Buffer.from('97b60394abc2fbe1', 'latin1');
@@ -216,6 +265,7 @@ function nodeRequest(urlStr, options = {}, redirects = 0) {
       headers,
       timeout: options.timeout || 20000,
       rejectUnauthorized: false,
+      ...(options.lookup ? { lookup: options.lookup } : {}),
     }, (res) => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
         res.resume();
@@ -255,12 +305,24 @@ async function requestOnce(url, host) {
       logI(`[request] SDK 失败(${host}): ${e.message}`);
     }
   }
-  const r = await withHardTimeout(
-    nodeRequest(url, { timeout, headers: { Referer: `${host}/` } }),
-    timeout,
-    `node ${url}`
-  );
-  return String(r.body || '');
+  // Node 直连：绑定实测可用 IP，避开系统 DNS 的黑洞 IP
+  let lastErr = null;
+  const hostKey = (() => { try { return new URL(url).hostname.toLowerCase(); } catch (_) { return ''; } })();
+  const attempts = HOST_IPS[hostKey] && HOST_IPS[hostKey].length > 1 ? 2 : 1;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const r = await withHardTimeout(
+        nodeRequest(url, { timeout, headers: { Referer: `${host}/` }, lookup: lookupForHost(hostKey) }),
+        timeout,
+        `node ${url}`
+      );
+      return String(r.body || '');
+    } catch (e) {
+      lastErr = e;
+      if (i + 1 < attempts) advanceIp(hostKey);
+    }
+  }
+  throw lastErr || new Error('node 直连失败');
 }
 
 /**
@@ -326,6 +388,8 @@ function extractPublishHosts(text) {
   while ((m = re.exec(s)) !== null) {
     const host = m[1].toLowerCase();
     if (/gitlab|github|telegram|t\.me|x\.com|twitter|google|yandex|cloudflare|pm\.me|peach-av|huoma/i.test(host)) continue;
+    // 发布页里这些域名已被劫持(跳四季养生)或非内容站，直接跳过，不再浪费探测请求
+    if (/^(hjwang4[123]\.com|hjw2026\.com)$/.test(host)) continue;
     if (seen.has(host)) continue;
     seen.add(host);
     out.push(`https://${host}`);
