@@ -1,7 +1,7 @@
 // @name 全盘搜索
 // @author 宝宝巴士
-// @description 全盘搜索(quanpan.xyz) 网盘搜索源：token 鉴权 + POST /api/search，按网盘类型分组；支持百度/夸克/阿里/UC/迅雷/115/123/天翼/磁力等；参考网盘目录聚盘搜索成品结构
-// @version 1.0.0
+// @description 全盘搜索(quanpan.xyz) 网盘搜索源：token 鉴权 + POST /api/search，按网盘类型分组；支持百度/夸克/阿里/UC/迅雷/115/123/天翼/磁力等；参考网盘目录聚盘搜索成品结构；统一 DRIVE_TYPE_CONFIG/SOURCE_NAMES_CONFIG/DRIVE_ORDER 分号分割环境变量
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/全盘搜索.js
 // @dependencies axios
 /**
@@ -44,6 +44,48 @@ const PAN_NAMES = {
   guangya: '光鸭云盘', mobile: '移动云盘', pikpak: 'PikPak', magnet: '磁力链接',
   ed2k: '电驴链接', others: '其它', other: '其它',
 };
+
+/* ---------------- 与其它网盘脚本统一的环境变量（分号分割） ---------------- */
+function splitConfigList(value) {
+  return String(value || '').replace(/,/g, ';').split(';').map((s) => s.trim()).filter(Boolean);
+}
+// 读取环境变量:支持多个网盘类型,用分号分割；命中的网盘会展开为多条代理线路
+const DRIVE_TYPE_CONFIG = splitConfigList(process.env.DRIVE_TYPE_CONFIG || 'quark;uc');
+// 读取环境变量:线路名称和顺序,用分号分割
+const SOURCE_NAMES_CONFIG = splitConfigList(process.env.SOURCE_NAMES_CONFIG || '本地代理;服务端代理;直连');
+// 详情页播放线路的网盘排序顺序（仅作用于 detail 的线路，不作用于搜索结果）
+const DRIVE_ORDER = splitConfigList(process.env.DRIVE_ORDER || 'baidu;tianyi;quark;uc;115;xunlei;ali;123pan').map((s) => s.toLowerCase());
+
+/** 从线路名推断网盘类型（用于 DRIVE_ORDER 排序） */
+function inferDriveTypeFromSourceName(name) {
+  const raw = String(name || '').toLowerCase();
+  if (raw.includes('百度')) return 'baidu';
+  if (raw.includes('夸克')) return 'quark';
+  if (raw.includes('阿里')) return 'ali';
+  if (raw.includes('天翼')) return 'tianyi';
+  if (raw.includes('迅雷')) return 'xunlei';
+  if (raw.includes('115')) return '115';
+  if (raw.includes('123')) return '123pan';
+  if (raw.includes('uc')) return 'uc';
+  return raw;
+}
+function sortPlaySourcesByDriveOrder(playSources = []) {
+  if (!Array.isArray(playSources) || playSources.length <= 1 || DRIVE_ORDER.length === 0) return playSources;
+  const orderMap = new Map(DRIVE_ORDER.map((name, index) => [name, index]));
+  return [...playSources].sort((a, b) => {
+    const aOrder = orderMap.has(inferDriveTypeFromSourceName(a?.name)) ? orderMap.get(inferDriveTypeFromSourceName(a?.name)) : Number.MAX_SAFE_INTEGER;
+    const bOrder = orderMap.has(inferDriveTypeFromSourceName(b?.name)) ? orderMap.get(inferDriveTypeFromSourceName(b?.name)) : Number.MAX_SAFE_INTEGER;
+    return aOrder - bOrder;
+  });
+}
+/** 线路名 → 代理方式 flag（play 时传给 getDriveVideoPlayInfo） */
+function routeTypeFromSourceName(name) {
+  const n = String(name || '');
+  if (n.includes('本地')) return '本地代理';
+  if (n.includes('服务端')) return '服务端代理';
+  if (n.includes('直连')) return '直连';
+  return '';
+}
 
 module.exports = { home, category, detail, search, play };
 runner.run(module.exports);
@@ -229,7 +271,7 @@ async function search(params) {
   }
 }
 
-async function detail(params) {
+async function detail(params, context) {
   const p = (typeof params === 'string') ? { videoId: params } : (params || {});
   const vodId = String(p.videoId || p.vod_id || p.id || '').trim();
   if (!vodId) return { list: [] };
@@ -271,7 +313,27 @@ async function detail(params) {
         playId: b64Encode({ mode: 'play', shareURL, fid: f.fid, name: f.name, title, password: meta.password }),
       };
     });
-    const sources = [{ name: drive, episodes }];
+    // 与其它网盘脚本统一：命中的网盘类型展开为多条代理线路（SOURCE_NAMES_CONFIG）
+    const driveType = String(meta.type || '').toLowerCase();
+    let sourceNames = [drive];
+    if (DRIVE_TYPE_CONFIG.includes(driveType) || DRIVE_TYPE_CONFIG.includes(meta.type)) {
+      sourceNames = [...SOURCE_NAMES_CONFIG];
+      // web 端过滤「本地代理」
+      if (context && context.from === 'web') sourceNames = sourceNames.filter((n) => !n.includes('本地'));
+      if (!sourceNames.length) sourceNames = [drive];
+      log('info', `detail ${drive} 命中 DRIVE_TYPE_CONFIG，线路: ${sourceNames.join(' | ')}`);
+    }
+    const sources = sortPlaySourcesByDriveOrder(
+      sourceNames.map((name) => ({
+        name,
+        // 每条线路克隆 episodes，playId 里带上线路名，供 play() 识别代理方式
+        episodes: episodes.map((ep) => {
+          const m = b64Decode(ep.playId);
+          m.sourceName = name;
+          return { name: ep.name, playId: b64Encode(m) };
+        }),
+      }))
+    );
     const playFrom = sources.map((s) => s.name).join('$$$');
     const playUrl = sources.map((s) => s.episodes.map((e) => `${e.name}$${e.playId}`).join('#')).join('$$$');
 
@@ -306,7 +368,8 @@ async function play(params) {
     const shareURL = text(meta.shareURL || meta.url);
     const fid = text(meta.fid || '0');
     if (!shareURL) throw new Error('缺少分享链接');
-    const info = await OmniBox.getDriveVideoPlayInfo(shareURL, fid, '');
+    const flag = routeTypeFromSourceName(meta.name) || routeTypeFromSourceName(meta.sourceName || '');
+    const info = await OmniBox.getDriveVideoPlayInfo(shareURL, fid, flag);
     const urls = [];
     if (Array.isArray(info?.url)) {
       for (const u of info.url) if (u && u.url) urls.push({ name: text(u.name || text(meta.name) || '播放'), url: text(u.url) });
