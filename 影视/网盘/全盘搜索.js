@@ -1,8 +1,8 @@
 // @name 全盘搜索
 // @author 宝宝巴士
 // @description 全盘搜索(quanpan.xyz) 网盘搜索源：token 鉴权 + POST /api/search，按网盘类型分组；支持百度/夸克/阿里/UC/迅雷/115/123/天翼/磁力等；参考网盘目录聚盘搜索成品结构；统一 DRIVE_TYPE_CONFIG/SOURCE_NAMES_CONFIG/DRIVE_ORDER 分号分割环境变量
-// @version 1.0.1
-// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/全盘搜索.js
+// @version 1.0.2
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/全盘搜索.js
 // @dependencies axios
 /**
  * ============ 全盘搜索（quanpan.xyz）OmniBox 网盘搜索源 ============
