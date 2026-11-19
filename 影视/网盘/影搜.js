@@ -1,8 +1,8 @@
 // @name 影搜
 // @author 宝宝巴士
 // @description 影搜(yingso.fun) 网盘搜索源：逆向 uni-app API（XOR 配置解密 + 动态 body 加密），搜索→getKey→按 root 拼网盘链接；参考网盘目录聚盘搜索成品结构；支持阿里/夸克/迅雷/百度/UC
-// @version 1.0.1
-// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/影搜.js
+// @version 1.0.2
+// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/影搜.js
 // @dependencies axios
 /**
  * ============ 影搜（yingso.fun）OmniBox 网盘搜索源 ============

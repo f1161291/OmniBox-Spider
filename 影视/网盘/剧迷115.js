@@ -1,8 +1,9 @@
 // @name 剧迷115
 // @author 梦
 // @description 影视站：gimy115.top，支持首页、分类、搜索、详情与网盘线路提取；支持刮削、弹幕、播放记录；Cookie 支持环境变量配置
-// @version 1.2.1
+// @version 1.2.2
 // @dependencies cheerio
+// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/剧迷115.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");

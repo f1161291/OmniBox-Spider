@@ -1,8 +1,8 @@
 // @name 谷哥搜
 // @author 宝宝巴士
 // @description 谷哥搜(gugeso.com) 网盘搜索源：SSE 搜索 → decrypt_urls 解密 → 网盘目录展开播放+刮削回填；参考网盘目录聚盘搜索成品结构；支持夸克/百度/阿里/UC 等线路
-// @version 1.0.1
-// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/谷哥搜.js
+// @version 1.0.2
+// @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/谷哥搜.js
 // @dependencies axios
 /**
  * ============ 谷哥搜（gugeso.com）OmniBox 网盘搜索源 ============
