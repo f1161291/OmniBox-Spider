@@ -2,7 +2,7 @@
 // @author
 // @description 刮削：支持，弹幕：支持，播放记录：支持
 // @dependencies: axios, cheerio
-// @version 1.0.9
+// @version 1.0.11
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/至臻.js
 
 // 引入 OmniBox SDK
@@ -32,7 +32,7 @@ function splitConfigList(value) {
 }
 
 // 网站地址(可以通过环境变量配置,支持多个域名用逗号/分号分割)
-const WEB_SITE_CONFIG = process.env.WEB_SITE_ZHIZHEN || "http://www.miqk.cc;https://www.mihdr.top;https://mihdr.top;";
+const WEB_SITE_CONFIG = process.env.WEB_SITE_ZHIZHEN || "http://www.miqk.cc;https://www.mihdr.top;https://mihdr.top;https://mihdr.wellin.cn;http://mihdr.wellin.cn;";
 const WEB_SITES = splitConfigList(WEB_SITE_CONFIG);
 // 读取环境变量:支持多个网盘类型,用逗号/分号分割
 const DRIVE_TYPE_CONFIG = splitConfigList(process.env.DRIVE_TYPE_CONFIG || "quark;uc");
@@ -248,7 +248,8 @@ async function setCachedJSON(key, value, exSeconds) {
  */
 async function requestWithFailover(path, options = {}) {
   let lastError = null;
-  const perDomainTimeout = Math.max(1000, Math.floor(30000 / WEB_SITES.length));
+  // 单域名时不能给 30s（会卡死首页），用固定短超时 + 环境变量可配
+  const perDomainTimeout = Math.max(3000, Number(process.env.ZHIZHEN_TIMEOUT || 8000) || 8000);
 
   for (let i = 0; i < WEB_SITES.length; i++) {
     const baseUrl = removeTrailingSlash(WEB_SITES[i]);
@@ -634,6 +635,18 @@ async function home(params) {
       }
     } catch (error) {
       OmniBox.log("warn", `从首页提取数据失败: ${error.message}`);
+    }
+
+    // 兜底：线上请求失败/超时时，用缓存的上次首页数据，避免首页空白
+    if (!list.length) {
+      const cached = await getCachedJSON('zhizhen:home:v1');
+      if (cached && Array.isArray(cached.list) && cached.list.length) {
+        classes = Array.isArray(cached.class) && cached.class.length ? cached.class : classes;
+        list = cached.list;
+        OmniBox.log('info', `使用缓存首页数据兜底: ${list.length} 条`);
+      }
+    } else {
+      await setCachedJSON('zhizhen:home:v1', { class: classes, list }, MUOU_CACHE_EX_SECONDS);
     }
 
     const currentFilters = await getPreferredFilters(classes);
