@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：【重要】播放签名升级到 v5（X-Khronos/X-Helios/X-Medusa，参考 guoapp 官方模块），修复 App 接口返回 HTTP 200 空体导致取流失败；官网 SSR 分类/搜索/详情 + App 私有播放模型（完整 Argus 551/Ladon 签名 + gzip + player/v1）+ 内置 CENC Range 解密流服务；直接替代旧《红果短剧.py》+《红果短剧-代理.py》，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 1.4.0
+// @description 红果短剧（hongguoduanju.com）：【重要】播放升级：匿名设备注册 + video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa，参考 guoapp 官方模块），修复 App 接口返回 HTTP 200 空体导致取流失败；官网 SSR 分类/搜索/详情 + App 私有播放模型（完整 Argus 551/Ladon 签名 + gzip + player/v1）+ 内置 CENC Range 解密流服务；直接替代旧《红果短剧.py》+《红果短剧-代理.py》，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
+// @version 1.5.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -112,12 +112,137 @@ function sanitizeCookie(value, iid) {
     .filter(x => x && !x.toLowerCase().startsWith('ttreq=')).join('; ');
   return clean || `store-region=cn-bj; store-region-src=did; install_id=${iid}`;
 }
+
+/* ==================== 匿名设备注册（官方 DeviceRegister 协议移植） ====================
+ * 红果内容/播放接口按「服务端注册过的 device_id+install_id」放行。
+ * 未注册设备一律 HTTP 200 空体 —— 这是 2026-11 起播放失败的真正原因。
+ * 注册是匿名的：无签名头、无账号，POST ttEncrypt(gzip(JSON))。
+ * 参考 N3urda/hongguoTV DeviceRegister.kt（GPL-3.0-only）。
+ */
+const DR_HOST = 'https://log5-applog-lf.fqnovel.com';
+const DR_PATH = '/service/2/device_register/?tt_data=a&cronet_version=8d40f833_2026-03-03&ttnet_version=4.2.243.31-douyin&use_store_region_cookie=1';
+const DR_MAGIC = Buffer.from('746305100000', 'hex');
+const DR_KDF_SALT = Buffer.from(
+  '4dd4c2e6b83162090e52b3c7a6733ba41cb2462b829ab58a196b39db57177524f49baf7f08e8d68d26a72e37c1a95a2f1f05a51892aef2949732b62a38aadd58', 'hex');
+const DR_UA = 'Mozilla/5.0 (Linux; Android 12; SAMSUNG) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36';
+let REGISTERED_DEVICE = null;   // {device_id, install_id, cookie, at}
+let REGISTER_INFLIGHT = null;
+
+function drSha512(buf) { return crypto.createHash('sha512').update(buf).digest(); }
+function drGzip(buf) { try { return zlib.gzipSync(buf); } catch (_) { return buf; } }
+function drGunzip(buf) { try { return zlib.gunzipSync(buf); } catch (_) { try { return zlib.inflateSync(buf); } catch (_) { return buf; } } }
+function ttEncryptDevice(data) {
+  const rnd = crypto.randomBytes(32);
+  const derived = drSha512(Buffer.concat([drSha512(rnd), DR_KDF_SALT]));
+  const body = Buffer.concat([drSha512(data), data]);
+  const pad = 16 - (body.length % 16);
+  const padded = Buffer.concat([body, Buffer.alloc(pad, pad)]);
+  const cipher = crypto.createCipheriv('aes-128-cbc', derived.subarray(0, 16), derived.subarray(16, 32));
+  const enc = Buffer.concat([cipher.update(padded), cipher.final()]);
+  return Buffer.concat([DR_MAGIC, rnd, enc]);
+}
+function drUUID() { return crypto.randomUUID(); }
+
+function buildRegisterPayload() {
+  const now = Date.now();
+  const header = {
+    magic_tag: 'ss_app_log',
+    header: {
+      display_name: '红果免费短剧', update_version_code: 73932, manifest_version_code: 73932,
+      app_version_minor: '7.3.9.32', aid: 8662, channel: '69310258a', package: 'com.phoenix.read',
+      app_version: '7.3.9.32', version_code: 73932, sdk_version: '3.7.0-rc.34-fanqie-xiaoshuo',
+      sdk_target_version: 29, git_hash: '3a88f4e', os: 'Android', os_version: '12', os_api: 32,
+      device_model: 'AOSP on Intel Platform', device_brand: 'SAMSUNG', device_manufacturer: 'Intel',
+      cpu_abi: 'arm64-v8a', release_build: 'b5e187f', density_dpi: 360, display_density: 'mdpi',
+      resolution: '1440x2560', language: 'zh', timezone: 8, access: 'wifi', not_request_sender: 0,
+      carrier: 'CHINA MOBILE', mcc_mnc: '46000', rom: 'eng.root.20231116.160340',
+      rom_version: 'W528JS release-keys', cdid: drUUID(), sig_hash: '56a962410c494bbaf0b58dba20cae56f',
+      openudid: crypto.randomBytes(8).toString('hex'), clientudid: drUUID(), ipv6_list: [],
+      region: 'CN', tz_name: 'Asia/Shanghai', tz_offset: 28800, sim_region: 'cn', sim_serial_number: [],
+      oaid_may_support: false, req_id: drUUID(), device_platform: 'android',
+      custom: { account_region_src: 'fallback', host_bit: 64, account_region: 'cn', dragon_device_type: 'pad' },
+      pre_installed_channel: '', apk_first_install_time: now, is_system_app: 0, sdk_flavor: 'china', guest_mode: 0,
+    },
+    _gen_time: now,
+  };
+  return ttEncryptDevice(drGzip(Buffer.from(JSON.stringify(header), 'utf8')));
+}
+
+/** 裸 https POST（不走签名/SDK），带硬超时 */
+function drPost(url, body, headers, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(url); } catch (e) { return reject(e); }
+    const req = https.request({
+      protocol: u.protocol, hostname: u.hostname, port: u.port || 443,
+      path: u.pathname + u.search, method: 'POST', headers,
+      timeout: timeoutMs || 12000, rejectUnauthorized: false,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        let buf = Buffer.concat(chunks);
+        if (/gzip/i.test(String(res.headers['content-encoding'] || ''))) buf = drGunzip(buf);
+        resolve({ status: res.statusCode, body: buf.toString('utf8'), cookies: res.headers['set-cookie'] || [] });
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('注册请求超时')));
+    req.end(body);
+  });
+}
+
+/** 注册匿名设备，成功返回 {device_id, install_id, cookie}；失败返回 null（不影响原有内置设备兜底） */
+async function registerPlaybackDevice(force) {
+  if (REGISTERED_DEVICE && !force && Date.now() - REGISTERED_DEVICE.at < 6 * 3600 * 1000) return REGISTERED_DEVICE;
+  if (REGISTER_INFLIGHT) return REGISTER_INFLIGHT;
+  REGISTER_INFLIGHT = (async () => {
+    try {
+      const body = buildRegisterPayload();
+      const headers = {
+        'User-Agent': DR_UA,
+        'Content-Type': 'application/octet-stream;tt-data=a',
+        'log-encode-type': 'gzip',
+        'x-ss-dp': '8662',
+        'x-ss-req-ticket': String(Date.now()),
+        'x-vc-bdturing-sdk-version': '4.0.3.cn',
+        lc: '101', 'sdk-version': '2', 'passport-sdk-version': '5051452',
+        'x-neptune': '-8|50:51:59:30:40:47:49:39',
+        'x-ss-stub': crypto.createHash('md5').update(body).digest('hex').toUpperCase(),
+        'Content-Length': body.length,
+      };
+      const r = await drPost(DR_HOST + DR_PATH, body, headers, 12000);
+      if (r.status !== 200 || !r.body) throw new Error(`注册 HTTP ${r.status}`);
+      const json = JSON.parse(r.body);
+      const device = String(json.device_id_str || json.device_id || '');
+      const install = String(json.install_id_str || json.install_id || '');
+      if (!device || !install || device === '0' || install === '0') throw new Error('注册返回 device_id=0');
+      const cookie = r.cookies.map((c) => String(c).split(';')[0]).filter(Boolean).join('; ');
+      REGISTERED_DEVICE = { device_id: device, install_id: install, device_token: String(json.device_token || ''), cookie, at: Date.now() };
+      await log('info', `[hg][register] 匿名设备注册成功 device_id=${device} install_id=${install} cookie=${cookie.slice(0, 60)}`);
+      return REGISTERED_DEVICE;
+    } catch (e) {
+      await log('warn', `[hg][register] 设备注册失败: ${e.message || e}（回退内置设备）`);
+      return null;
+    } finally {
+      REGISTER_INFLIGHT = null;
+    }
+  })();
+  return REGISTER_INFLIGHT;
+}
+
 function getDevice() {
+  // 优先用匿名注册得到的设备身份（红果内容/播放接口按注册设备放行）；未注册成功则用内置兜底
+  const reg = REGISTERED_DEVICE;
+  const fallbackIid = String(process.env.DUANJU_INSTALL_ID || DEFAULT_DEVICE.iid);
   return {
-    device_id: String(process.env.DUANJU_DEVICE_ID || DEFAULT_DEVICE.device_id),
-    iid: String(process.env.DUANJU_INSTALL_ID || DEFAULT_DEVICE.iid),
+    device_id: String(reg && reg.device_id || process.env.DUANJU_DEVICE_ID || DEFAULT_DEVICE.device_id),
+    iid: String(reg && reg.install_id || process.env.DUANJU_INSTALL_ID || DEFAULT_DEVICE.iid),
     cdid: String(process.env.DUANJU_CDID || DEFAULT_DEVICE.cdid),
-    cookie: sanitizeCookie(process.env.DUANJU_COOKIE || DEFAULT_DEVICE.cookie, process.env.DUANJU_INSTALL_ID || DEFAULT_DEVICE.iid),
+    cookie: reg && reg.cookie
+      ? sanitizeCookie(reg.cookie, reg.install_id)
+      : sanitizeCookie(process.env.DUANJU_COOKIE || DEFAULT_DEVICE.cookie, fallbackIid),
+    registered: !!(reg && reg.device_id),
   };
 }
 
@@ -936,6 +1061,26 @@ function playbackRequest(payload, device, apiBase = VIDEO_API) {
   if (device.cookie) headers.Cookie = device.cookie;
   return { url: signed.url, body, headers, v5: true, ticketOffset: signed.offset };
 }
+/** 官方现行 video_tab GET 接口（2026-11 播放恢复路径）：签名 GET，参数在 query，返回 data.video_model_data */
+function videoTabRequest(videoId, device) {
+  const base = 'https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/video_tab/multi_video_model/v1/';
+  const values = Object.assign({}, PLAYBACK_DEVICE_74332, {
+    device_id: device.device_id, iid: device.iid, cdid: device.cdid,
+    video_id: String(videoId), video_id_type: '0', device_level: '1',
+    need_all_video_definition: '1', need_mp4_align: '0', use_os_player: '0',
+    video_platform: '1024', source: '0', from_video_id: '',
+  });
+  const signed = signPlaybackV5(base, values, null, Date.now());  // body=null → GET
+  const headers = {
+    'User-Agent': PLAYBACK_UA,
+    Accept: 'application/json; charset=utf-8,application/x-protobuf',
+    'sdk-version': '2', 'passport-sdk-version': '5051452', 'x-xs-from-web': '0', 'x-ss-dp': '8662',
+    ...signed.headers,
+  };
+  if (device.cookie) headers.Cookie = device.cookie;
+  return { url: signed.url, headers };
+}
+
 function shortplayRequest(vid, device, apiBase = SHORTPLAY_API) {
   const khronos = Math.floor(Date.now() / 1000);
   const query = pythonUrlEncode({
@@ -2119,6 +2264,10 @@ async function videoModel(videoId, config = {}) {
     return hit.model;
   }
   if (hit) modelCache.delete(cacheKey);
+  // 确保匿名设备已注册（服务端按注册设备放行；失败会回退内置设备，不影响主流程）
+  if (!REGISTERED_DEVICE && !process.env.DUANJU_DEVICE_ID) {
+    await registerPlaybackDevice(false);
+  }
   const device = getDevice();
   const payload = JSON.stringify({
     dr_scene: 'player',
@@ -2186,6 +2335,27 @@ async function videoModel(videoId, config = {}) {
         }
       } catch (_) {}
     }
+  }
+  // 官方 0.16.10 恢复路径：所有签名 POST 空体时，改走 GET video_tab（用注册身份）
+  try {
+    const vt = videoTabRequest(videoId, device);
+    const response = await httpRequest(vt.url, {
+      method: 'GET', headers: vt.headers, timeout: 20000,
+      agent: APP_HTTPS_AGENT,
+    });
+    const root = objectOf(responsePayload(response));
+    const data = root.data && typeof root.data === 'object' ? root.data : root;
+    const rows = data.video_model_data || data;
+    const entry = rows[videoId] || Object.values(rows).find(v => v && typeof v === 'object' && !Array.isArray(v)) || rows;
+    let model = entry?.video_model ?? data.video_model ?? entry;
+    if (typeof model === 'string') model = parseJSON(model, {});
+    if (model && typeof model === 'object' && videoList(model)) {
+      await log('info', `[hg][model] vid=${videoId} video_tab GET 命中（注册设备=${device.registered || false}）`);
+      modelCache.set(cacheKey, { model, expires: Date.now() + MODEL_CACHE_TTL });
+      return model;
+    }
+  } catch (e) {
+    await log('warn', `[hg][model] vid=${videoId} video_tab fallback 失败: ${e.message || e}`);
   }
   await log('error', `[hg][model] vid=${videoId} 播放模型为空: ${lastReason}`);
   throw new Error(`红果 video_model 为空（${lastReason}）`);
