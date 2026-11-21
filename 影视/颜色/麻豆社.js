@@ -1,5 +1,5 @@
 // @name 🔞麻豆社
-// @version 1.1.3
+// @version 1.1.0
 // @author omnibox-spider
 // @description 麻豆社（madou.club）OmniBox 源：WordPress/Mirages 主题首页·分类·搜索·详情；详情解析 dash.madou.club/share/<id> iframe，实时取 share 页 JWT 后拼 /videos/<id>/index.m3u8，parse=0 直链播放；内置 stdout 消毒。
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/麻豆社.js
