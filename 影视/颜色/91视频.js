@@ -1,7 +1,7 @@
 // @name 91视频
 // @author 宝宝巴士
 // @description 91视频(2707.zsqwupvt.cc) 采集源：官网同款二级菜单（5 分组 30 子项）；首页/分类/详情/播放；封面 qnlycc AES 解密内联；播放走 POST /videos/{id}/playback 取签名 m3u8 正片（webm 是广告）；多域名轮换
-// @version 1.0.3
+// @version 1.0.4
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91视频.js
 // @dependencies axios,cheerio,crypto
 /**
@@ -22,6 +22,37 @@ const cheerio = require('cheerio');
 const crypto = require('crypto');
 const OmniBox = require('omnibox_sdk');
 const runner = require('spider_runner');
+
+// OmniBox 宿主用 stdout 传 JSON 响应；部分版本 omnibox_sdk.log 会把日志字符串
+// 写进同一 stdout，Go 侧解析 JSON 失败 → 网页端播放加载不出来。
+// 这里在模块加载最早期做 stdout 消毒：日志/非 JSON 字符串转 stderr，JSON 响应放行。
+const _origStdoutWrite = process.stdout.write.bind(process.stdout);
+const _origStderrWrite = process.stderr.write.bind(process.stderr);
+function _safeStderr(chunk, encoding, cb) {
+  try { return _origStderrWrite(chunk, encoding, cb); } catch (_) { return true; }
+}
+(function installStdoutGuard() {
+  if (process.stdout.__spxGuard || process.stdout.__omniStdoutGuard) return;
+  process.stdout.__spxGuard = true;
+  const state = { inJson: false, pending: "" };
+  const parseOk = (text) => { try { JSON.parse(text); return true; } catch (_) { return false; } };
+  const jsonStart = (text) => /^\{/.test(text) || /^\[\s*(?:\{|\[|"|-?\d|true|false|null|\])/.test(text);
+  process.stdout.write = function (chunk, encoding, cb) {
+    const text = String(chunk == null ? "" : chunk);
+    if (state.inJson) {
+      state.pending += text;
+      if (parseOk(state.pending.trim())) { state.pending = ""; state.inJson = false; }
+      return _origStdoutWrite(chunk, encoding, cb);
+    }
+    const trimmed = text.trim();
+    if (!trimmed) return _origStdoutWrite(chunk, encoding, cb);
+    let complete = false;
+    try { JSON.parse(trimmed); complete = true; } catch (_) {}
+    if (complete) return _origStdoutWrite(chunk, encoding, cb);
+    if (jsonStart(trimmed)) { state.inJson = true; state.pending = text; return _origStdoutWrite(chunk, encoding, cb); }
+    return _safeStderr(chunk, encoding, cb);
+  };
+})();
 
 const PREFIX = '[91sp]';
 const UA = String(process.env.SPX_UA || '').trim()
@@ -92,7 +123,7 @@ function pickSubCategory(p) {
 module.exports = { home, category, detail, search, play };
 runner.run(module.exports);
 
-function log(level, msg) { try { Promise.resolve(OmniBox.log(level, `${PREFIX} ${msg}`)).catch(() => {}); } catch (_) {} }
+function log(level, msg) { try { _origStderrWrite(`[${level}] ${PREFIX} ${msg}\n`); } catch (_) {} }
 function text(v) {
   if (v == null) return '';
   if (typeof v === 'string') return v.trim();
