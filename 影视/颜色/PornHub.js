@@ -1,7 +1,7 @@
 // @name PornHub
-// @version 1.0.1
+// @version 1.0.2
 // @author omnibox-spider
-// @description cn.pornhub.com 采集源：首页推荐 + 17 个分类（巨乳/巨屌/内射/女同等）+ 排序 + 搜索分页；列表取 pcVideoListItem 卡片（带 viewkey、封面、时长、观看数、评分），详情页从 flashvars_{id} 解析 mediaDefinitions 的 HLS 直链（仅保留 1080P/720P，1080P 优先）
+// @description cn.pornhub.com 采集源：首页推荐 + 18 个分类（巨乳/巨屌/内射/女同等）+ 排序 + 搜索分页；列表取 pcVideoListItem 卡片（带 viewkey、封面、时长、观看数、评分），详情页从 flashvars_{id} 解析 mediaDefinitions 的 HLS 直链（仅保留 1080P/720P，1080P 优先）
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/PornHub.js
 // @dependencies cheerio
 
@@ -10,7 +10,7 @@
  * 1) 主域 https://cn.pornhub.com（pornhub.com 的简体中文镜像）。常规 UA + Referer 即可，无 CF 盾、无 JS cookie 挑战。
  * 2) 路由：
  *      - 首页 /
- *      - 分类 /video?c=<分类ID>（见 CLASS_LIST，17 个；c=111 日本人 / c=8 巨乳 / c=7 巨屌 等）
+ *      - 分类 /video?c=<分类ID>（见 CLASS_LIST，17 个；c=1 亚洲 / c=111 日本人 / c=8 巨乳 / c=7 巨屌 等）
  *      - 排序 /video?o=ht（最热）/o=mv（最多观看）/o=tr（最多收藏）/o=cm（最近）/o=lg（最长）
  *      - 分类+排序可叠加：/video?c=8&o=mv
  *      - 分页 /video?c=8&page=2（翻页靠 pagination3 区块的 ?page=N，末页没有下一页链接）
@@ -86,11 +86,12 @@ function normalizeHost(value) {
 
 const HOST = normalizeHost(process.env.SITE_HOST || "https://cn.pornhub.com");
 const SITE_COOKIE = String(process.env.SITE_COOKIE || "").trim();
-// 视/听首页分类：简体中文镜像实测的 17 个分类（id 来自 /video?c=NNN，名称来自 a 标签 alt）
+// 视/听首页分类：简体中文镜像实测的 18 个分类（id 来自 /video?c=NNN；c=1 亚洲 / c=111 日本人）
 const CLASS_LIST = [
   { type_id: "ht", type_name: "最热门" },
   { type_id: "mv", type_name: "最多观看" },
   { type_id: "tr", type_name: "最多收藏" },
+  { type_id: "1", type_name: "亚洲" },
   { type_id: "111", type_name: "日本人" },
   { type_id: "8", type_name: "巨乳" },
   { type_id: "7", type_name: "巨屌" },
