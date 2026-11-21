@@ -1,7 +1,7 @@
 // @name 爱交网
 // @author 宝宝巴士
 // @description 爱交网(aijiaox.com)：首页/分类/搜索/详情/播放；只用主域+内置域名池轮换(不再从发布页拉取)+软隔离；播放走 POST /videos/{数字ID}/playback 取签名 m3u8；分类名取链接文本(非父分组)，qnlycc.cn 图床(new2 .webp / pic .jpeg)封面 AES 解密内联(JPEG/PNG/WebP)
-// @version 1.0.4
+// @version 1.0.5
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/爱交网.js
 // @dependencies axios,cheerio,crypto
 /**
@@ -298,16 +298,18 @@ function parseCards(html) {
     const href = $el.find('a.video-card-link').first().attr('href') || '';
     const slug = (href.match(/\/watch\/([A-Za-z0-9_-]+)\//) || [])[1] || '';
     if (!slug) return;
-    // 优先取真正的封面 img（排除 alt 含「横幅」或 hc237 占位图）
+    // 取真正的封面 img（排除 alt 含「横幅」或 loading 占位图）
     let img = $el.find('img').first();
     $el.find('img').each((_, im) => {
       const alt = String($(im).attr('alt') || '');
-      const src = String($(im).attr('x-image-loader-url') || '');
-      if (/横幅|banner|loading/i.test(alt) || /hc237|loading\.gif/i.test(src)) return;
+      const src = String($(im).attr('x-image-loader-url') || $(im).attr('data-fallback-src') || '');
+      if (/横幅|banner|loading/i.test(alt) || /loading\.gif|placeholder/i.test(src)) return;
       img = $(im);
       return false;
     });
-    const pic = img.attr('x-image-loader-url') || img.attr('data-fallback-src') || img.attr('data-original') || img.attr('src') || '';
+    // 封面优先级：data-fallback-src(pic.qnlycc.cn 原图，清晰) > x-image-loader-url(new2 .webp 缩略图，糊)
+    // 实测同一张封面：webp 版解密后 6KB，原图版 14.8KB（约 2.5 倍）
+    const pic = img.attr('data-fallback-src') || img.attr('x-image-loader-url') || img.attr('data-original') || img.attr('src') || '';
     const title = stripHtml($el.find('h3.video-card-title').first().attr('title') || img.attr('alt') || $el.find('h3.video-card-title').first().text());
     const remarks = stripHtml($el.find('.video-card-time').first().text());
     if (!title) return;
