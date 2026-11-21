@@ -1,7 +1,7 @@
 // @name PornHub
-// @version 1.0.2
+// @version 1.0.3
 // @author omnibox-spider
-// @description cn.pornhub.com 采集源：首页推荐 + 18 个分类（巨乳/巨屌/内射/女同等）+ 排序 + 搜索分页；列表取 pcVideoListItem 卡片（带 viewkey、封面、时长、观看数、评分），详情页从 flashvars_{id} 解析 mediaDefinitions 的 HLS 直链（仅保留 1080P/720P，1080P 优先）
+// @description cn.pornhub.com 采集源：首页推荐 + 19 个分类（巨乳/巨屌/内射/女同等）+ 排序 + 搜索分页；列表取 pcVideoListItem 卡片（带 viewkey、封面、时长、观看数、评分），详情页从 flashvars_{id} 解析 mediaDefinitions 的 HLS 直链（仅保留 1080P/720P，1080P 优先）
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/PornHub.js
 // @dependencies cheerio
 
@@ -86,8 +86,10 @@ function normalizeHost(value) {
 
 const HOST = normalizeHost(process.env.SITE_HOST || "https://cn.pornhub.com");
 const SITE_COOKIE = String(process.env.SITE_COOKIE || "").trim();
-// 视/听首页分类：简体中文镜像实测的 18 个分类（id 来自 /video?c=NNN；c=1 亚洲 / c=111 日本人）
+// 视/听首页分类：简体中文镜像实测的 19 个分类（id 来自 /video?c=NNN；c=1 亚洲 / c=111 日本人）
 const CLASS_LIST = [
+  // 搜索型分类：type_id 以 "search:" 开头 → 走 /video/search?search=关键词
+  { type_id: "search:国产剧情", type_name: "国产剧情" },
   { type_id: "ht", type_name: "最热门" },
   { type_id: "mv", type_name: "最多观看" },
   { type_id: "tr", type_name: "最多收藏" },
@@ -349,12 +351,21 @@ async function home(params, context) {
 }
 
 function buildCategoryUrl(categoryId, page, sort) {
+  const cid = String(categoryId || "");
+  // search:关键词 → 走搜索页（首页栏的「国产剧情」等自定义入口）
+  if (cid.startsWith("search:")) {
+    const kw = cid.slice(7);
+    const su = new URL(`${HOST}/video/search`);
+    su.searchParams.set("search", kw);
+    if (Number(page) > 1) su.searchParams.set("page", String(page));
+    return su.toString();
+  }
   const u = new URL(`${HOST}/video`);
   // 纯数字 = 分类 id；其它视为排序 o=
-  if (/^\d+$/.test(String(categoryId))) {
-    u.searchParams.set("c", String(categoryId));
-  } else if (categoryId) {
-    u.searchParams.set("o", String(categoryId));
+  if (/^\d+$/.test(cid)) {
+    u.searchParams.set("c", cid);
+  } else if (cid) {
+    u.searchParams.set("o", cid);
   }
   if (sort && SORT_WHITELIST.has(sort)) u.searchParams.set("o", sort);
   if (Number(page) > 1) u.searchParams.set("page", String(page));
