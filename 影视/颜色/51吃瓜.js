@@ -1,6 +1,6 @@
 /**
  * @name 吃瓜
- * @version 1.5.0
+ * @version 1.6.0
  * @description 吃瓜 (chigua.com / 51cg)：【新增】接入官方入口页 cg51.com（解析 main/latest/backup 三类入口，3 个内容站全部同构可用），支持多发布页按序兜底；域名池改为优胜劣汰（成功置顶持久化、连续失败移出池）；【新增】从官方发布页 https://www.dafxtlve.cc/ 自动获取最新地址（默认每 6 小时刷新，全挂时立即强制刷新，死域名自动清理，防失联）；修复封面（CDN 图片为 AES-128-CBC 加密的密文，脚本内解密还原为 data:image；详情页改取 itemprop="image" 主图）、内置多域名容灾与动态跳转解析、自适应 Node.js http/https 回退机制、Mirages文章列表解析与 DPlayer m3u8 双码率提取
  * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/51吃瓜.js
  * @dependencies crypto
@@ -393,18 +393,98 @@ function noteHostFail(base) {
 }
 /* ==================== 发布页自动获取结束 ==================== */
 
+/**
+ * 二级分类（与官网 sidebar 菜单一致，2026-11-22 实测 51cg1.com）
+ * 官网菜单是 6 个分组，每组下挂若干 /category/{slug}/ 子分类。
+ * class 只展示 6 个分组；子分类通过 filters.sub 暴露；category() 按 sub 走真实 slug。
+ */
+const CATEGORY_GROUPS = [
+  {
+    id: 'group:remen', name: '吃瓜热门', subs: [
+      { slug: 'mrds', name: '每日大赛' },
+      { slug: 'whhj', name: '网黄合集' },
+      { slug: 'mrdg', name: '吃瓜榜单' },
+      { slug: 'qghj', name: '瓜友点播' },
+      { slug: 'rdsj', name: '热门大瓜' },
+      { slug: 'bkdg', name: '必看大瓜' },
+    ],
+  },
+  {
+    id: 'group:yule', name: '娱乐天地', subs: [
+      { slug: 'ysyl', name: '成人视频' },
+      { slug: 'lldd', name: '伦理道德' },
+      { slug: 'gcjq', name: '国产视频' },
+      { slug: 'thjx', name: '探花精选' },
+    ],
+  },
+  {
+    id: 'group:heiniao', name: '黑料事件', subs: [
+      { slug: 'xsxy', name: '学生校园' },
+      { slug: 'whhl', name: '网红黑料' },
+      { slug: 'snsn', name: '骚男骚女' },
+      { slug: 'whmx', name: '明星爆料' },
+      { slug: 'hwcg', name: '海外吃瓜' },
+      { slug: 'rrcg', name: '人人吃瓜' },
+      { slug: 'ldcg', name: '领导干部' },
+      { slug: 'jpll', name: '软萌甜妹' },
+    ],
+  },
+  {
+    id: 'group:baike', name: '吃瓜百科', subs: [
+      { slug: 'sjb', name: '竞技吃瓜' },
+      { slug: 'qubk', name: '吃瓜看戏' },
+      { slug: 'dcbq', name: '擦边撩骚' },
+      { slug: 'zzs', name: '性爱技巧' },
+      { slug: 'cgxw', name: '吃瓜新闻' },
+    ],
+  },
+  {
+    id: 'group:yuanchuang', name: '51原创', subs: [
+      { slug: '51djc', name: '51原创短剧' },
+      { slug: 'yczq', name: '原创博主' },
+    ],
+  },
+  {
+    id: 'group:huodong', name: '官方活动', subs: [
+      { slug: '51hd', name: '往期活动' },
+    ],
+  },
+];
+
+/** class 用：首页展示的分组（首位补一个「全部最新」入口） */
 const DEFAULT_CLASSES = [
   { type_id: 'all', type_name: '全部最新' },
-  { type_id: '51djc', type_name: '51大瓜' },
-  { type_id: 'whhl', type_name: '网红黑料' },
-  { type_id: 'mrdg', type_name: '明星大瓜' },
-  { type_id: 'rdsj', type_name: '热点事件' },
-  { type_id: 'hwcg', type_name: '海外吃瓜' },
-  { type_id: 'cgxw', type_name: '吃瓜新闻' },
-  { type_id: 'gcjq', type_name: '国产剧场' },
-  { type_id: 'snsn', type_name: '少女私密' },
-  { type_id: 'jpll', type_name: '极品猎奇' },
+  ...CATEGORY_GROUPS.map((g) => ({ type_id: g.id, type_name: g.name })),
 ];
+
+/** 生成 home() 的 filters：每个分组一个 sub 下拉 */
+function buildClassFilters() {
+  const filters = {};
+  for (const g of CATEGORY_GROUPS) {
+    filters[g.id] = [{
+      key: 'sub',
+      name: '子分类',
+      init: '',
+      value: [{ name: '全部', value: '' }, ...g.subs.map((x) => ({ name: x.name, value: x.slug }))],
+    }];
+  }
+  return filters;
+}
+
+/** 从 params 各兼容字段取子分类 slug */
+function pickSubCategory(params) {
+  const p = params || {};
+  for (const key of ['filters', 'extend', 'ext', 'filter']) {
+    let v = p[key];
+    if (!v) continue;
+    if (typeof v === 'string') { try { v = JSON.parse(v); } catch (_) { v = null; } }
+    if (!v || typeof v !== 'object') continue;
+    const sub = v.sub ?? v['子分类'];
+    const slug = String(Array.isArray(sub) ? (sub[0] || '') : (sub || '')).trim();
+    if (/^[a-z0-9_-]+$/i.test(slug)) return slug;
+  }
+  return '';
+}
 
 /**
  * 原生 Node.js 请求，带超时、重定向与自动解压支持
@@ -809,27 +889,20 @@ async function home(params, context) {
     const coverOk = list.filter((x) => x.vod_pic && x.vod_pic.startsWith('data:')).length;
     await OmniBox.log('info', `[home] got ${list.length} 条，封面已解密 ${coverOk}/${list.length}`);
 
+    // class 固定为官网 sidebar 的 6 个分组（与官网二级菜单一致），子分类走 filters
     const classes = [...DEFAULT_CLASSES];
-    const catRegex = /href=["'](?:https?:\/\/[^"']*)?\/category\/([a-zA-Z0-9_\-]+)\/?["'][^>]*>([^<]+)<\/a>/gi;
-    let catMatch;
-    const catSeen = new Set(classes.map((c) => c.type_id));
-    while ((catMatch = catRegex.exec(html)) !== null) {
-      const type_id = catMatch[1];
-      const type_name = catMatch[2].trim();
-      if (type_id && type_name && !catSeen.has(type_id) && type_name.length <= 10 && !/[\r\n]/.test(type_name)) {
-        catSeen.add(type_id);
-        classes.push({ type_id, type_name });
-      }
-    }
+    const filters = buildClassFilters();
 
     return {
       class: classes,
+      filters,
       list,
     };
   } catch (err) {
     await OmniBox.log('error', `[home] err: ${err.message}`);
     return {
       class: DEFAULT_CLASSES,
+      filters: buildClassFilters(),
       list: [],
     };
   }
@@ -841,13 +914,22 @@ async function home(params, context) {
 async function category(params, context) {
   try {
     const { categoryId = 'all', page = 1 } = params || {};
-    await OmniBox.log('info', `[category] categoryId=${categoryId}, page=${page}`);
+    // 二级分类：选中 sub 用真实 slug；选了大类没选 sub 时用该组第一个子类
+    let slug = String(categoryId || '');
+    const sub = pickSubCategory(params);
+    if (sub) {
+      slug = sub;
+    } else if (/^group:/i.test(slug)) {
+      const g = CATEGORY_GROUPS.find((x) => x.id === slug);
+      slug = (g && g.subs[0] && g.subs[0].slug) || '';
+    }
+    await OmniBox.log('info', `[category] categoryId=${categoryId}${sub ? ` sub=${sub}` : ''} slug=${slug || 'all'}, page=${page}`);
 
     let path = '/';
-    if (categoryId && categoryId !== 'all') {
-      path = `/category/${categoryId}/`;
+    if (slug && slug !== 'all') {
+      path = `/category/${slug}/`;
       if (page > 1) {
-        path = `/category/${categoryId}/page/${page}/`;
+        path = `/category/${slug}/page/${page}/`;
       }
     } else {
       if (page > 1) {
