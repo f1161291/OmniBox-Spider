@@ -1,7 +1,7 @@
 // @name 91视频
 // @author 宝宝巴士
-// @description 91视频(2707.zsqwupvt.cc) 采集源：官网同款二级菜单（5 分组 30 子项）；首页/分类/详情/播放；封面 qnlycc AES 解密内联；播放直链 webm/m3u8；多域名轮换
-// @version 1.0.1
+// @description 91视频(2707.zsqwupvt.cc) 采集源：官网同款二级菜单（5 分组 30 子项）；首页/分类/详情/播放；封面 qnlycc AES 解密内联；播放走 POST /videos/{id}/playback 取签名 m3u8 正片（webm 是广告）；多域名轮换
+// @version 1.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91视频.js
 // @dependencies axios,cheerio,crypto
 /**
@@ -248,11 +248,10 @@ async function detail(params) {
     const posterRaw = text($('#mse').attr('data-poster') || $('meta[property="og:image"]').attr('content') || '');
     const pic = await resolveCover(posterRaw);
     const tags = [...html.matchAll(/data-video_tag_name="([^"]+)"/g)].map((m) => m[1]).join(' ') || '';
-    // 播放直链：<video src="https://91spx.com/videos/webm/{id}.webm">
-    let playUrl = text($('video#player').attr('src') || $('video source').first().attr('src'));
-    if (!playUrl && /^\d+$/.test(id)) playUrl = `https://91spx.com/videos/webm/${id}.webm`;
+    // 播放：页面 <video src=webm> 是广告/预告；真实正片走 POST /videos/{id}/playback
+    // 这里只透传视频 ID，play() 里实时请求签名 m3u8（有时效，不能缓存到详情）
     const episodes = [];
-    if (playUrl) episodes.push({ name: '正片', playId: playUrl });
+    if (!isArticle && /^\d+$/.test(id)) episodes.push({ name: '正片', playId: `pb:${id}` });
     const sources = episodes.length ? [{ name: '默认线路', episodes }] : [];
     const playFrom = sources.map((s) => s.name).join('$$$');
     const playUrlField = sources.map((s) => s.episodes.map((e) => `${e.name}$${e.playId}`).join('#')).join('$$$');
@@ -275,12 +274,38 @@ async function play(params) {
   const playId = String(p.playId || p.url || '').trim();
   if (!playId) return { urls: [], flag: 'default', header: {}, parse: 1, danmaku: '' };
   try {
-    const url = /^https?:\/\//i.test(playId) ? playId : text((await detail({ videoId: playId })).list[0]?.vod_play_sources?.[0]?.episodes?.[0]?.playId);
+    let url = '';
+    const headers = { 'User-Agent': UA, Referer: `${HOSTS[0]}/`, Origin: HOSTS[0] };
+    if (playId.startsWith('pb:')) {
+      // 真实正片：POST /videos/{id}/playback → streams.main（签名 HLS）
+      const vid = playId.slice(3);
+      let lastErr = null;
+      for (const host of HOSTS) {
+        try {
+          const res = await axios.post(`${host}/videos/${vid}/playback`, {}, {
+            timeout: TIMEOUT, validateStatus: () => true,
+            headers: { ...headers, 'Content-Type': 'application/json', Accept: 'application/json' },
+          });
+          if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+          const json = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+          const stream = json && json.data && json.data.streams;
+          const m3u8 = stream && (stream.main || stream.hevc || stream.preview);
+          if (m3u8) { url = m3u8; headers['x-cdn-auth'] = '4aae16c3b20ec822f87518504478bb35'; headers['x-cdn-app'] = '017'; break; }
+          throw new Error(`playback code=${json && json.code}`);
+        } catch (e) { lastErr = e; }
+      }
+      if (!url) throw lastErr || new Error('playback 未返回流');
+    } else if (/^https?:\/\//i.test(playId)) {
+      url = playId;
+    } else {
+      const d = await detail({ videoId: playId });
+      const pid = d.list[0] && d.list[0].vod_play_sources[0] && d.list[0].vod_play_sources[0].episodes[0] && d.list[0].vod_play_sources[0].episodes[0].playId;
+      if (pid) return play({ playId: pid });
+    }
     if (!url) throw new Error('无播放地址');
     log('info', `play url=${url.slice(0, 120)}`);
     return {
-      urls: [{ name: '正片', url }], flag: 'default',
-      header: { 'User-Agent': UA, Referer: `${HOSTS[0]}/`, Origin: HOSTS[0] },
+      urls: [{ name: '正片', url }], flag: 'default', header: headers,
       parse: 0, danmaku: '',
     };
   } catch (e) {
