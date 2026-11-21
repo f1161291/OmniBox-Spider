@@ -1,5 +1,5 @@
 // @name 🔞麻豆社
-// @version 1.1.2
+// @version 1.1.3
 // @author omnibox-spider
 // @description 麻豆社（madou.club）OmniBox 源：WordPress/Mirages 主题首页·分类·搜索·详情；详情解析 dash.madou.club/share/<id> iframe，实时取 share 页 JWT 后拼 /videos/<id>/index.m3u8，parse=0 直链播放；内置 stdout 消毒。
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/麻豆社.js
@@ -261,57 +261,6 @@ async function getHtml(url, ttl = CACHE_TTL) {
 
 /* ---------------- 列表解析 ---------------- */
 
-/**
- * 站点卡片图是 -240x180 缩略图（糊）；去掉尺寸后缀取原图。
- * WordPress/Mirages 命名：xxx-240x180.jpg → xxx.jpg
- */
-function upgradeCover(url) {
-  const u = String(url || '').trim();
-  if (!u) return u;
-  // 只处理 /covers/ 路径下的 -WxH 后缀（避免误伤其它图）
-  return u.replace(/(\/covers\/[^?#]*?)-\d{2,4}x\d{2,4}(\.(?:jpg|jpeg|png|webp))/i, '$1$2');
-}
-
-/** 原图探测结果缓存：url -> 'ok' | 'fallback' */
-const _coverProbeCache = new Map();
-/**
- * 尝试原图：探测原图 URL 是否真的返回图片；否则回退到传入的缩略图 URL。
- * @param {string} thumbUrl 站点给的（可能是 -240x180 缩略图）
- */
-async function resolveCoverBest(thumbUrl) {
-  const thumb = String(thumbUrl || '').trim();
-  if (!thumb) return '';
-  const original = upgradeCover(thumb);
-  if (original === thumb) return thumb; // 没有尺寸后缀，无需探测
-  if (_coverProbeCache.has(original)) {
-    return _coverProbeCache.get(original) === 'ok' ? original : thumb;
-  }
-  try {
-    const res = await nativeHttpGet(original, { timeout: 6000, maxBytes: 2048, method: 'GET' });
-    const ct = String((res.headers && (res.headers['content-type'] || res.headers['Content-Type'])) || '');
-    const ok = res.statusCode === 200 && /^image\//i.test(ct);
-    _coverProbeCache.set(original, ok ? 'ok' : 'fallback');
-    return ok ? original : thumb;
-  } catch (_) {
-    _coverProbeCache.set(original, 'fallback');
-    return thumb;
-  }
-}
-
-/** 批量把列表封面的缩略图升级为原图（探测失败自动回退），并发 4 */
-async function upgradeCoverList(list) {
-  if (!Array.isArray(list)) return list;
-  let idx = 0;
-  const workers = Array.from({ length: Math.min(4, list.length) }, async () => {
-    while (idx < list.length) {
-      const i = idx++;
-      if (list[i] && list[i].vod_pic) list[i].vod_pic = await resolveCoverBest(list[i].vod_pic);
-    }
-  });
-  await Promise.all(workers);
-  return list;
-}
-
 function pickImage(card) {
   const cands = [];
   const re = /(?:data-src|data-original|data-lazy-src|src)\s*=\s*["']([^"']+)["']/gi;
@@ -523,7 +472,7 @@ async function home(params, context) {
   try {
     logI(`[home] from=${context?.from || "web"} 入口`);
     const html = await getHtml(SITE + "/", CACHE_TTL);
-    const list = await upgradeCoverList(parseCards(html, 24));
+    const list = parseCards(html, 24);
     // 官网同款二级菜单（硬编码，避免 451/跳转导致动态解析失败）
     const classList = [...TOP_CATEGORIES];
     const filters = buildClassFilters();
@@ -549,7 +498,7 @@ async function category(params, context) {
     const url = buildCategoryPageUrl(typeId, page);
     logI(`[category] typeId=${typeId} page=${page} url=${url}`);
     const html = await getHtml(url, CACHE_TTL);
-    const list = await upgradeCoverList(parseCards(html, 100));
+    const list = parseCards(html, 100);
     const pagecount = parsePageCount(html, page);
     logI(`[category] list=${list.length} pagecount=${pagecount}`);
     return { page, pagecount, total: list.length ? (page - 1) * 20 + list.length : 0, limit: 20, list };
@@ -575,8 +524,7 @@ async function detail(params, context) {
     const poster = shareId ? `${DASH}/videos/${shareId}/poster.jpg` : "";
     const ogPic = str((html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) || [])[1] || "");
     const coverPic = str((html.match(/<img[^>]+(?:data-src|src)=["']([^"']*\/covers\/[^"']+)["']/i) || [])[1] || "");
-    // 封面优先用站点 og:image / covers 原图（去 -WxH 缩略后缀）；dash poster 只是兜底（偏糊/偏透明）
-    const pic = await resolveCoverBest(ogPic ? absUrl(ogPic) : (coverPic ? absUrl(coverPic) : (poster || "")));
+    const pic = poster || (ogPic ? absUrl(ogPic) : "") || (coverPic ? absUrl(coverPic) : "");
     const catM = html.match(/<span[^>]*class=["'][^"']*item-3[^"']*["'][^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i);
     const tags = [...html.matchAll(/<a[^>]+href=["'][^"']*\/tag\/[^"']+["'][^>]*>([^<]+)<\/a>/gi)].map((m) => cleanText(m[1])).filter(Boolean);
     const descM = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i);
@@ -620,7 +568,7 @@ async function search(params, context) {
     if (page > 1) url = new URL(`/page/${page}?s=${encodeURIComponent(keyword)}`, SITE).href;
     logI(`[search] keyword=${keyword} page=${page} url=${url}`);
     const html = await getHtml(url, CACHE_TTL);
-    const list = await upgradeCoverList(parseCards(html, 100));
+    const list = parseCards(html, 100);
     const pagecount = parsePageCount(html, page);
     logI(`[search] keyword=${keyword} list=${list.length} pagecount=${pagecount}`);
     return { page, pagecount, total: list.length ? (page - 1) * 20 + list.length : 0, limit: 20, list };
