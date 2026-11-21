@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 # @name 海角社区
-# @version 1.4.0
+# @version 1.4.1
 # @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角论坛.py
-# 地址发布页：https://hjsq2.co/ + https://gitlab.com/hjsqn-com1/hjsqn-com
-#   启动后首次请求即抓发布页解析最新域名，同构校验（首页含 /archives/{id}）后并入候选池；
-#   不再定时刷新：只有所有域名都访问失败时才去发布页拉取新域名；候选域名分批探测（每批 10 个）。
+# 域名策略：只用主域 + 内置域名池轮换，不再从发布页拉取域名；成功置顶、连续失败软隔离。
 
 import asyncio
 import base64
@@ -32,40 +30,16 @@ BACKUP_HOSTS = [
 ]
 
 # ---------------------------------------------------------------------------
-# 地址发布页（防失联）
-#   https://hjsq2.co/  title「海角网 海角乱伦 海角社区 千万原创资源免费看」
-#   页面给出当前可用入口（hjsqn.com / hjsqw.com / minuo.cc），
-#   官方地址仓库：https://gitlab.com/hjsqn-com1/hjsqn-com
-#   启动后首次请求即抓发布页解析域名，同构校验（首页含 /archives/{id}）后并入候选池。
+# 域名池持久化（成功置顶 / 失败软隔离），与发布页无关：
+#   active / hosts / dead 落 SDK 缓存，跨进程复用，避免死域名拖慢每轮请求。
 # ---------------------------------------------------------------------------
-PUBLISH_PAGES = [
-    item.strip()
-    for item in str(
-        os.environ.get("HJSQN_PUBLISH_PAGES")
-        or "https://hjsq2.co/,https://gitlab.com/hjsqn-com1/hjsqn-com"
-    ).split(",")
-    if item.strip()
-]
-
-# 发布页域名发现（被动触发）：不做定时刷新。
-# 只有所有已知域名都访问失败时，才去发布页拉取新域名；候选域名分批探测，
-# 每批 10 个，批间隔 0.2 秒，避免一次打太多请求。
 _HOSTS_CACHE_KEY = "haijiao:py:hosts:v1"
-_PROBE_BATCH_SIZE = max(1, min(20, int(float(os.environ.get("HJSQN_PROBE_BATCH") or 10))))
-_PROBE_BATCH_DELAY = 0.2  # 秒
 # 单次请求硬超时（秒）：宿主 OmniBox.request 在网络卡住时会挂很久且无视自身超时，
-# 这里用 asyncio.wait_for 兜底，保证能轮到域名切换 / 发布页拉取。
+# 这里用 asyncio.wait_for 兜底，保证能轮到域名切换。
 _REQUEST_HARD_TIMEOUT = max(3.0, float(os.environ.get("HJSQN_REQUEST_TIMEOUT") or 12))
-_DISCOVERED_HOSTS = []
-_HOSTS_REFRESH_TASK = None
 
-# 不当作站点主域的域名（第三方 / 图床 / 社交 / 统计）
-_HOST_BLOCKLIST = re.compile(
-    r"gitlab|github|discord|telegram|t\.me|x\.com|twitter|google|yandex"
-    r"|googletagmanager|cloudflare|minuo\.cc|dzuxta|eisees|bu5du|bdpuodp",
-    re.I,
-)
 
+# 成功域置顶 / 失败软隔离（不使用发布页，域名只来自主域 + BACKUP_HOSTS + HJSQN_HOSTS）
 _ACTIVE_HOST = ""
 # 已判定失效的域名（连续失败 2 次），下次启动不再优先尝试
 _DEAD_HOSTS = set()
@@ -487,150 +461,38 @@ def _content_image_urls(html_text, page_url):
     return result
 
 
-def _extract_hosts(text):
-    """从发布页 / 仓库页里抽取候选主域（排除第三方）"""
-    found = []
-    pattern = re.compile(r"https?://([a-z0-9][a-z0-9.\-]*\.[a-z]{2,})", re.I)
-    for match in pattern.finditer(str(text or "")):
-        host = match.group(1).lower()
-        if _HOST_BLOCKLIST.search(host):
-            continue
-        item = "https://" + host
-        if item not in found:
-            found.append(item)
-    return found
+_HOSTS_CACHE_RESTORED = False
 
 
-async def _probe_main_site(host):
-    """同构校验：首页能抓到 /archives/{id} 才算真站"""
+async def restore_hosts_cache():
+    """从 SDK 缓存恢复 active / dead（成功置顶、失败软隔离），不拉取任何发布页。"""
+    global _HOSTS_CACHE_RESTORED
+    if _HOSTS_CACHE_RESTORED:
+        return
+    _HOSTS_CACHE_RESTORED = True
     try:
-        res = await OmniBox.request(host + "/", {"method": "GET", "headers": HEADERS})
-        if not isinstance(res, dict) or res.get("statusCode") != 200:
-            return False
-        body = str(res.get("body") or "")
-        return len(body) > 5000 and bool(re.search(r"/archives/\d+", body))
-    except Exception:
-        return False
-
-
-async def _discover_hosts(force=False):
-    """
-    从发布页拉新域名（被动触发）：只有 force=True 才真正拉取。
-    定时刷新已取消；调用方仅在「所有已知域名都失败」时传 force=True。
-    候选域名每批 _PROBE_BATCH_SIZE 个探测，批间 sleep 避免一次打太多。
-    """
-    global _DISCOVERED_HOSTS, _HOSTS_REFRESH_TASK
-    if not force:
-        return 0
-    if _HOSTS_REFRESH_TASK is not None and not _HOSTS_REFRESH_TASK.done():
-        return 0
-
-    # 从 SDK 缓存恢复已知域名（跨进程复用）
-    if not _DISCOVERED_HOSTS:
-        try:
-            saved = await OmniBox.getCache(_HOSTS_CACHE_KEY)
-            if isinstance(saved, str):
-                try:
-                    saved = json.loads(saved)
-                except Exception:
-                    saved = None
-            if isinstance(saved, dict):
-                hosts = [h for h in (saved.get("hosts") or []) if isinstance(h, str)]
-                _DISCOVERED_HOSTS = hosts
-                # 恢复判死集合与上次成功域
-                for d in (saved.get("dead") or []):
-                    if isinstance(d, str):
-                        _DEAD_HOSTS.add(d.rstrip("/"))
-                act = str(saved.get("active") or "").strip().rstrip("/")
-                if act and act not in _DEAD_HOSTS:
-                    globals()["_ACTIVE_HOST"] = act
-        except Exception:
-            pass
-
-    async def _run():
-        global _DISCOVERED_HOSTS, _HOSTS_REFRESH_TASK
-        added = 0
-        try:
-            candidates = []
-            for page in PUBLISH_PAGES:
-                try:
-                    res = await OmniBox.request(page, {"method": "GET", "headers": HEADERS})
-                    body = str((res or {}).get("body") or "")
-                    if not body:
-                        continue
-                    found = _extract_hosts(body)
-                    await OmniBox.log(
-                        "info", "[hjsq][hosts] %s 解析到 %d 个候选" % (page, len(found))
-                    )
-                    for item in found:
-                        if item not in candidates:
-                            candidates.append(item)
-                except Exception as exc:
-                    await OmniBox.log(
-                        "warn", "[hjsq][hosts] 拉取失败 %s: %s" % (page, exc)
-                    )
-
-            new_ones = [h for h in candidates if h not in _site_hosts()]
-            if not new_ones:
-                await OmniBox.log("info", "[hjsq][hosts] 发布页无新域名，无需探测")
-                return 0
-
-            await OmniBox.log(
-                "info", "[hjsq][hosts] 待探测 %d 个新域名，每批 %d 个"
-                % (len(new_ones), _PROBE_BATCH_SIZE)
-            )
-            for i in range(0, len(new_ones), _PROBE_BATCH_SIZE):
-                batch = new_ones[i:i + _PROBE_BATCH_SIZE]
-                batch_no = i // _PROBE_BATCH_SIZE + 1
-                await OmniBox.log(
-                    "info", "[hjsq][hosts] 探测批次 %d: %d 个" % (batch_no, len(batch))
-                )
-                results = await asyncio.gather(
-                    *[_probe_main_site(h) for h in batch], return_exceptions=True
-                )
-                for host, ok in zip(batch, results):
-                    if ok is not True:
-                        continue
-                    if host in _DISCOVERED_HOSTS:
-                        continue
-                    _DISCOVERED_HOSTS.append(host)
-                    added += 1
-                    await OmniBox.log("info", "[hjsq][hosts] 发现可用主站 -> %s" % host)
-                if i + _PROBE_BATCH_SIZE < len(new_ones):
-                    await asyncio.sleep(_PROBE_BATCH_DELAY)
-
-            if added:
-                await OmniBox.log(
-                    "info", "[hjsq][hosts] 本次新增 %d 个，池共 %d 个"
-                    % (added, len(_site_hosts()))
-                )
+        saved = await OmniBox.getCache(_HOSTS_CACHE_KEY)
+        if isinstance(saved, str):
             try:
-                await OmniBox.setCache(
-                    _HOSTS_CACHE_KEY,
-                    {"at": time.time(), "hosts": list(_DISCOVERED_HOSTS)},
-                    30 * 24 * 3600,
-                )
+                saved = json.loads(saved)
             except Exception:
-                pass
-        except Exception as exc:
-            await OmniBox.log("warn", "[hjsq][hosts] 拉取异常: %s" % exc)
-        finally:
-            _HOSTS_REFRESH_TASK = None
-        return added
-
-    _HOSTS_REFRESH_TASK = asyncio.ensure_future(_run())
-    return 0
-
+                saved = None
+        if isinstance(saved, dict):
+            for d in (saved.get("dead") or []):
+                if isinstance(d, str):
+                    _DEAD_HOSTS.add(d.rstrip("/"))
+            act = str(saved.get("active") or "").strip().rstrip("/")
+            if act and act not in _DEAD_HOSTS:
+                globals()["_ACTIVE_HOST"] = act
+    except Exception:
+        pass
 
 
 def _site_hosts():
-    """候选域名：上次成功域置顶、已判死的域剔除。"""
+    """候选域名：上次成功域置顶、已判死的域软隔离剔除。域名只来自主域 + HJSQN_HOSTS + BACKUP_HOSTS，不再从发布页拉取。"""
     raw = [HOST]
     for item in str(os.environ.get("HJSQN_HOSTS") or "").split(","):
         item = item.strip().rstrip("/")
-        if item and item not in raw:
-            raw.append(item)
-    for item in _DISCOVERED_HOSTS:
         if item and item not in raw:
             raw.append(item)
     for item in BACKUP_HOSTS:
@@ -725,7 +587,8 @@ def _candidate_urls(url):
 
 
 async def _request_ex(url, attempts=2):
-    """遍历所有已知域名请求；全部失败时才从发布页拉新域名并重试一次。"""
+    """遍历主域 + 内置域名池请求；全部失败时仅在池内重试，不再从发布页拉取。"""
+    await restore_hosts_cache()
     last_error = None
 
     async def _try_all():
@@ -775,15 +638,8 @@ async def _request_ex(url, attempts=2):
     if hit:
         return hit
 
-    # 所有已知域名都失败 → 去发布页拉新域名（被动触发），再重试一次
-    await OmniBox.log("warn", "[hjsq][request] 所有域名不可达，从发布页拉取新域名")
-    try:
-        await _discover_hosts(force=True)
-        if _HOSTS_REFRESH_TASK is not None:
-            await _HOSTS_REFRESH_TASK
-    except Exception as exc:
-        await OmniBox.log("warn", "[hjsq][request] 拉取新域名异常: %s" % exc)
-
+    # 所有已知域名都失败 → 不再从发布页拉取，仅在现有域名池内重试一次
+    await OmniBox.log("warn", "[hjsq][request] 所有域名不可达，仅在内置域名池内重试一次（不再拉发布页）")
     hit = await _try_all()
     if hit:
         return hit

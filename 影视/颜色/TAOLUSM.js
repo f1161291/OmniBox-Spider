@@ -1,7 +1,7 @@
 // @name TAOLUSM
 // @author 宝宝巴士
-// @description taolusm.com（套路调教视频）：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默 + 探测超时 6s）；从地址发布页 itaolu.com 被动拉取备用域名（全部域名失败才拉，分批 10 个探测）；首页/分类/搜索/详情/播放；列表 module-poster-item 取封面；详情 const source 取 preview_mp4，免费或有权限时补 /v/{id}/manifest 完整 m3u8
-// @version 1.1.0
+// @description taolusm.com（套路调教视频）：只用主域 + 内置域名池轮换，不再从发布页拉取新域名；修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默）；首页/分类/搜索/详情/播放；列表 module-poster-item 取封面；详情 const source 取 preview_mp4，免费或有权限时补 /v/{id}/manifest 完整 m3u8
+// @version 1.1.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/TAOLUSM.js
 // @dependencies []
 /**
@@ -32,17 +32,12 @@
  *   受限时返回 200 空体，此时只能播 preview_mp4。
  *   play() 三段式：直链 → sniffVideo → parse=1 兜底。
  *
- * 【地址发布页（防失联）】
- *   发布页 https://itaolu.com/ 的「套路视频」区块列出本条线的全部备用域名
- *   （taolusm.com / taolu.sale / tlsm.app / tlsm.shop / taolu.red / tlsm.one ... 共 20 个）。
- *   策略：不做定时刷新；只有所有已知域名都访问失败时，才去发布页拉新域名；
- *   候选域名分批探测（每批 10 个，批间 200ms），避免一次打太多请求。
+ * 【域名池】
+ *   只用主域 taolusm.com + 内置备用域名轮换，不再从发布页拉取新域名。
  *
  * 【环境变量】
  *   TAOLU_HOST          主站，默认 https://taolusm.com
  *   TAOLU_HOSTS         追加备用域名（逗号分隔）
- *   TAOLU_PUBLISH_PAGE  发布页，默认 https://itaolu.com/
- *   TAOLU_PROBE_BATCH   发布页候选分批大小，默认 10
  *   TAOLU_COOKIE        站点登录态 Cookie（带上后有权限的片可拿完整 m3u8）
  *   TAOLU_UA            自定义 User-Agent
  * ============================================================================
@@ -83,22 +78,13 @@ function normalizeHost(value) {
   }
 }
 
-/* ---------------- 域名池与发布页发现（被动触发） ---------------- */
-const PUBLISH_PAGE = String(process.env.TAOLU_PUBLISH_PAGE || "https://itaolu.com/").trim();
-const PUBLISH_SECTION = "套路视频";  // 发布页 h1「套路视频 - 导航站」区块，含 taolusm/taolu/tlsm 系列 20 个域名
+/* ---------------- 域名池（主域 + 内置备用域，不再拉发布页） ---------------- */
 const HOSTS_CACHE_KEY = "taolusm:hosts:v1";
 const HOSTS_CACHE_TTL = 30 * 24 * 3600;
-const PROBE_BATCH_SIZE = (() => {
-  const n = Number(String(process.env.TAOLU_PROBE_BATCH || "").trim() || 10);
-  return Number.isFinite(n) && n > 0 ? Math.min(20, Math.floor(n)) : 10;
-})();
-const PROBE_BATCH_DELAY = 200;
-const PROBE_TIMEOUT = Math.max(3000, Number(process.env.TAOLU_PROBE_TIMEOUT || 6000) || 6000);
 
 /**
- * 内置备用域名（2026-11-17 从发布页 itaolu.com「套路视频」区块抄录）。
- * 作用：发布页本身不可达时（实测部分网络 Node 直连会 ECONNRESET，
- * 宿主 SDK 也可能被拦），仍有一批已知域名可轮换，不至于直接抓瞎。
+ * 内置备用域名（早期从发布页抄录，现已固化进脚本）。
+ * 作用：主域不可达时仍有一批已知域名可轮换，不至于直接抓瞎。
  * 可用 TAOLU_HOSTS 追加，TAOLU_NO_BUILTIN=1 关闭内置列表。
  */
 const BUILTIN_HOSTS = String(process.env.TAOLU_NO_BUILTIN || "") === "1" ? [] : [
@@ -132,7 +118,6 @@ const HOST_POOL = (() => {
 })();
 let HOST = HOST_POOL[0];
 let HOST_POOL_READY = false;
-let hostsRefreshInFlight = null;
 const hostHealth = Object.create(null);
 
 const SITE_COOKIE = String(process.env.TAOLU_COOKIE || "").trim();
@@ -207,66 +192,6 @@ function nodeRequest(urlStr, options = {}, redirects = 0) {
     req.on("timeout", () => { req.destroy(new Error("请求超时")); });
     req.end();
   });
-}
-
-/**
- * 从发布页 HTML 里抽出「国产AV视频」区块的域名列表。
- * 结构：<h1>国产AV视频</h1> ... <span class="text-primary">gcav.sale </span>
- */
-function extractSectionHosts(html, sectionName) {
-  const text = String(html || "");
-  const key = String(sectionName || "").trim();
-  if (!text || !key) return [];
-
-  // 只在 <h1>...</h1> 里找区块标题，避免命中 <title> 里的同名文字
-  const h1Re = /<h1[^>]*>([\s\S]{0,200}?)<\/h1>/gi;
-  let headStart = -1;
-  let bodyStart = -1;
-  const heads = [];
-  let m;
-  while ((m = h1Re.exec(text)) !== null) {
-    heads.push({ start: m.index, end: m.index + m[0].length, text: clean(m[1]) });
-    if (headStart < 0 && String(m[1]).includes(key)) {
-      headStart = m.index;
-      bodyStart = m.index + m[0].length;
-    }
-  }
-  if (headStart < 0) return [];
-
-  // 区块结束：下一个 h1（同级标题）
-  const next = heads.find((h) => h.start > headStart);
-  const block = text.slice(bodyStart, next ? next.start : undefined);
-
-  const out = [];
-  const seen = new Set();
-  const re = /<span[^>]*class="[^"]*text-primary[^"]*"[^>]*>([\s\S]{0,80}?)<\/span>/gi;
-  while ((m = re.exec(block)) !== null) {
-    const raw = String(m[1] || "").replace(/<[^>]+>/g, "").trim();
-    if (!/^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,}$/i.test(raw)) continue;
-    const host = normalizeHost(raw);
-    if (seen.has(host)) continue;
-    seen.add(host);
-    out.push(host);
-  }
-  return out;
-}
-
-/** 同构校验：首页能抓到 /v/{id} 才算真站 */
-async function probeHost(host) {
-  try {
-    const r = await withHardTimeout(
-      nodeRequest(`${host}/`, {
-        timeout: PROBE_TIMEOUT,
-        headers: { "User-Agent": UA, Referer: `${host}/` },
-      }),
-      PROBE_TIMEOUT,
-      `probe ${host}`
-    );
-    const body = String(r.body || "");
-    return r.statusCode >= 200 && r.statusCode < 400
-      && body.length > 3000
-      && /\/v\/\d+/.test(body);
-  } catch (_) { return false; }
 }
 
 /**
@@ -361,128 +286,6 @@ function markHostAlive(host) {
   schedulePersistHosts();
 }
 
-/**
- * 拉发布页：SDK 优先、Node 直连兜底。
- * 实测部分网络环境下 Node 直连 itaolu.com 会被 ECONNRESET，
- * 而宿主 request 走宿主自己的网络栈/代理能通，所以必须先试 SDK。
- */
-async function fetchPublishPage(url) {
-  const headers = {
-    "User-Agent": UA,
-    Accept: "text/html,application/xhtml+xml,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    Referer: `${url.replace(/\/+$/, "")}/`,
-  };
-  const timeout = Math.max(5000, Number(process.env.TAOLU_PUBLISH_TIMEOUT || 12000) || 12000);
-  const errors = [];
-
-  // ① 宿主 SDK
-  if (OmniBox && typeof OmniBox.request === "function") {
-    try {
-      const r = await withHardTimeout(
-        Promise.resolve(OmniBox.request(url, { method: "GET", headers, timeout })),
-        timeout,
-        `publish sdk ${url}`
-      );
-      const body = typeof r?.body === "string" ? r.body : "";
-      if (Number(r?.statusCode) === 200 && body.length > 500) return body;
-      errors.push(`sdk HTTP ${r?.statusCode ?? "?"} len=${body.length}`);
-    } catch (e) {
-      errors.push(`sdk ${e?.message || e}`);
-    }
-  }
-
-  // ② Node 直连
-  try {
-    const r = await withHardTimeout(
-      nodeRequest(url, { timeout, headers }),
-      timeout,
-      `publish node ${url}`
-    );
-    const body = String(r.body || "");
-    if (Number(r.statusCode) === 200 && body.length > 500) return body;
-    errors.push(`node HTTP ${r.statusCode} len=${body.length}`);
-  } catch (e) {
-    errors.push(`node ${e?.message || e}`);
-  }
-
-  throw new Error(`发布页两条通道均失败: ${errors.join(" | ")}`);
-}
-
-async function discoverHosts() {
-  const candidates = new Set();
-  let publishOk = false;
-  try {
-    logI(`[hosts] 拉取发布页 ${PUBLISH_PAGE}`);
-    const body = await fetchPublishPage(PUBLISH_PAGE);
-    publishOk = true;
-    const found = extractSectionHosts(body, PUBLISH_SECTION);
-    found.forEach((h) => candidates.add(h));
-    logI(`[hosts] 发布页「${PUBLISH_SECTION}」解析到 ${found.length} 个域名`);
-  } catch (e) {
-    logI(`[hosts] 发布页拉取失败: ${e?.message || e}`);
-  }
-
-  if (!publishOk) {
-    // 发布页拿不到 ≠ 没有新域名：保持现有池，交给调用方继续轮换/重试
-    logI("[hosts] 发布页不可用，保留现有域名池不变");
-    return 0;
-  }
-
-  const newOnes = Array.from(candidates).filter((h) => !HOST_POOL.includes(h));
-  if (!newOnes.length) {
-    logI("[hosts] 发布页无新域名，无需探测");
-    return 0;
-  }
-  logI(`[hosts] 待探测 ${newOnes.length} 个新域名，每批 ${PROBE_BATCH_SIZE} 个`);
-
-  let added = 0;
-  for (let i = 0; i < newOnes.length; i += PROBE_BATCH_SIZE) {
-    const batch = newOnes.slice(i, i + PROBE_BATCH_SIZE);
-    const batchNo = Math.floor(i / PROBE_BATCH_SIZE) + 1;
-    logI(`[hosts] 探测批次 ${batchNo}: ${batch.length} 个`);
-    const results = await Promise.allSettled(batch.map((h) => probeHost(h)));
-    for (let k = 0; k < batch.length; k++) {
-      if (results[k].status !== "fulfilled" || !results[k].value) continue;
-      const host = batch[k];
-      HOST_POOL.push(host);
-      hostHealth[host] = { fail: 0, okAt: Date.now(), dead: false };
-      added++;
-      logI(`[hosts] 发现可用站点 -> ${host}`);
-    }
-    if (i + PROBE_BATCH_SIZE < newOnes.length) {
-      await new Promise((r) => setTimeout(r, PROBE_BATCH_DELAY));
-    }
-  }
-  if (added) logI(`[hosts] 本次新增 ${added} 个，池共 ${HOST_POOL.length} 个`);
-  try {
-    await OmniBox.setCache(
-      HOSTS_CACHE_KEY,
-      { at: Date.now(), hosts: HOST_POOL.slice() },
-      HOSTS_CACHE_TTL
-    );
-  } catch (_) {}
-  return added;
-}
-
-async function ensureHostsFresh(force) {
-  await restoreHostCache();
-  if (!force) return 0;
-  if (hostsRefreshInFlight) return hostsRefreshInFlight;
-  hostsRefreshInFlight = (async () => {
-    try {
-      logI("[hosts] 全部域名不可达，从发布页拉取新域名");
-      return await discoverHosts();
-    } catch (e) {
-      logI(`[hosts] 拉取新域名异常: ${e?.message || e}`);
-      return 0;
-    } finally {
-      hostsRefreshInFlight = null;
-    }
-  })();
-  return hostsRefreshInFlight;
-}
-
 function swapHost(url, from, to) {
   if (!from || !to || from === to) return url;
   if (url === from || url.startsWith(from + "/")) return to + url.slice(from.length);
@@ -522,7 +325,7 @@ const CATEGORY_TTL = Math.max(0, Math.round(BASE_TTL * 0.8));
 const SEARCH_TTL = Math.max(0, Math.round(BASE_TTL * 0.8));
 const DETAIL_TTL = Math.max(0, Math.round(BASE_TTL * 1.5));
 
-/* ---------------- 请求（域名轮换 + 被动触发） ---------------- */
+/* ---------------- 请求（内置域名池轮换） ---------------- */
 function buildCookie(extra) {
   return [SITE_COOKIE, String(extra || "").trim()].filter(Boolean).join("; ").replace(/;\s*;/g, "; ").trim();
 }
@@ -594,7 +397,7 @@ async function requestText(url, options = {}) {
   try {
     return await tryHosts(ordered);
   } catch (firstErr) {
-    await ensureHostsFresh(true);
+    // 全部域名失败：仅恢复内置域名池缓存，不再从发布页拉取
     const more = [HOST, ...HOST_POOL.filter((h) => h !== HOST)];
     try {
       return await tryHosts(more);
@@ -672,7 +475,7 @@ async function mapLimit(items, limit, worker) {
 
 /* ---------------- 封面 CDN 兜底 ----------------
  * 站点主域和图片 CDN 是两套解析：
- *   站点  → taolusm.com（有发布页可切换）
+ *   站点  → taolusm.com（内置域名池可切换）
  *   图床  → tl.skylines.pro（CloudFront）/ tl-b.skylines.pro（Bunny）
  * 主域换到新地址后，图床仍可能不可达（CloudFront 常被墙）。
  * 处理：同一张图按 CDN 列表依次尝试；全部失败则抓回字节内联成 data URI，

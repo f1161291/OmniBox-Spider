@@ -1,7 +1,7 @@
 // @name 每日大赛
 // @author 宝宝巴士
-// @description 每日大赛（mrds66.com）：WordPress Mirages 主题；分类/搜索/详情/播放；DPlayer data-config 直取 m3u8；图床图片 AES-128-CBC 加密，脚本内解密还原为 data:image；从发布页 ukcyeyqpp.cc + GitLab README 自动获取最新域名防失联
-// @version 1.0.1
+// @description 每日大赛（mrds66.com）：WordPress Mirages 主题；分类/搜索/详情/播放；DPlayer data-config 直取 m3u8；图床图片 AES-128-CBC 加密，脚本内解密还原为 data:image；只用主域+内置域名池轮换，不再从发布页拉取域名
+// @version 1.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/每日大赛.js
 // @dependencies crypto
 /**
@@ -44,32 +44,15 @@
  *     （CBC + Pkcs7）。与 51吃瓜.js 共用同一图床，密钥相同。
  *   标题：<h1>标题</h1>
  *
- * 【自动获取最新域名（本需求核心）】
- *   用户给的 https://www.ukcyeyqpp.cc/ 是**中转发布页**（title「每日大赛官网」），
- *   正文里用 <a href="https://www.mrds66.com/">每日大赛</a> 指向当前主站。
- *
- *   完整链路实测：
- *     GitLab README (gitlab.com/mrds/mrds/-/raw/main/README.md)
- *       → 列出「最新官网 mrdsv8.com」「备用线路 mrdst2.com / mrdsv7.com」
- *       → 这些是 310B 的 JS 中转页（<a href="https://www.ukcyeyqpp.cc/"> + click()）
- *       → 跳回发布页 ukcyeyqpp.cc
- *       → 发布页给出当前主站 www.mrds66.com
- *     README 里另有永久地址 mrds.com（实测同构主站）。
- *
- *   脚本三层域名发现（合并去重）：
- *     1) 用户发布页 PUBLISH_PAGE → 解析 a[href] 里的主站链接
- *     2) GitLab README → 解析所有 https 域名（含中转与永久地址）
- *     3) 中转页跟随 → 解析 JS 里的 <a href> 跳回发布页，再取主站
- *   所有候选都做**同构校验**（首页能抓到 /archives/{数字} 且 >5KB），
- *   中转页 / 广告页 / 统计域一律排除，只把真主站并入轮换池。
- *   时间戳 + 域名池写入 SDK 持久缓存，默认每 6 小时刷新，
- *   全部域名不可达时立即强制刷新并重试本次请求。
+ * 【域名轮换（不再从发布页拉取）】
+ *   只使用主域 MRDS_HOST（默认 https://www.mrds66.com）+ 内置/自定义备用域名池轮换；
+ *   不再请求发布页 ukcyeyqpp.cc / GitLab README，也不做定时刷新或全挂时联网拉新域名。
+ *   保留软隔离（连续失败降权、403 冷却）、成功置顶与持久化：成功域提到池首，
+ *   连续失败达阈值的域移出轮换池（至少保留主域），时间戳与池写入 SDK 缓存。
  *
  * 【环境变量】
- *   MRDS_PUBLISH_PAGE    发布页地址，默认 https://www.ukcyeyqpp.cc/
  *   MRDS_HOST            主站地址，默认 https://www.mrds66.com
  *   MRDS_MIRRORS         追加备用域名（逗号分隔）
- *   MRDS_HOSTS_REFRESH   发布页刷新间隔（小时），默认 6；0=每次都刷
  *   MRDS_COOKIE          站点 cookie
  *   MRDS_UA              自定义 User-Agent
  * ============================================================================
@@ -118,15 +101,16 @@ const UA = process.env.MRDS_UA
   || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const COOKIE = String(process.env.MRDS_COOKIE || '').trim();
 const PRIMARY = (process.env.MRDS_HOST || 'https://www.mrds66.com').replace(/\/+$/, '');
-const PUBLISH_PAGE = (process.env.MRDS_PUBLISH_PAGE || 'https://www.ukcyeyqpp.cc/').trim();
-const GITLAB_README = 'https://gitlab.com/mrds/mrds/-/raw/main/README.md';
-
-/* ---------------- 域名池 ---------------- */
+/* ---------------- 域名池（只用主域 + 内置池，不再从发布页拉取） ---------------- */
+const BUILTIN_HOSTS = String(process.env.MRDS_NO_BUILTIN || '') === '1' ? [] : [
+  'https://www.mrds66.com',
+  'https://mrds.com',
+];
 const HOSTS = (() => {
   const extra = String(process.env.MRDS_MIRRORS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
   const norm = (u) => (/^https?:\/\//i.test(u) ? u : `https://${u}`).replace(/\/+$/, '');
-  return Array.from(new Set([PRIMARY, ...extra.map(norm)]));
+  return Array.from(new Set([PRIMARY, ...extra.map(norm), ...BUILTIN_HOSTS.map(norm)]));
 })();
 let PREFERRED = 0;
 const hostHealth = Object.create(null);
@@ -234,160 +218,20 @@ async function httpGet(url, options = {}) {
   return nodeRequest(url, options);
 }
 
-/* ---------------- 自动获取最新域名 ---------------- */
-const HOSTS_REFRESH_INTERVAL = (() => {
-  const raw = String(process.env.MRDS_HOSTS_REFRESH || '').trim();
-  const h = raw === '' ? 6 : Number(raw);
-  return Math.max(0, Number.isFinite(h) ? h : 6) * 3600 * 1000;
-})();
-const HOSTS_CACHE_KEY = 'mrds:hosts:v1';
-const HOSTS_CACHE_TTL = 30 * 24 * 3600;
-let lastHostsRefresh = 0;
-let hostsRefreshInFlight = null;
+/* ---------------- 域名池初始化（不再从发布页拉取） ---------------- */
 let hostsCacheRestored = false;
-
-/** 从任意 HTML/文本里抽取可用域名（排除第三方） */
-function extractDomains(text) {
-  const s = String(text || '');
-  const out = [];
-  const seen = new Set();
-  const add = (raw) => {
-    let h = String(raw || '').toLowerCase().trim();
-    if (!h) return;
-    // 去掉路径
-    h = h.replace(/^https?:\/\//i, '').split(/[/\s"'`#?]/)[0];
-    if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/.test(h)) return;
-    // 排除第三方：广告 / 统计 / 社交 / 图床 / CDN / 代码托管 / 邮箱 / 浏览器提示站
-    if (/gitlab|github|google|yandex|addtoany|cloudfront|pic\.|ads\.|t\.me|telegram|x\.com|twitter|browsehappy|schema\.org|w3\.org|googletagmanager|gmail|cloudflare|jsdelivr|npm\./i.test(h)) return;
-    if (seen.has(h)) return;
-    seen.add(h);
-    out.push(`https://${h}`);
-  };
-  // 1) a[href] 链接
-  const re1 = /<a[^>]*href=["'](https?:\/\/[^"']+)["']/gi;
-  let m;
-  while ((m = re1.exec(s)) !== null) add(m[1]);
-  // 2) JS 中转页里的 <a id=... href=...>（可能无引号）
-  const re2 = /href=["']?(https?:\/\/[^"'\s>]+)/gi;
-  while ((m = re2.exec(s)) !== null) add(m[1]);
-  // 3) 纯文本 URL（README 用）
-  const re3 = /https?:\/\/([a-z0-9][a-z0-9.-]*\.[a-z]{2,})/gi;
-  while ((m = re3.exec(s)) !== null) add(m[1]);
-  return out;
-}
-
-/** 同构校验：能返回含 /archives/{数字} 的 Mirages 首页才算真主站 */
-async function probeMainSite(host) {
-  try {
-    const r = await httpGet(`${host}/`, { timeout: 12000 });
-    const b = String(r.body || '');
-    return r.statusCode >= 200 && r.statusCode < 400
-      && b.length > 5000
-      && /\/archives\/\d+/.test(b)
-      && /Mirages|每日大赛/.test(b);
-  } catch (_) { return false; }
-}
-
-/**
- * 从发布页 / GitLab README / 中转页发现最新主站。
- * 中转页（310B 的 JS click）会跳回发布页，发布页再给当前主站。
- */
-async function discoverHosts() {
-  const candidates = new Set();
-  const pages = [];
-
-  // 1) 用户给的发布页
-  pages.push({ url: PUBLISH_PAGE, tag: '发布页' });
-  // 2) GitLab README（官方失联恢复通道）
-  pages.push({ url: GITLAB_README, tag: 'GitLab README' });
-
-  for (const p of pages) {
-    try {
-      const r = await httpGet(p.url, { timeout: 15000 });
-      const body = String(r.body || '');
-      if (!body) continue;
-      const found = extractDomains(body);
-      found.forEach((d) => candidates.add(d));
-      logI(`[hosts] ${p.tag} 解析到 ${found.length} 个候选域名`);
-
-      // 若该页本身是中转页（很小且含 location.replace / .click()），
-      // 跟随它里面的 <a href> 再抓一层，把发布页的主站链接也拿到
-      if (body.length < 2000 && /location\.replace|\.click\(\)|加载中/.test(body)) {
-        for (const d of found.slice(0, 4)) {
-          try {
-            const r2 = await httpGet(`${d}/`, { timeout: 12000 });
-            const found2 = extractDomains(String(r2.body || ''));
-            found2.forEach((x) => candidates.add(x));
-          } catch (_) {}
-        }
-      }
-    } catch (e) {
-      logI(`[hosts] ${p.tag} 拉取失败: ${e.message}`);
-    }
-  }
-
-  // 3) 已知同构备用主站（README 里的永久地址）
-  ['https://mrds.com'].forEach((d) => candidates.add(d));
-
-  logI(`[hosts] 合计 ${candidates.size} 个候选，开始同构校验`);
-  let added = 0;
-  for (const h of candidates) {
-    if (HOSTS.includes(h)) continue;
-    const ok = await probeMainSite(h);
-    if (!ok) continue;
-    HOSTS.push(h);
-    hostHealth[h] = { fail: 0, okAt: 0, blockAt: 0 };
-    added++;
-    logI(`[hosts] 发现可用主站 -> ${h}`);
-  }
-  if (added) logI(`[hosts] 本次新增 ${added} 个，池共 ${HOSTS.length} 个`);
-  return added;
-}
-
-async function restoreHostsCache() {
-  if (hostsCacheRestored) return;
-  hostsCacheRestored = true;
-  try {
-    const saved = await OmniBox.getCache(HOSTS_CACHE_KEY);
-    let obj = saved;
-    if (typeof saved === 'string') { try { obj = JSON.parse(saved); } catch (_) { obj = null; } }
-    if (obj && Array.isArray(obj.hosts)) {
-      for (const h of obj.hosts) {
-        if (typeof h === 'string' && /^https?:\/\//i.test(h) && !HOSTS.includes(h)) HOSTS.push(h);
-      }
-    }
-    if (obj && Number(obj.at) > lastHostsRefresh) lastHostsRefresh = Number(obj.at);
-    if (lastHostsRefresh) logI(`[hosts] 已从缓存恢复域名池（${HOSTS.length} 个）`);
-  } catch (_) {}
-}
-
+/** 只用主域+内置池：仅确保一次初始化，不做任何发布页刷新/网络发现。 */
 async function ensureHostsFresh(force) {
-  await restoreHostsCache();
-  if (!force && lastHostsRefresh && Date.now() - lastHostsRefresh < HOSTS_REFRESH_INTERVAL) return 0;
-  if (hostsRefreshInFlight) return hostsRefreshInFlight;
-  hostsRefreshInFlight = (async () => {
-    try {
-      logI(`[hosts] 定时刷新开始（间隔 ${HOSTS_REFRESH_INTERVAL / 3600000}h）`);
-      const added = await discoverHosts();
-      lastHostsRefresh = Date.now();
-      await OmniBox.setCache(HOSTS_CACHE_KEY, { at: lastHostsRefresh, hosts: HOSTS.slice() }, HOSTS_CACHE_TTL);
-      logI(`[hosts] 定时刷新完成，新增 ${added} 个`);
-      return added;
-    } catch (e) {
-      logI(`[hosts] 定时刷新异常: ${e.message}`);
-      return 0;
-    } finally {
-      hostsRefreshInFlight = null;
-    }
-  })();
-  return hostsRefreshInFlight;
+  if (hostsCacheRestored) return 0;
+  hostsCacheRestored = true;
+  try { logI('[hosts] 使用主域+内置域名池，不再从发布页拉取域名'); } catch (_) {}
+  return 0;
 }
 
 /* ---------------- 带轮换的抓取 ---------------- */
 async function fetchHtml(urlOrPath, options = {}) {
   const isFull = /^https?:\/\//i.test(urlOrPath);
   const path = isFull ? new URL(urlOrPath).pathname + new URL(urlOrPath).search : urlOrPath;
-  try { ensureHostsFresh(false); } catch (_) {}
 
   const tryAll = async () => {
     for (const idx of buildHostOrder()) {
@@ -415,14 +259,10 @@ async function fetchHtml(urlOrPath, options = {}) {
   const hit = await tryAll();
   if (hit) return hit;
 
-  // 全挂：强制刷新域名池并重试一轮（60s 内只一次）
-  if (!globalThis.__mrdsForceAt || Date.now() - globalThis.__mrdsForceAt >= 60000) {
-    globalThis.__mrdsForceAt = Date.now();
-    logI('所有候选域名不可达，强制刷新发布页/GitLab 域名池');
-    await ensureHostsFresh(true);
-    const retry = await tryAll();
-    if (retry) return retry;
-  }
+  // 全部域名不可达：不再从发布页拉取，仅在域名池内再重试一轮
+  logI('所有候选域名首轮不可达，域名池内再重试一轮');
+  const retry = await tryAll();
+  if (retry) return retry;
   logE('所有候选域名均不可达');
   return { body: '', host: HOSTS[PREFERRED] || PRIMARY, statusCode: 0 };
 }

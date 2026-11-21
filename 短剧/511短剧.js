@@ -1,7 +1,7 @@
 // @name 511短剧
 // @author 宝宝巴士
-// @description 511短剧（511dj.com）：分类/搜索/详情/播放；剧集取 /watch/details 的 data-ep-src，播放走 /play/{id}/{n}.m3u8 直链；自动从 /dizhi/ 发布页获取备用域名防失联
-// @version 1.0.0
+// @description 511短剧（511dj.com）：分类/搜索/详情/播放；剧集取 /watch/details 的 data-ep-src，播放走 /play/{id}/{n}.m3u8 直链；只用主域+内置域名池轮换，不再从 /dizhi/ 发布页拉取域名
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/511短剧.js
 // @dependencies []
 /**
@@ -47,17 +47,15 @@
  *   无结果时标题变成「搜索 - 511短剧」并展示 10 个推荐位，
  *   脚本用 title 是否含关键词来判定，避免把推荐位当搜索结果返回。
  *
- * 【防失联 /dizhi/】
- *   发布页 meta[name=description] 的 content 里列出 78 个官方备用域名
- *   （511dj.com / 511dg.com / 511dj.cc / 511dja.* / 51aiduanju.* / ai511dj.* ...）。
- *   脚本首次请求即解析并做可用性校验，只把能返回同构首页的域名并入轮换池，
- *   时间戳与池写入 SDK 持久缓存，默认每 6 小时刷新一次。
+ * 【域名轮换（不再从发布页拉取）】
+ *   只使用主域 DJ511_HOST（默认 https://511dj.com）+ 内置/自定义备用域名池轮换；
+ *   不再请求 /dizhi/ 发布页，也不做定时刷新或全挂时联网拉新域名。
+ *   保留软隔离（连续失败降权、403 冷却）、成功置顶与持久化。
  *
  * 【环境变量】
  *   DJ511_HOST          主站地址，默认 https://511dj.com
  *   DJ511_MIRRORS       追加备用域名（逗号分隔）
  *   DJ511_UA            自定义 User-Agent
- *   DJ511_HOSTS_REFRESH 发布页刷新间隔（小时），默认 6；0=每次都刷
  *   DJ511_COOKIE        站点 cookie（付费集可能需要）
  * ============================================================================
  */
@@ -88,14 +86,18 @@ const UA = process.env.DJ511_UA
   || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const COOKIE = String(process.env.DJ511_COOKIE || '').trim();
 const PRIMARY = (process.env.DJ511_HOST || 'https://511dj.com').replace(/\/+$/, '');
-const ADDR_PAGE = `${PRIMARY}/dizhi/`;
 
-/* ---------------- 域名池 ---------------- */
+/* ---------------- 域名池（只用主域 + 内置池，不再从发布页拉取） ---------------- */
+const BUILTIN_HOSTS = String(process.env.DJ511_NO_BUILTIN || '') === '1' ? [] : [
+  'https://511dj.com',
+  'https://511dg.com',
+  'https://511dj.cc',
+];
 const HOSTS = (() => {
   const extra = String(process.env.DJ511_MIRRORS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
   const norm = (u) => (/^https?:\/\//i.test(u) ? u : `https://${u}`).replace(/\/+$/, '');
-  return Array.from(new Set([PRIMARY, ...extra.map(norm)]));
+  return Array.from(new Set([PRIMARY, ...extra.map(norm), ...BUILTIN_HOSTS.map(norm)]));
 })();
 let PREFERRED = 0;
 const hostHealth = Object.create(null);
@@ -203,127 +205,35 @@ async function httpGet(url, options = {}) {
   return nodeRequest(url, options);
 }
 
-/* ---------------- 官方地址发布页 ---------------- */
-const HOSTS_REFRESH_INTERVAL = (() => {
-  const raw = String(process.env.DJ511_HOSTS_REFRESH || '').trim();
-  const h = raw === '' ? 6 : Number(raw);
-  return Math.max(0, Number.isFinite(h) ? h : 6) * 3600 * 1000;
-})();
+/* ---------------- 域名池初始化（不再从发布页拉取） ---------------- */
 const HOSTS_CACHE_KEY = '511dj:hosts:v1';
 const HOSTS_CACHE_TTL = 30 * 24 * 3600;
-let lastHostsRefresh = 0;
-let hostsRefreshInFlight = null;
 let hostsCacheRestored = false;
-
-/** 从 /dizhi/ 的 meta description 解析备用域名 */
-function parseAddressPage(html) {
-  const s = String(html || '');
-  const out = [];
-  const seen = new Set();
-  const add = (d) => {
-    const h = String(d || '').toLowerCase().trim();
-    if (!h || seen.has(h)) return;
-    if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/.test(h)) return;
-    // 排除 CDN / 统计 / 社交 / 组织站
-    if (/cloudfront|gitlab|schema\.org|w3\.org|t\.me|x\.com|google|yandex/i.test(h)) return;
-    seen.add(h);
-    out.push(`https://${h}`);
-  };
-  const m = s.match(/<meta[^>]*name="description"[^>]*content="([^"]+)"/i);
-  if (m) {
-    const ds = m[1].match(/[a-z0-9][a-z0-9.-]*\.[a-z]{2,}/gi) || [];
-    ds.forEach(add);
-  }
-  // 兜底：正文里的 a[href]
-  const linkRe = /<a[^>]*href="(https?:\/\/([^"\/]+))/gi;
-  let lm;
-  while ((lm = linkRe.exec(s)) !== null) add(lm[2]);
-  return out;
-}
-
-/** 可用性校验：能返回含 dm-card / series/details 的同构首页才算主站 */
-async function probeHost(host) {
-  try {
-    const r = await httpGet(`${host}/`, { timeout: 12000 });
-    const b = String(r.body || '');
-    return r.statusCode >= 200 && r.statusCode < 400 && b.length > 5000 && /series\/details\/|dm-card/.test(b);
-  } catch (_) { return false; }
-}
-
-async function restoreHostsCache() {
-  if (hostsCacheRestored) return;
+/** 只用主域+内置池：仅恢复成功置顶顺序，不做任何发布页刷新/网络发现。 */
+async function ensureHostsFresh(force) {
+  if (hostsCacheRestored) return 0;
   hostsCacheRestored = true;
   try {
     const saved = await OmniBox.getCache(HOSTS_CACHE_KEY);
     let obj = saved;
     if (typeof saved === 'string') { try { obj = JSON.parse(saved); } catch (_) { obj = null; } }
-    if (obj && Array.isArray(obj.hosts)) {
-      for (const h of obj.hosts) {
-        if (typeof h === 'string' && /^https?:\/\//i.test(h) && !HOSTS.includes(h)) HOSTS.push(h);
-      }
+    if (obj && typeof obj.active === 'string') {
+      const active = String(obj.active).replace(/\/+$/, '');
+      const idx = HOSTS.indexOf(active);
+      if (idx > 0) { HOSTS.splice(idx, 1); HOSTS.unshift(active); PREFERRED = 0; }
     }
-    if (obj && Number(obj.at) > lastHostsRefresh) lastHostsRefresh = Number(obj.at);
-    if (lastHostsRefresh) logI(`[hosts] 已从缓存恢复域名池（${HOSTS.length} 个）`);
+    logI('[hosts] 使用主域+内置域名池，不再从 /dizhi/ 发布页拉取');
   } catch (_) {}
-}
-
-async function refreshHostsFromAddressPage() {
-  let html = '';
-  try {
-    const r = await httpGet(ADDR_PAGE, { timeout: 15000 });
-    html = String(r.body || '');
-  } catch (e) {
-    logI(`[hosts] 地址页拉取失败: ${e.message}`);
-    return 0;
-  }
-  const candidates = parseAddressPage(html);
-  if (!candidates.length) {
-    logI('[hosts] 地址页未解析到备用域名');
-    return 0;
-  }
-  logI(`[hosts] 地址页解析到 ${candidates.length} 个候选域名`);
-  let added = 0;
-  for (const h of candidates) {
-    if (HOSTS.includes(h)) continue;
-    const ok = await probeHost(h);
-    if (!ok) continue;
-    HOSTS.push(h);
-    hostHealth[h] = { fail: 0, okAt: 0, blockAt: 0 };
-    added++;
-    logI(`[hosts] 发现可用主站 -> ${h}`);
-  }
-  if (added) logI(`[hosts] 本次新增 ${added} 个，池共 ${HOSTS.length} 个`);
-  return added;
-}
-
-async function ensureHostsFresh(force) {
-  await restoreHostsCache();
-  if (!force && lastHostsRefresh && Date.now() - lastHostsRefresh < HOSTS_REFRESH_INTERVAL) return 0;
-  if (hostsRefreshInFlight) return hostsRefreshInFlight;
-  hostsRefreshInFlight = (async () => {
-    try {
-      logI(`[hosts] 定时刷新开始（间隔 ${HOSTS_REFRESH_INTERVAL / 3600000}h）`);
-      const added = await refreshHostsFromAddressPage();
-      lastHostsRefresh = Date.now();
-      await OmniBox.setCache(HOSTS_CACHE_KEY, { at: lastHostsRefresh, hosts: HOSTS.slice() }, HOSTS_CACHE_TTL);
-      logI(`[hosts] 定时刷新完成，新增 ${added} 个`);
-      return added;
-    } catch (e) {
-      logI(`[hosts] 定时刷新异常: ${e.message}`);
-      return 0;
-    } finally {
-      hostsRefreshInFlight = null;
-    }
-  })();
-  return hostsRefreshInFlight;
+  return 0;
 }
 
 /* ---------------- 带轮换的抓取 ---------------- */
 async function fetchHtml(urlOrPath, options = {}) {
   const isFull = /^https?:\/\//i.test(urlOrPath);
   const path = isFull ? new URL(urlOrPath).pathname + new URL(urlOrPath).search : urlOrPath;
+  // 仅做一次初始化（恢复成功置顶顺序），不拉发布页、不定时刷新
+  try { await ensureHostsFresh(false); } catch (_) {}
   const order = buildHostOrder();
-  try { ensureHostsFresh(false); } catch (_) {}
 
   for (const idx of order) {
     const host = HOSTS[idx];
@@ -346,23 +256,22 @@ async function fetchHtml(urlOrPath, options = {}) {
     }
   }
 
-  // 全挂：强制刷新发布页并重试一轮
-  if (!globalThis.__dj511ForceAt || Date.now() - globalThis.__dj511ForceAt >= 60000) {
-    globalThis.__dj511ForceAt = Date.now();
-    logI('所有候选域名不可达，强制刷新地址发布页');
-    const added = await ensureHostsFresh(true);
-    if (added > 0) {
-      for (const h of HOSTS.slice()) {
-        try {
-          const r = await httpGet(isFull ? `${h}${path}` : h + urlOrPath, options);
-          const b = String(r.body || '');
-          if (r.statusCode >= 200 && r.statusCode < 400 && b.length >= 200) {
-            markHost(h, true);
-            PREFERRED = HOSTS.indexOf(h);
-            return { body: b, host: h, statusCode: r.statusCode };
-          }
-        } catch (_) {}
+  // 全部域名不可达：不再从发布页拉取，仅在域名池内再重试一轮
+  logI('所有候选域名首轮不可达，域名池内再重试一轮');
+  for (const idx of buildHostOrder()) {
+    const host = HOSTS[idx];
+    try {
+      const r = await httpGet(isFull ? `${host}${path}` : host + urlOrPath, options);
+      const b = String(r.body || '');
+      if (r.statusCode === 404 || r.statusCode === 402) continue;
+      if (r.statusCode >= 200 && r.statusCode < 400 && b.length >= 200) {
+        markHost(host, true);
+        PREFERRED = idx;
+        return { body: b, host, statusCode: r.statusCode };
       }
+      markHost(host, false, `HTTP ${r.statusCode}`);
+    } catch (e) {
+      markHost(host, false, e.message);
     }
   }
   logE('所有候选域名均不可达');

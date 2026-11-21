@@ -1,7 +1,7 @@
 // @name GCAV
-// @version 1.3.0
+// @version 1.3.1
 // @author omnibox-spider
-// @description gcav.me 采集源：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默 + 探测超时 6s）；新增地址发布页 itaolu.com 被动拉取备用域名（全部域名失败才拉，分批 10 个探测，13 个 gcav 备用域）；修复宿主缺 cheerio 时列表返回 0 条导致封面全空（新增正则兜底解析 + Node 直连兜底）；六大频道 + 排序筛选 + 搜索分页；列表 a.cover-group 取标题/封面/时长/热度；详情页 const source 解析 cloudfront / bunny 双线路预览直链，免费或带登录态时补 /v/{id}/manifest 完整 m3u8；播放直链→sniff→parse=1 三段式兜底
+// @description gcav.me 采集源：只用主域 + 内置域名池轮换，不再从发布页拉取新域名；修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默）；修复宿主缺 cheerio 时列表返回 0 条导致封面全空（新增正则兜底解析 + Node 直连兜底）；六大频道 + 排序筛选 + 搜索分页；列表 a.cover-group 取标题/封面/时长/热度；详情页 const source 解析 cloudfront / bunny 双线路预览直链，免费或带登录态时补 /v/{id}/manifest 完整 m3u8；播放直链→sniff→parse=1 三段式兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/GCAV.js
 // @dependencies cheerio
 
@@ -97,29 +97,18 @@ function normalizeHost(value) {
   }
 }
 
-/* ---------------- 域名池与发布页发现（被动触发） ----------------
- * 发布页 https://itaolu.com/ 的「国产AV视频」区块列出了全部备用域名
- * （gcav.me / gcav.sale / gcav.app / gcav.shop / gcav.red / cnav.live /
- *   gcav.live / gcav.run / gcav.club / gcav.pro / gcav.bio / gavs.lol / gcav.lol）。
- * 策略与海角社区一致：不做定时刷新；只有所有已知域名都访问失败时，
- * 才去发布页拉新域名，候选域名分批探测（每批 10 个，批间 200ms）。
+/* ---------------- 域名池（主域 + 内置备用域，不再拉发布页） ----------------
+ * 只用主域 SITE_HOST（默认 gcav.me）+ SITE_HOSTS 追加域 + BUILTIN_HOSTS 轮换；
+ * 不再从 itaolu.com 发布页拉取新域名（用户要求，浪费时间）。
+ * 成功域置顶、连续失败 2 次判死并软隔离，全部失败时仅在池内重试。
  * =============================================================== */
-const PUBLISH_PAGE = String(process.env.GCAV_PUBLISH_PAGE || "https://itaolu.com/").trim();
-const PUBLISH_SECTION = "国产AV视频";
 const HOSTS_CACHE_KEY = "gcav:hosts:v1";
 const HOSTS_CACHE_TTL = 30 * 24 * 3600;
-const PROBE_BATCH_SIZE = (() => {
-  const n = Number(String(process.env.GCAV_PROBE_BATCH || "").trim() || 10);
-  return Number.isFinite(n) && n > 0 ? Math.min(20, Math.floor(n)) : 10;
-})();
-const PROBE_BATCH_DELAY = 200;
-const PROBE_TIMEOUT = Math.max(3000, Number(process.env.GCAV_PROBE_TIMEOUT || 6000) || 6000);
 
-/** 域名池：第一个是当前 HOST，其余为备用 */
 /**
- * 内置备用域名（2026-11-17 从发布页 itaolu.com「国产AV视频」区块抄录）。
- * 作用：发布页本身不可达时（Node 直连可能 ECONNRESET、宿主 SDK 也可能被拦），
- * 仍有一批已知域名可轮换。SITE_HOSTS 可追加，GCAV_NO_BUILTIN=1 关闭。
+ * 内置备用域名（早期从发布页抄录，现已固化进脚本）。
+ * 作用：主域不可达时仍有一批已知域名可轮换。
+ * SITE_HOSTS 可追加，GCAV_NO_BUILTIN=1 关闭内置列表。
  */
 const BUILTIN_HOSTS = String(process.env.GCAV_NO_BUILTIN || "") === "1" ? [] : [
   "https://gcav.me",
@@ -145,7 +134,6 @@ const HOST_POOL = (() => {
 })();
 let HOST = HOST_POOL[0];           // 当前生效域名（12 处引用都用它）
 let HOST_POOL_READY = false;       // 是否已尝试从缓存恢复过
-let hostsRefreshInFlight = null;
 const hostHealth = Object.create(null);
 
 const SITE_COOKIE = String(process.env.SITE_COOKIE || "").trim();
@@ -297,71 +285,9 @@ function nodeRequest(urlStr, options = {}, redirects = 0) {
   });
 }
 
-/* ---------------- 发布页域名发现（被动触发） ---------------- */
-
-/**
- * 从发布页 HTML 里抽出「国产AV视频」区块的域名列表。
- * 结构：<h1>国产AV视频</h1> ... <span class="text-primary">gcav.sale </span>
- * 到下一个 <h1> 之前都属于该区块。
- */
-function extractSectionHosts(html, sectionName) {
-  const text = String(html || "");
-  const key = String(sectionName || "").trim();
-  if (!text || !key) return [];
-
-  // 只在 <h1>...</h1> 里找区块标题，避免命中 <title> 里的同名文字
-  const h1Re = /<h1[^>]*>([\s\S]{0,200}?)<\/h1>/gi;
-  let headStart = -1;
-  let bodyStart = -1;
-  const heads = [];
-  let m;
-  while ((m = h1Re.exec(text)) !== null) {
-    heads.push({ start: m.index, end: m.index + m[0].length });
-    if (headStart < 0 && String(m[1]).includes(key)) {
-      headStart = m.index;
-      bodyStart = m.index + m[0].length;
-    }
-  }
-  if (headStart < 0) return [];
-
-  const next = heads.find((h) => h.start > headStart);
-  const block = text.slice(bodyStart, next ? next.start : undefined);
-
-  const out = [];
-  const seen = new Set();
-  const re = /<span[^>]*class="[^"]*text-primary[^"]*"[^>]*>([\s\S]{0,80}?)<\/span>/gi;
-  while ((m = re.exec(block)) !== null) {
-    const raw = String(m[1] || "").replace(/<[^>]+>/g, "").trim();
-    if (!/^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,}$/i.test(raw)) continue;
-    const host = normalizeHost(raw);
-    if (seen.has(host)) continue;
-    seen.add(host);
-    out.push(host);
-  }
-  return out;
-}
-
-/** 同构校验：首页能抓到 /v/{id} 才算真站 */
-async function probeGcavHost(host) {
-  try {
-    const r = await withHardTimeout(
-      nodeRequest(`${host}/`, {
-        timeout: PROBE_TIMEOUT,
-        headers: { "User-Agent": UA, Referer: `${host}/` },
-      }),
-      PROBE_TIMEOUT,
-      `probe ${host}`
-    );
-    const body = String(r.body || "");
-    return r.statusCode >= 200 && r.statusCode < 400
-      && body.length > 3000
-      && /\/v\/\d+/.test(body);
-  } catch (_) { return false; }
-}
-
 /**
  * 恢复域名池：以「上次成功域」优先，并剔除已确认失效的域。
- * 目标：避免每次启动都从头扫描发布页，减少无谓探测。
+ * 目标：优先复用上次成功域，减少无谓的轮换尝试。
  */
 async function restoreHostCache() {
   if (HOST_POOL_READY) return;
@@ -464,123 +390,7 @@ function markHostAlive(host) {
   schedulePersistHosts();
 }
 
-/** 分批探测候选域名：每批 PROBE_BATCH_SIZE 个，批间 sleep */
-/** 拉发布页：SDK 优先、Node 直连兜底（部分网络下直连会 ECONNRESET） */
-async function fetchPublishPage(url) {
-  const headers = {
-    "User-Agent": UA,
-    Accept: "text/html,application/xhtml+xml,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    Referer: `${url.replace(/\/+$/, "")}/`,
-  };
-  const timeout = Math.max(5000, Number(process.env.GCAV_PUBLISH_TIMEOUT || 12000) || 12000);
-  const errors = [];
-
-  if (OmniBox && typeof OmniBox.request === "function") {
-    try {
-      const r = await withHardTimeout(
-        Promise.resolve(OmniBox.request(url, { method: "GET", headers, timeout })),
-        timeout,
-        `publish sdk ${url}`
-      );
-      const body = typeof r?.body === "string" ? r.body : "";
-      if (Number(r?.statusCode) === 200 && body.length > 500) return body;
-      errors.push(`sdk HTTP ${r?.statusCode ?? "?"} len=${body.length}`);
-    } catch (e) {
-      errors.push(`sdk ${e?.message || e}`);
-    }
-  }
-
-  try {
-    const r = await withHardTimeout(
-      nodeRequest(url, { timeout, headers }),
-      timeout,
-      `publish node ${url}`
-    );
-    const body = String(r.body || "");
-    if (Number(r.statusCode) === 200 && body.length > 500) return body;
-    errors.push(`node HTTP ${r.statusCode} len=${body.length}`);
-  } catch (e) {
-    errors.push(`node ${e?.message || e}`);
-  }
-
-  throw new Error(`发布页两条通道均失败: ${errors.join(" | ")}`);
-}
-
-async function discoverGcavHosts() {
-  const candidates = new Set();
-  let publishOk = false;
-  try {
-    log("info", `[hosts] 拉取发布页 ${PUBLISH_PAGE}`);
-    const body = await fetchPublishPage(PUBLISH_PAGE);
-    const found = extractSectionHosts(body, PUBLISH_SECTION);
-    found.forEach((h) => candidates.add(h));
-    log("info", `[hosts] 发布页「${PUBLISH_SECTION}」解析到 ${found.length} 个域名`);
-    publishOk = true;
-  } catch (e) {
-    log("info", `[hosts] 发布页拉取失败: ${e?.message || e}`);
-  }
-
-  if (!publishOk) {
-    log("info", "[hosts] 发布页不可用，保留现有域名池不变");
-    return 0;
-  }
-
-  const newOnes = Array.from(candidates).filter((h) => !HOST_POOL.includes(h));
-  if (!newOnes.length) {
-    log("info", "[hosts] 发布页无新域名，无需探测");
-    return 0;
-  }
-  log("info", `[hosts] 待探测 ${newOnes.length} 个新域名，每批 ${PROBE_BATCH_SIZE} 个`);
-
-  let added = 0;
-  for (let i = 0; i < newOnes.length; i += PROBE_BATCH_SIZE) {
-    const batch = newOnes.slice(i, i + PROBE_BATCH_SIZE);
-    const batchNo = Math.floor(i / PROBE_BATCH_SIZE) + 1;
-    log("info", `[hosts] 探测批次 ${batchNo}: ${batch.length} 个`);
-    const results = await Promise.allSettled(batch.map((h) => probeGcavHost(h)));
-    for (let k = 0; k < batch.length; k++) {
-      if (results[k].status !== "fulfilled" || !results[k].value) continue;
-      const host = batch[k];
-      HOST_POOL.push(host);
-      hostHealth[host] = { fail: 0, okAt: Date.now() };
-      added++;
-      log("info", `[hosts] 发现可用站点 -> ${host}`);
-    }
-    if (i + PROBE_BATCH_SIZE < newOnes.length) {
-      await new Promise((r) => setTimeout(r, PROBE_BATCH_DELAY));
-    }
-  }
-  if (added) log("info", `[hosts] 本次新增 ${added} 个，池共 ${HOST_POOL.length} 个`);
-  try {
-    await OmniBox.setCache(
-      HOSTS_CACHE_KEY,
-      { at: Date.now(), hosts: HOST_POOL.slice() },
-      HOSTS_CACHE_TTL
-    );
-  } catch (_) {}
-  return added;
-}
-
-/** 仅在 force=true 时拉发布页；并发去重 */
-async function ensureHostsFresh(force) {
-  await restoreHostCache();
-  if (!force) return 0;
-  if (hostsRefreshInFlight) return hostsRefreshInFlight;
-  hostsRefreshInFlight = (async () => {
-    try {
-      log("info", "[hosts] 全部域名不可达，从发布页拉取新域名");
-      return await discoverGcavHosts();
-    } catch (e) {
-      log("info", `[hosts] 拉取新域名异常: ${e?.message || e}`);
-      return 0;
-    } finally {
-      hostsRefreshInFlight = null;
-    }
-  })();
-  return hostsRefreshInFlight;
-}
-
+/** 不再从发布页拉取新域名：只恢复一次内置域名池缓存 */
 /** 切换到池中下一个域名 */
 function rotateHost() {
   if (HOST_POOL.length <= 1) return false;
@@ -661,7 +471,7 @@ function swapHost(url, from, to) {
 
 /**
  * 请求：先用当前 HOST；失败则依次轮换池内其它域名；
- * 全部失败才去发布页拉新域名（被动触发），再重试一轮。
+ * 全部失败时不再拉发布页，仅在内置域名池内重排后重试一轮。
  */
 async function requestText(url, options = {}) {
   // 首次调用时恢复缓存域名池
@@ -689,8 +499,7 @@ async function requestText(url, options = {}) {
   try {
     return await tryHosts(ordered);
   } catch (firstErr) {
-    // 全部已知域名失败 → 发布页拉新域名后重试
-    await ensureHostsFresh(true);
+    // 全部域名失败：仅在内置域名池内重试（不再从发布页拉取）
     const more = [HOST, ...HOST_POOL.filter((h) => h !== HOST)];
     try {
       return await tryHosts(more);
@@ -1058,7 +867,7 @@ function buildLegacyFields(sources) {
 // ---------------------------------------------------------------------------
 /**
  * 站点主域和图片 CDN 是两套解析：
- *   站点  → gcav.me（有发布页可切换）
+ *   站点  → gcav.me（内置域名池可切换）
  *   图床  → gc.skylines.pro（CloudFront）/ gc-b.skylines.pro（Bunny）
  * 主域换到新地址后，图床仍可能不可达（CloudFront 常被墙）。
  * 处理：同一张图按 CDN 列表依次尝试；成功则内联 data URI，

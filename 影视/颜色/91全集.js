@@ -1,7 +1,7 @@
 // @name 91全集
-// @version 1.1.0
+// @version 1.1.1
 // @author omnibox-spider
-// @description 91quanji.com（木瓜视频/KVS Paysite）采集源：新增地址发布页 mgbbr.com/91bbr.com（XOR129 解混淆 + 同构校验 + 被动触发 + 死域淘汰）；修复封面（图床 pics.uoepp.com 有 Referer 防盗链，脚本内带 Referer 抓取并转 data:image 内联）+ 补 Node 直连兜底（宿主缺 OmniBox.request 时不再整体失败）；10 个真实分类 + 首页推荐 + 搜索分页；卡片解析封面/标题；详情页反混淆 eval(I(...)) 直取签名 m3u8；tag 分类 token 分页链（进程内+SDK 缓存）、搜索 p=N、三段式播放兜底
+// @description 91quanji.com（木瓜视频/KVS Paysite）采集源：只用主域 + 内置域名池轮换，不再从发布页拉取新域名；修复封面（图床 pics.uoepp.com 有 Referer 防盗链，脚本内带 Referer 抓取并转 data:image 内联）+ 补 Node 直连兜底（宿主缺 OmniBox.request 时不再整体失败）；10 个真实分类 + 首页推荐 + 搜索分页；卡片解析封面/标题；详情页反混淆 eval(I(...)) 直取签名 m3u8；tag 分类 token 分页链（进程内+SDK 缓存）、搜索 p=N、三段式播放兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91全集.js
 // @dependencies []
 
@@ -194,84 +194,16 @@ const HOSTS = (() => {
 })();
 let PREFERRED = 0;
 
-/* ==================== 地址发布页（被动触发） ====================
- * 发布页：https://mgbbr.com/  （标题「木瓜视频 | 永久网址 | 最新地址发布页」）
- * 另有同款镜像：https://91bbr.com/（内容完全一致，可作发布页兜底）
- *
- * ⚠️ 发布页里的域名是 XOR 129 混淆的，页面内联函数：
- *      function l(r){var n="";for(i=0;i<r.length;++i)n+=String.fromCharCode(129^r.charCodeAt(i));return n}
- *      <script>document.write(l('½à¡éóäç¼£éõõñò»®®...'))</script>
- *    解码后得到真实地址（实测）：
- *      sp123.cc/mugua   → 跳转型入口
- *      91quanji.com     → 真实内容站（即本源默认站点）✅
- *      91bbr.com        → 发布页镜像（非内容站）
- *    注意：用户给的 muguad.cfd 当前**不可用**（HTTP→HTTPS 301 死循环 +
- *    HTTPS PROTOCOL_ERROR），但站点 JS 里 muguad.cfd 与 91quanji.com 同属
- *    这条线，所以它只是镜像域名之一，不是独立站点。
- *
- * 策略与其它源一致：不做定时刷新；全部已知域名失败才拉发布页；
- * 候选域名分批探测（每批 10 个）并做同构校验，通过才入池；
+/* ==================== 域名池（主域 + 内置容灾，不再拉发布页） ====================
+ * 只用主域 DEFAULT_HOST（91quanji.com）+ SITE_HOSTS 追加的内置域名轮换；
+ * 不再从 mgbbr.com / 91bbr.com 等发布页拉取新域名（用户要求，浪费时间）。
  * 成功域置顶持久化、连续失败 2 次判死移出池。
  * ============================================================== */
-const PUBLISH_PAGES = String(process.env.QUANJI_PUBLISH_PAGES || 'https://mgbbr.com/,https://91bbr.com/')
-  .split(',').map((x) => x.trim()).filter(Boolean);
 const HOSTS_CACHE_KEY = 'quanji:hosts:v1';
 const HOSTS_CACHE_TTL = 30 * 24 * 3600;
-const PROBE_BATCH_SIZE = (() => {
-  const n = Number(String(process.env.QUANJI_PROBE_BATCH || '').trim() || 10);
-  return Number.isFinite(n) && n > 0 ? Math.min(20, Math.floor(n)) : 10;
-})();
-const PROBE_BATCH_DELAY = 200;
-const PROBE_TIMEOUT = Math.max(3000, Number(process.env.QUANJI_PROBE_TIMEOUT || 8000) || 8000);
 let HOST_POOL_READY = false;
 let hostsRefreshInFlight = null;
 const hostHealth = Object.create(null);
-
-/** 发布页域名解码：XOR 129 */
-function decodePublishText(raw) {
-  return String(raw || '').split('').map((c) => String.fromCharCode(129 ^ c.charCodeAt(0))).join('');
-}
-
-/** 从发布页 HTML 里解出真实域名候选（排除发布页自身/邮箱/社交） */
-function extractPublishHosts(html) {
-  const s = String(html || '');
-  const out = [];
-  const seen = new Set();
-  // 1) 解出所有 l('...') 里的内容
-  let text = s;
-  const lRe = /l\('([^']+)'\)/g;
-  let m;
-  const decoded = [];
-  while ((m = lRe.exec(s)) !== null) decoded.push(decodePublishText(m[1]));
-  if (decoded.length) text = decoded.join('\n');
-
-  const re = /https?:\/\/([a-z0-9][a-z0-9.-]*\.[a-z]{2,})(\/[a-z0-9_-]*)?/gi;
-  while ((m = re.exec(text)) !== null) {
-    const host = m[1].toLowerCase();
-    if (/gmail|qq\.com|163\.com|telegram|t\.me|x\.com|twitter|google|yandex|cloudflare/i.test(host)) continue;
-    const origin = `https://${host}`;
-    if (seen.has(origin)) continue;
-    seen.add(origin);
-    out.push(origin);
-  }
-  return out;
-}
-
-/** 同构校验：首页必须能抓到 item thumb / watch.jsp 卡片 */
-async function probeHost(origin) {
-  try {
-    const r = await nodeRequest(`${origin}/`, {
-      timeout: PROBE_TIMEOUT,
-      headers: { 'User-Agent': UA, Referer: `${origin}/` },
-    });
-    const body = String(r.body || '');
-    if (r.statusCode < 200 || r.statusCode >= 400) return false;
-    if (body.length < 5000) return false;
-    const cards = (body.match(/item thumb/g) || []).length;
-    const watches = (body.match(/watch\.jsp\?v=/g) || []).length;
-    return cards >= 3 || watches >= 5;
-  } catch (_) { return false; }
-}
 
 async function restoreHostCache() {
   if (HOST_POOL_READY) return;
@@ -351,84 +283,10 @@ function markHostDead(host, reason) {
   }
 }
 
-async function discoverHosts() {
-  const candidates = new Set();
-  let publishOk = false;
-  for (const page of PUBLISH_PAGES) {
-    try {
-      logI(`[hosts] 拉取发布页 ${page}`);
-      const r = await nodeRequest(page, { timeout: 15000, headers: { 'User-Agent': UA } });
-      const body = String(r.body || '');
-      if (r.statusCode !== 200 || body.length < 100) continue;
-      publishOk = true;
-      const found = extractPublishHosts(body);
-      found.forEach((h) => candidates.add(h));
-      logI(`[hosts] ${page} 解析到 ${found.length} 个候选`);
-      if (found.length) break;
-    } catch (e) {
-      logI(`[hosts] 发布页 ${page} 拉取失败: ${e.message}`);
-    }
-  }
-
-  if (!publishOk) {
-    logI('[hosts] 发布页不可用，保留现有域名池不变');
-    return 0;
-  }
-
-  const newOnes = Array.from(candidates).filter((h) => !HOSTS.includes(h));
-  if (!newOnes.length) {
-    logI('[hosts] 发布页无新域名，无需探测');
-    return 0;
-  }
-  logI(`[hosts] 待探测 ${newOnes.length} 个新域名（含同构校验），每批 ${PROBE_BATCH_SIZE} 个`);
-
-  let added = 0;
-  for (let i = 0; i < newOnes.length; i += PROBE_BATCH_SIZE) {
-    const batch = newOnes.slice(i, i + PROBE_BATCH_SIZE);
-    const batchNo = Math.floor(i / PROBE_BATCH_SIZE) + 1;
-    logI(`[hosts] 探测批次 ${batchNo}: ${batch.length} 个`);
-    const results = await Promise.allSettled(batch.map((h) => probeHost(h)));
-    for (let k = 0; k < batch.length; k++) {
-      if (results[k].status !== 'fulfilled' || !results[k].value) {
-        logI(`[hosts] 跳过非同构域名 ${batch[k]}`);
-        continue;
-      }
-      HOSTS.push(batch[k]);
-      hostHealth[batch[k]] = { fail: 0, okAt: Date.now(), dead: false };
-      added++;
-      logI(`[hosts] 发现可用站点 -> ${batch[k]}`);
-    }
-    if (i + PROBE_BATCH_SIZE < newOnes.length) {
-      await new Promise((r) => setTimeout(r, PROBE_BATCH_DELAY));
-    }
-  }
-  if (added) logI(`[hosts] 本次新增 ${added} 个，池共 ${HOSTS.length} 个`);
-  try {
-    await OmniBox.setCache(
-      HOSTS_CACHE_KEY,
-      { at: Date.now(), active: HOSTS[PREFERRED], hosts: HOSTS.slice(), dead: Object.keys(hostHealth).filter((h) => hostHealth[h] && hostHealth[h].dead) },
-      HOSTS_CACHE_TTL
-    );
-  } catch (_) {}
-  return added;
-}
-
 async function ensureHostsFresh(force) {
+  // 不再从发布页拉取新域名：只恢复一次内置域名池缓存
   await restoreHostCache();
-  if (!force) return 0;
-  if (hostsRefreshInFlight) return hostsRefreshInFlight;
-  hostsRefreshInFlight = (async () => {
-    try {
-      logI('[hosts] 全部域名不可达，从发布页拉取新域名');
-      return await discoverHosts();
-    } catch (e) {
-      logI(`[hosts] 拉取新域名异常: ${e.message}`);
-      return 0;
-    } finally {
-      hostsRefreshInFlight = null;
-    }
-  })();
-  return hostsRefreshInFlight;
+  return 0;
 }
 
 const UA = String(process.env.NINETYONE_UA || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
@@ -629,8 +487,7 @@ async function fetchPage(path) {
   const hit = await tryAll();
   if (hit) return hit;
 
-  // 全部已知域名失败 → 去发布页拉新域名（被动触发），再重试一轮
-  await ensureHostsFresh(true);
+  // 全部域名失败：不再从发布页拉取，仅在内置域名池内重排后重试一轮
 
   // 重试前重排：把「已判死」和「失败过」的域名排到池尾，让新增的干净域名优先。
   // （markHostDead 在池里只剩一个域时不会删除，避免清空池；

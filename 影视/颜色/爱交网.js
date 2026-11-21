@@ -1,7 +1,7 @@
 // @name 爱交网
 // @author 宝宝巴士
-// @description 爱交网(aijiaox.com，发布页 aafd.shsivadqh.com/contact)：首页/分类/搜索/详情/播放；域名池被动发布页更新+软隔离；播放走 POST /videos/{数字ID}/playback 取签名 m3u8；分类名取链接文本(非父分组)，qnlycc.cn 图床(new2 .webp / pic .jpeg)封面 AES 解密内联(JPEG/PNG/WebP)
-// @version 1.0.3
+// @description 爱交网(aijiaox.com)：首页/分类/搜索/详情/播放；只用主域+内置域名池轮换(不再从发布页拉取)+软隔离；播放走 POST /videos/{数字ID}/playback 取签名 m3u8；分类名取链接文本(非父分组)，qnlycc.cn 图床(new2 .webp / pic .jpeg)封面 AES 解密内联(JPEG/PNG/WebP)
+// @version 1.0.4
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/爱交网.js
 // @dependencies axios,cheerio,crypto
 /**
@@ -9,11 +9,10 @@
  *
  * 【站点事实（2026-11-18 实测）】
  *   Vue SPA + 服务端渲染， nginx，域名多且经常更换。
- *   当前入口 aafd.shsivadqh.com（可能 RST），发布页 /contact/
- *   发布页给的真实可用域：e576.kajiljnx.cc、aijiaox.com（永久）、
- *     aijiaowang1.pages.dev / aijiaowang1.github.io（永久入口）
+ *   主域 aijiaox.com + 内置备用域（e576.kajiljnx.cc / pages.dev / github.io 等）。
+ *   不再从 /contact/ 发布页动态拉取域名（用户要求，浪费请求）。
  *   部分 IP 被 RST：aafd/aijiaox 解析到 103.49.212.243 会 RST，
- *     43.230.144.239 可用 —— 靠域名池轮换来兜。
+ *     43.230.144.239 可用 —— 靠内置域名池轮换来兜。
  *
  * 【路由】
  *   首页：/                          卡片 72 个 video-card-item
@@ -46,15 +45,11 @@ const PREFIX = '[aijiao]';
 const UA = String(process.env.AJ_UA || '').trim()
   || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-/** 发布页 API： GitLab/GitHub Pages 不用；直接抓当前域的 /contact/ 提取域名 */
-const PUBLISH_PATH = '/contact/';
 const HOSTS_CACHE_KEY = 'aijiao:hosts:v1';
 const HOSTS_CACHE_TTL = 30 * 24 * 3600;
-const PROBE_BATCH = 6;
-const PROBE_TIMEOUT = Math.max(3000, Number(process.env.AJ_PROBE_TIMEOUT || 8000) || 8000);
 const REQ_TIMEOUT = Math.max(5000, Number(process.env.AJ_TIMEOUT || 15000) || 15000);
 
-/** 内置域名（发布页拉不到时兜底）。第一个是发布页当前给的最新可用域。 */
+/** 内置域名池（主域不可达时轮换兜底）。不再从发布页动态拉取新域名。 */
 const BUILTIN_HOSTS = String(process.env.AJ_NO_BUILTIN || '') === '1' ? [] : [
   'https://e576.kajiljnx.cc',
   'https://aijiaox.com',
@@ -72,7 +67,6 @@ let HOST_POOL = (() => {
 })();
 let HOST = HOST_POOL[0];
 let HOST_POOL_READY = false;
-let refreshInFlight = null;
 const health = Object.create(null);
 
 module.exports = { home, category, detail, search, play };
@@ -215,20 +209,15 @@ async function restoreHostCache() {
     let obj = saved;
     if (typeof saved === 'string') { try { obj = JSON.parse(saved); } catch (_) { obj = null; } }
     if (!obj || typeof obj !== 'object') return;
-    const dead = new Set((Array.isArray(obj.dead) ? obj.dead : []).map(normalizeOriginRaw));
-    const merged = [];
-    const push = (h) => { const o = normalizeOriginRaw(h); if (o && !merged.includes(o)) merged.push(o); };
-    if (typeof obj.active === 'string') push(obj.active);
-    (Array.isArray(obj.hosts) ? obj.hosts : []).forEach(push);
-    merged.sort((a, b) => (dead.has(a) ? 1 : 0) - (dead.has(b) ? 1 : 0));
-    HOST_POOL = uniq([...HOST_POOL, ...merged.filter((h) => !HOST_POOL.includes(h))]);
+    // 只恢复「成功置顶」的 active 顺序（限于现有主域+内置池），
+    // 不再把缓存里历史由发布页发现的域名并入池。
     if (typeof obj.active === 'string') {
       const a = normalizeOriginRaw(obj.active);
       const idx = HOST_POOL.indexOf(a);
       if (idx > 0) { HOST_POOL.splice(idx, 1); HOST_POOL.unshift(a); }
       HOST = HOST_POOL[0];
     }
-    log('info', `恢复域名池 ${HOST_POOL.length} 个，当前=${HOST}`);
+    log('info', `使用主域+内置域名池 ${HOST_POOL.length} 个，当前=${HOST}（不再从发布页拉取）`);
   } catch (_) {}
 }
 
@@ -266,73 +255,7 @@ function markDead(host, reason) {
   }
 }
 
-function extractPublishHosts(text) {
-  const s = String(text || '');
-  const found = new Set();
-  // 只取发布页「最新地址/永久入口/永久地址」区里的 a 标签 href
-  const re = /href="(https?:\/\/([a-z0-9][a-z0-9.-]*\.[a-z]{2,}))"/gi;
-  let m;
-  while ((m = re.exec(s)) !== null) {
-    const host = m[2].toLowerCase();
-    if (/googletagmanager|google|schema\.org|t\.me|twitter|github\.io/.test(host)) {
-      // pages.dev / github.io 是永久入口，保留 github.io；其余第三方跳过
-      if (!/aijiaowang/i.test(host)) continue;
-    }
-    found.add(`https://${host}`);
-  }
-  return Array.from(found);
-}
-
-async function probeHost(origin) {
-  try {
-    const html = await fetchText(`${origin}${PUBLISH_PATH}`, { timeout: PROBE_TIMEOUT, referer: `${origin}/` });
-    if (html.includes('爱交') || html.includes('aijiaox') || html.includes('latest')) return origin;
-  } catch (_) {}
-  return '';
-}
-
-async function discoverHosts() {
-  let candidates = [];
-  for (const base of HOST_POOL.slice(0, 3)) {
-    try {
-      const html = await fetchText(`${base}${PUBLISH_PATH}`, { timeout: REQ_TIMEOUT });
-      if (html.includes('爱交')) {
-        candidates = extractPublishHosts(html);
-        log('info', `发布页 ${base} 解析到 ${candidates.length} 个域名`);
-        break;
-      }
-    } catch (e) { log('info', `发布页 ${base} 失败: ${e.message.slice(0, 60)}`); }
-  }
-  const newOnes = candidates.filter((h) => !HOST_POOL.includes(h));
-  if (!newOnes.length) return 0;
-  let added = 0;
-  for (let i = 0; i < newOnes.length; i += PROBE_BATCH) {
-    const batch = newOnes.slice(i, i + PROBE_BATCH);
-    const res = await Promise.allSettled(batch.map(probeHost));
-    for (let k = 0; k < batch.length; k++) {
-      if (res[k].status === 'fulfilled' && res[k].value) {
-        HOST_POOL.push(batch[k]);
-        health[batch[k]] = { fail: 0, dead: false };
-        added++;
-        log('info', `发现可用域名 ${batch[k]}`);
-      }
-    }
-  }
-  if (added) schedulePersist();
-  return added;
-}
-
-async function ensureHosts(force) {
-  await restoreHostCache();
-  if (!force || refreshInFlight) return refreshInFlight || 0;
-  refreshInFlight = (async () => {
-    try { log('info', '域名池全部失败，拉取发布页'); return await discoverHosts(); }
-    catch (e) { log('error', `发布页更新异常 ${e.message}`); return 0; }
-    finally { refreshInFlight = null; }
-  })();
-  return refreshInFlight;
-}
-
+/** 统一请求：轮换域名；全部失败时仅在域名池内再试一轮（不再拉发布页） */
 /** 统一请求：轮换域名，全部失败才更新发布页后再试一轮 */
 async function requestHtml(path, options = {}) {
   await restoreHostCache();
@@ -360,7 +283,7 @@ async function requestHtml(path, options = {}) {
   };
   try { return await tryRound(order()); }
   catch (first) {
-    await ensureHosts(true);
+    // 全部域名不可达：不再从发布页拉取新域名，仅在域名池内再重试一轮
     try { return await tryRound(order()); }
     catch (_) { throw first; }
   }

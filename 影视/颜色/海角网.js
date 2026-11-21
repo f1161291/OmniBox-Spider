@@ -1,7 +1,7 @@
 // @name 海角网
 // @author 宝宝巴士
-// @description hjw01.com（海角网）：首页/分类/标签/分页/详情/播放；列表 xqbj-list-rows 取标题/封面；详情页 DPlayer data-config 直取带签名 m3u8；封面图床 pic.gyezbp.cn 为 AES-128-CBC 密文，脚本内解密转 data:image；域名池软隔离（本机 DNS 黑洞/连接重置不计失败，永不删空池）+ 裸域自动补 www.
-// @version 1.1.4
+// @description hjw01.com（海角网）：首页/分类/标签/分页/详情/播放；列表 xqbj-list-rows 取标题/封面；详情页 DPlayer data-config 直取带签名 m3u8；封面图床 pic.gyezbp.cn 为 AES-128-CBC 密文，脚本内解密转 data:image；域名池软隔离（本机 DNS 黑洞/连接重置不计失败，永不删空池）+ 裸域自动补 www.；只用主域+内置域名池，不再从发布页拉取
+// @version 1.1.5
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角网.js
 // @dependencies crypto
 /**
@@ -45,8 +45,6 @@
  * 【环境变量】
  *   HJW_HOST         站点地址，默认 https://www.hjw01.com
  *   HJW_HOSTS        追加备用域名（逗号分隔）
- *   HJW_PUBLISH_API  地址发布页 API，默认 gitlab.com/hjw01.com/dz 的 README
- *   HJW_PROBE_BATCH  发布页候选分批探测大小，默认 10
  *   HJW_NO_BUILTIN   设 1 关闭内置备用域名
  *   HJW_COVER_INLINE 封面内联解密，默认 1；设 0 关闭（回退原始 URL）
  *   HJW_COVER_FILL   无封面卡片从详情页补图的数量，默认 8；设 0 关闭
@@ -77,32 +75,18 @@ const PREFIX = '[hjw]';
 function logI(m) { try { Promise.resolve(OmniBox.log('info', `${PREFIX} ${m}`)).catch(() => {}); } catch (_) {} }
 function logE(m) { try { Promise.resolve(OmniBox.log('error', `${PREFIX} ${m}`)).catch(() => {}); } catch (_) {} }
 
-/* ==================== 域名池与地址发布页（被动触发） ====================
- * 发布页：https://gitlab.com/hjw01.com/dz  （仓库 haijiaowang / README.md）
- * README 里给出 6 个地址：
- *   hjwang43/42/41.com  标「最新/备用(免翻墙)」—— 实测已**被劫持**：
- *                       307 中转页 → www.ivftnysu.cc（「四季养生之道」），已非本站，
- *                       所以不能盲信发布页，必须做同构校验。
- *   haijiaowang.com     永久地址（需翻墙）—— 实测同构可用 ✅
- *   hjw01.com           永久地址（需翻墙）—— 301 → www.hjw01.com，即当前主站 ✅
- *   hjw2026.com         永久中转 —— 实测非内容站
- * 策略与其它源一致：不做定时刷新；只有全部已知域名都访问失败时，
- * 才去发布页拉新域名；候选域名分批探测（每批 10 个），同构校验通过才入池；
- * 成功域置顶持久化、连续失败 2 次判死移出池。
+/* ==================== 域名池（只用主域 + 内置域名，不再从发布页拉取） ====================
+ * 策略（2026-11-24 用户要求：取消发布页地址，浪费时间）：
+ *   1) 只使用主域 HOST（默认 www.hjw01.com）+ 内置域名 BUILTIN_HOSTS + 环境变量 HJW_HOSTS；
+ *   2) 不做定时刷新，也不在全部失败时去发布页拉新域名；
+ *   3) 全部域名不可达时只在现有池内重试一轮；
+ *   4) 成功域置顶持久化、连续失败 2 次软隔离到池尾（永不删空池）。
  * ==================================================================== */
-const PUBLISH_API = String(process.env.HJW_PUBLISH_API
-  || 'https://gitlab.com/api/v4/projects/hjw01.com%2Fdz/repository/files/README.md/raw?ref=main').trim();
 const HOSTS_CACHE_KEY = 'hjw:hosts:v1';
 const HOSTS_CACHE_TTL = 30 * 24 * 3600;
-const PROBE_BATCH_SIZE = (() => {
-  const n = Number(String(process.env.HJW_PROBE_BATCH || '').trim() || 10);
-  return Number.isFinite(n) && n > 0 ? Math.min(20, Math.floor(n)) : 10;
-})();
-const PROBE_BATCH_DELAY = 200;
-const PROBE_TIMEOUT = Math.max(3000, Number(process.env.HJW_PROBE_TIMEOUT || 8000) || 8000);
 const REQUEST_HARD_TIMEOUT = Math.max(3000, Number(process.env.HJW_REQUEST_TIMEOUT || 12000) || 12000);
 
-/** 内置已知可用域名（发布页拉不到时兜底） */
+/** 内置已知可用域名（无发布页，固定为兜底域名池） */
 const BUILTIN_HOSTS = String(process.env.HJW_NO_BUILTIN || '') === '1' ? [] : [
   'https://www.hjw01.com',
   'https://hjw01.com',
@@ -117,7 +101,6 @@ const HOST_POOL = (() => {
   return Array.from(new Set([HOST, ...extra, ...BUILTIN_HOSTS]));
 })();
 let HOST_POOL_READY = false;
-let hostsRefreshInFlight = null;
 const hostHealth = Object.create(null);
 
 /**
@@ -145,20 +128,6 @@ function normalizeOrigin(u) {
     return `${o.protocol}//${o.hostname}`.replace(/\/+$/, '');
   } catch (_) { return s.replace(/\/+$/, ''); }
 }
-/** 生成探测候选：自身 + 裸域/www 互换 */
-function originVariants(origin) {
-  const base = normalizeOrigin(origin);
-  if (!base) return [];
-  const out = [base];
-  try {
-    const o = new URL(base);
-    const host = o.hostname;
-    if (/^www\./i.test(host)) out.push(`${o.protocol}//${host.replace(/^www\./i, '')}`);
-    else out.push(`${o.protocol}//www.${host}`);
-  } catch (_) {}
-  return Array.from(new Set(out));
-}
-
 /** 硬超时包装：宿主 request 不认 timeout 参数，网络卡住会挂很久 */
 function withHardTimeout(promise, ms, label) {
   let timer = null;
@@ -327,7 +296,7 @@ async function requestOnce(url, host) {
 
 /**
  * 抓页面：先试当前 HOST，失败轮换池内其它域名；
- * 全部失败才去发布页拉新域名（被动触发），再重试一轮。
+ * 全部失败时不再拉发布页，仅在现有域名池内再重试一轮。
  */
 async function fetchHtml(url) {
   await restoreHostCache();
@@ -366,63 +335,14 @@ async function fetchHtml(url) {
   try {
     return await tryHosts(ordered);
   } catch (firstErr) {
-    await ensureHostsFresh(true);
-    const more = orderPool();
+    // 不再从发布页拉取新域名：全部失败时只在现有池内重试一次
+    logI('[hosts] 所有域名不可达，仅在内置域名池内重试一次（不再拉发布页）');
     try {
-      return await tryHosts(more);
+      return await tryHosts(orderPool());
     } catch (_) {
       throw firstErr;
     }
   }
-}
-
-/* ---------------- 发布页域名发现 ---------------- */
-
-/** 从发布页文本抽取域名候选（排除第三方/社交/邮箱） */
-function extractPublishHosts(text) {
-  const s = String(text || '');
-  const out = [];
-  const seen = new Set();
-  const re = /https?:\/\/([a-z0-9][a-z0-9.-]*\.[a-z]{2,})/gi;
-  let m;
-  while ((m = re.exec(s)) !== null) {
-    const host = m[1].toLowerCase();
-    if (/gitlab|github|telegram|t\.me|x\.com|twitter|google|yandex|cloudflare|pm\.me|peach-av|huoma/i.test(host)) continue;
-    // 发布页里这些域名已被劫持(跳四季养生)或非内容站，直接跳过，不再浪费探测请求
-    if (/^(hjwang4[123]\.com|hjw2026\.com)$/.test(host)) continue;
-    if (seen.has(host)) continue;
-    seen.add(host);
-    out.push(`https://${host}`);
-  }
-  return out;
-}
-
-/** 同构校验：首页必须能抓到 /archives/{id} 与列表容器 */
-async function probeHost(origin) {
-  const variants = originVariants(origin);
-  for (const v of variants) {
-    let body = '';
-    try {
-      // 优先走 SDK（与主链路同一条网络通道）；SDK 不可用才回落 Node 直连
-      body = await withHardTimeout(requestOnce(`${v}/`, v), PROBE_TIMEOUT, `probe ${v}`);
-    } catch (e) {
-      const msg = String(e && e.message || e);
-      logI(`[hosts] 探测 ${v} 异常: ${msg}${isEnvError(msg) ? '（本机网络不可达，不计失败）' : ''}`);
-      continue;
-    }
-    const text = String(body || '');
-    if (text.length < 20000) {
-      logI(`[hosts] 探测 ${v} 内容过短 ${text.length}B`);
-      continue;
-    }
-    const archiveCount = (text.match(/\/archives\/\d+/g) || []).length;
-    if (archiveCount >= 10 && (text.includes('xqbj-list') || text.includes('海角'))) {
-      if (v !== normalizeOrigin(origin)) logI(`[hosts] ${origin} 归一化为 ${v}（裸域/www 互换命中）`);
-      return v;
-    }
-    logI(`[hosts] 探测 ${v} 非同构: archives=${archiveCount} xqbj=${text.includes('xqbj-list')} 海角=${text.includes('海角')}`);
-  }
-  return '';
 }
 
 async function restoreHostCache() {
@@ -534,94 +454,6 @@ function markHostDead(host, reason) {
     logI(`[hosts] ${host} 连续失败 ${h.fail} 次，隔离到池尾（${h.lastReason}）`);
     schedulePersistHosts();
   }
-}
-
-async function discoverHosts() {
-  const candidates = new Set();
-  let publishOk = false;
-  try {
-    logI(`[hosts] 拉取发布页 ${PUBLISH_API.slice(0, 80)}`);
-    const r = await withHardTimeout(
-      nodeRequest(PUBLISH_API, { timeout: 15000, headers: { 'User-Agent': UA } }),
-      15000,
-      'publish'
-    );
-    const body = String(r.body || '');
-    if (r.statusCode === 200 && body.length > 100) {
-      publishOk = true;
-      const found = extractPublishHosts(body);
-      found.forEach((h) => candidates.add(h));
-      logI(`[hosts] 发布页解析到 ${found.length} 个候选`);
-    }
-  } catch (e) {
-    logI(`[hosts] 发布页拉取失败: ${e.message}`);
-  }
-
-  if (!publishOk) {
-    logI('[hosts] 发布页不可用，保留现有域名池不变');
-    return 0;
-  }
-
-  const newOnes = Array.from(candidates).filter((h) => !HOST_POOL.includes(h));
-  if (!newOnes.length) {
-    logI('[hosts] 发布页无新域名，无需探测');
-    return 0;
-  }
-  logI(`[hosts] 待探测 ${newOnes.length} 个新域名（含同构校验），每批 ${PROBE_BATCH_SIZE} 个`);
-
-  let added = 0;
-  for (let i = 0; i < newOnes.length; i += PROBE_BATCH_SIZE) {
-    const batch = newOnes.slice(i, i + PROBE_BATCH_SIZE);
-    const batchNo = Math.floor(i / PROBE_BATCH_SIZE) + 1;
-    logI(`[hosts] 探测批次 ${batchNo}: ${batch.length} 个`);
-    const results = await Promise.allSettled(batch.map((h) => probeHost(h)));
-    for (let k = 0; k < batch.length; k++) {
-      const resolved = results[k].status === 'fulfilled' ? results[k].value : '';
-      if (!resolved) {
-        logI(`[hosts] 跳过非同构域名 ${batch[k]}`);
-        continue;
-      }
-      const host = normalizeOrigin(resolved);
-      if (HOST_POOL.includes(host)) {
-        logI(`[hosts] ${batch[k]} 归一化后 ${host} 已在池中，跳过`);
-        continue;
-      }
-      HOST_POOL.push(host);
-      hostHealth[host] = { fail: 0, okAt: Date.now(), dead: false };
-      added++;
-      logI(`[hosts] 发现可用站点 -> ${host}`);
-    }
-    if (i + PROBE_BATCH_SIZE < newOnes.length) {
-      await new Promise((r) => setTimeout(r, PROBE_BATCH_DELAY));
-    }
-  }
-  if (added) logI(`[hosts] 本次新增 ${added} 个，池共 ${HOST_POOL.length} 个`);
-  try {
-    await OmniBox.setCache(
-      HOSTS_CACHE_KEY,
-      { at: Date.now(), active: HOST, hosts: HOST_POOL.slice(), dead: Object.keys(hostHealth).filter((h) => hostHealth[h] && hostHealth[h].dead) },
-      HOSTS_CACHE_TTL
-    );
-  } catch (_) {}
-  return added;
-}
-
-async function ensureHostsFresh(force) {
-  await restoreHostCache();
-  if (!force) return 0;
-  if (hostsRefreshInFlight) return hostsRefreshInFlight;
-  hostsRefreshInFlight = (async () => {
-    try {
-      logI('[hosts] 全部域名不可达，从发布页拉取新域名');
-      return await discoverHosts();
-    } catch (e) {
-      logI(`[hosts] 拉取新域名异常: ${e.message}`);
-      return 0;
-    } finally {
-      hostsRefreshInFlight = null;
-    }
-  })();
-  return hostsRefreshInFlight;
 }
 
 function swapHost(url, from, to) {

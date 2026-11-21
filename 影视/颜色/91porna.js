@@ -1,7 +1,7 @@
 // @name 91porna
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
-// @description 91porna 分流站采集源：5 个镜像域名健康度轮换（web5/web6/web8/web9/061a）+ 页脚最新地址自动发现；/comic/index/detail?video_key= 详情，POST /api/videos/{id}/playback 取 streams.main 正片 m3u8；分类/搜索/分页、短 TTL 缓存、最高档直出
+// @description 91porna 分流站采集源：5 个内置镜像域名健康度轮换（web5/web6/web8/web9/061a），不再从发布页/地址页拉取新域名；/comic/index/detail?video_key= 详情，POST /api/videos/{id}/playback 取 streams.main 正片 m3u8；分类/搜索/分页、短 TTL 缓存、最高档直出
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91porna.js
 // @dependencies cheerio
 
@@ -16,7 +16,7 @@
  *      https://061a.rgwgedvt.cc    页脚标注的「91porn最新地址」
  *    5 个域名的 POST /api/videos/451950/playback 全部返回 status:1 + streams.main，可安全轮换。
  *    页脚原文：<strong>91porn最新地址：</strong><a href="https://061a.rgwgedvt.cc">...
- *    /comic/index/links?key=home 还能发现 web4.rgwgedvt.cc / web5.jddhvwbzx.cc / dizhi8.pages.dev 等更多备用域。
+ *    说明：061a 作为内置域名放在首位，脚本不再从 /comic/index/links 等地址页动态拉取更多备用域。
  * 2) 路由（Tailwind + 自研前端）：
  *      - 首页 /
  *      - 分类 /comic/index/video?category={slug}   （play 正在播放 / now_month_hot 热门 /
@@ -45,7 +45,7 @@
  *    分别给「文章内嵌视频」和「卡片悬停预览」用，主播放走 /api/videos/{id}/playback。
  * 5) 【域名轮换】HOSTS 按健康度排序：被判定失败/拦截的域名在 PORNA_ROTATE_COOLDOWN（默认 600s）
  *    内降权；成功过的域名写回 PREFERRED，后续请求优先复用它。全部域名失败时，
- *    自动抓 /comic/index/links?key=home 发现新镜像并立即重试本次请求。
+ *    不再从地址页拉取新域名，仅在本脚本内置域名池内重试。
  *
  * 【环境变量】
  *  PORNA_HOSTS             逗号分隔覆盖默认 5 域名（优先级最高）
@@ -271,32 +271,6 @@ async function fetchHtml(path, ttl, refererPath) {
   const r = await requestWithRotation(path, { refererPath });
   if (ttl > 0) await setCachedText(key, r.body, ttl);
   return r.body;
-}
-
-/**
- * 全部域名失败时，抓「最新地址」页自动发现新镜像，并入 HOSTS 后重试一次。
- * 只探测一轮，避免在整站不可达时反复打请求。
- */
-async function discoverHosts() {
-  try {
-    const html = await requestWithRotation("/comic/index/links?key=home", { allowShort: true }).then((r) => r.body);
-    const found = Array.from(new Set(
-      String(html).match(/https?:\/\/[a-z0-9.-]+\.(?:cc|com|net|dev|top|xyz|pages\.dev)/gi) || []
-    )).map(normalizeHost).filter((h) => h && !HOSTS.includes(h));
-    let added = 0;
-    for (const h of found) {
-      // 只收看起来像分流镜像的（含 web/数字前缀的短域名），排除社交/统计/文档域
-      if (!/\/\/[a-z0-9]{3,8}\.[a-z0-9-]{5,20}\.(cc|com|net|dev|top|xyz)/i.test(h)) continue;
-      HOSTS.push(h);
-      hostHealth[h] = { fail: 0, okAt: 0, blockedAt: 0 };
-      added++;
-      log("info", `[rotate] 发现新镜像 -> ${h}`);
-    }
-    return added;
-  } catch (e) {
-    log("info", `[rotate] 地址发现失败: ${(e && e.message) || e}`);
-    return 0;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -561,14 +535,7 @@ async function play(params, context) {
     try {
       url = await postPlayback(id, `/comic/index/detail?video_key=${id}`);
     } catch (e) {
-      log("info", `[play] playback 全部失败，尝试自动发现新镜像: ${e?.message || e}`);
-      if (!globalThis.__pornaDiscovered) {
-        globalThis.__pornaDiscovered = true;
-        if (await discoverHosts() > 0) {
-          try { url = await postPlayback(id, `/comic/index/detail?video_key=${id}`); }
-          catch (e2) { log("error", `[play] 新镜像重试仍失败: ${e2?.message || e2}`); }
-        }
-      }
+      log("info", `[play] playback 内置域名池全部失败（不再从地址页拉取）: ${e?.message || e}`);
     }
 
     if (url && isMediaUrl(url)) {
