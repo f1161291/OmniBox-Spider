@@ -1,7 +1,7 @@
 // @name 91视频
 // @author 宝宝巴士
 // @description 91视频(2707.zsqwupvt.cc) 采集源：官网同款二级菜单（5 分组 30 子项）；首页/分类/详情/播放；封面 qnlycc AES 解密内联；播放走 POST /videos/{id}/playback 取签名 m3u8 正片（webm 是广告）；多域名轮换
-// @version 1.0.2
+// @version 1.0.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91视频.js
 // @dependencies axios,cheerio,crypto
 /**
@@ -275,7 +275,8 @@ async function play(params) {
   if (!playId) return { urls: [], flag: 'default', header: {}, parse: 1, danmaku: '' };
   try {
     let url = '';
-    const headers = { 'User-Agent': UA, Referer: `${HOSTS[0]}/`, Origin: HOSTS[0] };
+    // header 只保留 UA + Referer（实测 m3u8/key/ts 均无需 x-cdn-*/Origin，多余 Origin 可能触发 CORS）
+    const headers = { 'User-Agent': UA, Referer: `${HOSTS[0]}/` };
     if (playId.startsWith('pb:')) {
       // 真实正片：POST /videos/{id}/playback → streams.main（签名 HLS）
       const vid = playId.slice(3);
@@ -284,13 +285,13 @@ async function play(params) {
         try {
           const res = await axios.post(`${host}/videos/${vid}/playback`, {}, {
             timeout: TIMEOUT, validateStatus: () => true,
-            headers: { ...headers, 'Content-Type': 'application/json', Accept: 'application/json' },
+            headers: { ...headers, 'Content-Type': 'application/json', Accept: 'application/json', Origin: HOSTS[0] },
           });
           if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
           const json = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
           const stream = json && json.data && json.data.streams;
           const m3u8 = stream && (stream.main || stream.hevc || stream.preview);
-          if (m3u8) { url = m3u8; headers['x-cdn-auth'] = '4aae16c3b20ec822f87518504478bb35'; headers['x-cdn-app'] = '017'; break; }
+          if (m3u8) { url = m3u8; break; }
           throw new Error(`playback code=${json && json.code}`);
         } catch (e) { lastErr = e; }
       }
