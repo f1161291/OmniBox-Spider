@@ -1,7 +1,7 @@
 // @name 91视频
 // @author 宝宝巴士
 // @description 91视频(2707.zsqwupvt.cc) 采集源：官网同款二级菜单（5 分组 30 子项）；首页/分类/详情/播放；封面 qnlycc AES 解密内联；播放走 POST /videos/{id}/playback 取签名 m3u8 正片（webm 是广告）；多域名轮换
-// @version 1.0.8
+// @version 1.0.9
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91视频.js
 // @dependencies axios,cheerio,crypto
 /**
@@ -284,10 +284,6 @@ async function detail(params, context) {
     const episodes = [];
     if (!isArticle && /^\d+$/.test(id)) {
       episodes.push({ name: '正片', playId: `pb:${id}` });
-      // embed 播放页线路：某些网页播放器原生 <video> 不支持加密 HLS，
-      // 提供 embed 页让宿主走嗅探/软解兜底
-      episodes.push({ name: '备用-网页播放页', playId: `embed:${HOSTS[0]}/videos/embed/${id}/` });
-      if (context && context.from === 'web') episodes.reverse();
     }
     const sources = episodes.length ? [{ name: '默认线路', episodes }] : [];
     const playFrom = sources.map((s) => s.name).join('$$$');
@@ -306,15 +302,21 @@ async function detail(params, context) {
   }
 }
 
-async function play(params) {
+async function play(params, context) {
   const p = (typeof params === 'string') ? { playId: params } : (params || {});
   const playId = String(p.playId || p.url || '').trim();
   if (!playId) return { urls: [], flag: 'default', header: {}, parse: 1, danmaku: '' };
   try {
     let url = '';
-    // 1.0.5 实测：OmniBox 播放器带 x-cdn-app 能秒播；1.0.6 去掉后全部端转圈。
-    // 该 CDN（yd-mqfm-*.tjyyjk.cn）实际需要 x-cdn-app 才稳定放行，必须带上。
-    const headers = { 'User-Agent': UA, Referer: `${HOSTS[0]}/`, 'x-cdn-app': '017' };
+    // 端差异化 header：
+    //   · 网页端(web)/OK影视(tvbox/uz)：URL 自带 auth_key(含017) 鉴权，裸请求实测 200+CORS全开；
+    //     这两个端不消费脚本返回的自定义 header，带 x-cdn-app 反而可能触发其播放器异常 → 用极简 header
+    //   · OmniBox 播放器(其它 from)：消费 header，带 x-cdn-app 秒播（1.0.5 已验证）
+    const from = String((context && context.from) || '').toLowerCase();
+    const needsCdnHeader = !['web', 'tvbox', 'uz', 'catvod', 'emby'].includes(from);
+    const headers = needsCdnHeader
+      ? { 'User-Agent': UA, Referer: `${HOSTS[0]}/`, 'x-cdn-app': '017' }
+      : { 'User-Agent': UA, Referer: `${HOSTS[0]}/` };
     if (playId.startsWith('embed:')) {
       // 备用线路：把 embed 播放页交给播放器自己嗅探（parse=1）
       const embedUrl = playId.slice(6);
