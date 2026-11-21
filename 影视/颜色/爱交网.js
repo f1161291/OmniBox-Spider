@@ -1,7 +1,7 @@
 // @name 爱交网
 // @author 宝宝巴士
 // @description 爱交网(aijiaox.com)：首页/分类/搜索/详情/播放；只用主域+内置域名池轮换(不再从发布页拉取)+软隔离；播放走 POST /videos/{数字ID}/playback 取签名 m3u8；分类名取链接文本(非父分组)，qnlycc.cn 图床(new2 .webp / pic .jpeg)封面 AES 解密内联(JPEG/PNG/WebP)
-// @version 1.0.5
+// @version 1.1.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/爱交网.js
 // @dependencies axios,cheerio,crypto
 /**
@@ -318,6 +318,68 @@ function parseCards(html) {
   return dedupeBy(list, (x) => x.vod_id);
 }
 
+/**
+ * 官网二级菜单（2026-11-22 实测 e576.kajiljnx.cc）：7 个分组 + 49 个子分类。
+ * 硬编码而非动态解析：站点常有跳转/CDN 波动，动态抓易失败；且与官网展示一致。
+ */
+const CATEGORY_GROUPS = [
+  { id: 'group:remen', name: '热门', subs: [
+    ['口交口爆','blowjob'],['粉嫩萝莉','luoli'],['乳交奶水','paizuri'],['潮吹喷水','chaochui'],
+    ['肛交爆菊','gangjiao'],['母乳奶水','muru'],['无套内射','neishe'],['多P群交','qunjiao'],
+    ['手交控射','ziwei'],['足控足交','footjob'],
+  ]},
+  { id: 'group:zhifu', name: '制服诱惑', subs: [
+    ['空姐','kongjie'],['护士装','hushizhuang'],['兔女郎','bunnygirl'],['女仆装','maid'],
+    ['JK','jk'],['警服','jingfu'],['瑜伽裤','yujiaku'],['旗袍','qipao'],
+  ]},
+  { id: 'group:wanghong', name: '反差网红', subs: [
+    ['玩偶姐姐','hongkongdoll'],['台北娜娜','taipeinana'],['桥本香菜','qiaobenxiangcai'],
+    ['饼干姐姐','bingganjiejie'],['创可贴贴','77bandage'],['绯红小猫','kittyxkum'],['其他网红','qitawanghong'],
+  ]},
+  { id: 'group:jpav', name: '日本AV', subs: [
+    ['高清AV','gqav'],['素人FC2','srfc2'],
+  ]},
+  { id: 'group:chuandui', name: '国产传媒', subs: [
+    ['糖心Vlog','tangxin'],['精东影业','jingdong'],['麻豆传媒','madouchuanmei'],
+    ['果冻传媒','guodongchuanmei'],['天美传媒','tianmeichuanmei'],['星空传媒','xingkongchuanmei'],
+    ['杏吧原创','xingbayuanchuang'],['萝莉社','luolishe'],['91制片厂','91zhipianchang'],['Swag','swag'],
+  ]},
+  { id: 'group:oumei', name: '欧美精选', subs: [
+    ['汝工作室','banana-fever'],['Tushy','tushy'],['捷克搭讪','czech-pickup'],['BBC','bbc'],
+    ['啄木鸟','woodpecker'],['出租车','chuzuche'],['跨性别','trans'],
+  ]},
+  { id: 'group:duanju', name: 'AI短剧', subs: [
+    ['小说短剧','xsdj'],['武侠短剧','wxdj'],['都市短剧','dsdj'],['漫改短剧','mgdj'],['单体短剧','dtdj'],
+  ]},
+];
+const TOP_CLASSES = [
+  { type_id: 'all', type_name: '全部最新' },
+  ...CATEGORY_GROUPS.map((g) => ({ type_id: g.id, type_name: g.name })),
+];
+function buildClassFilters() {
+  const filters = {};
+  for (const g of CATEGORY_GROUPS) {
+    filters[g.id] = [{
+      key: 'sub', name: '子分类', init: '',
+      value: [{ name: '全部', value: '' }, ...g.subs.map(([name, slug]) => ({ name, value: slug }))],
+    }];
+  }
+  return filters;
+}
+function pickSubCategory(params) {
+  const p = params || {};
+  for (const key of ['filters', 'extend', 'ext', 'filter']) {
+    let v = p[key];
+    if (!v) continue;
+    if (typeof v === 'string') { try { v = JSON.parse(v); } catch (_) { v = null; } }
+    if (!v || typeof v !== 'object') continue;
+    const sub = v.sub ?? v['子分类'];
+    const slug = String(Array.isArray(sub) ? (sub[0] || '') : (sub || '')).trim();
+    if (/^[a-z0-9_-]+$/i.test(slug)) return slug;
+  }
+  return '';
+}
+
 function parseCategories(html) {
   const $ = cheerio.load(String(html || ''), { decodeEntities: false });
   const seen = new Set();
@@ -359,20 +421,28 @@ async function estimatePageCount(slug, page, html, count) {
 async function home() {
   try {
     const html = await requestHtml('/');
-    const classList = parseCategories(html);
+    // 官网同款二级菜单（硬编码，7 分组 + filters 子分类）
+    const classList = [...TOP_CLASSES];
+    const filters = buildClassFilters();
     const list = await fillCovers(parseCards(html).slice(0, 60));
-    log('info', `home class=${classList.length} list=${list.length}`);
-    return { class: classList, list };
+    log('info', `home class=${classList.length} list=${list.length} filters=${Object.keys(filters).length}`);
+    return { class: classList, list, filters };
   } catch (e) {
     log('error', `home ${e.message}`);
-    return { class: [], list: [] };
+    return { class: TOP_CLASSES, list: [], filters: buildClassFilters() };
   }
 }
 
 async function category(params) {
   const p = params || {};
-  const slug = String(p.categoryId || p.type_id || p.tid || '').trim();
+  let slug = String(p.categoryId || p.type_id || p.tid || '').trim();
   const page = Math.max(1, Number(p.page || 1) || 1);
+  const sub = pickSubCategory(p);
+  if (sub) slug = sub;
+  else if (/^group:/i.test(slug)) {
+    const g = CATEGORY_GROUPS.find((x) => x.id === slug);
+    slug = (g && g.subs[0]) ? g.subs[0][1] : '';
+  }
   if (!slug) return { page, pagecount: 0, total: 0, limit: 0, list: [] };
   try {
     const path = page > 1 ? `/category/${slug}/${page}/` : `/category/${slug}/`;
