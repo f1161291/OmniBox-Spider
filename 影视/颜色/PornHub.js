@@ -1,13 +1,13 @@
 // @name PornHub
-// @version 1.0.1
+// @version 1.0.2
 // @author omnibox-spider
-// @description cn.pornhub.com 采集源：首页推荐 + 17 个分类（巨乳/巨屌/内射/女同等）+ 排序 + 搜索分页；列表取 pcVideoListItem 卡片（带 viewkey、封面、时长、观看数、评分），详情页从 flashvars_{id} 解析 mediaDefinitions 的 HLS 直链（仅保留 1080P/720P，1080P 优先）
+// @description pornhub.com 采集源：首页推荐 + 17 个分类（巨乳/巨屌/内射/女同等）+ 排序 + 搜索分页；列表取 pcVideoListItem 卡片（带 viewkey、封面、时长、观看数、评分），详情页从 flashvars_{id} 解析 mediaDefinitions 的 HLS 直链（仅保留 1080P/720P，1080P 优先）
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/PornHub.js
 // @dependencies cheerio
 
 /**
  * 实站事实（2026-11-14 实测，改代码前先读这段）
- * 1) 主域 https://cn.pornhub.com（pornhub.com 的简体中文镜像）。常规 UA + Referer 即可，无 CF 盾、无 JS cookie 挑战。
+ * 1) 主域 https://pornhub.com。常规 UA + Referer 即可，无 CF 盾、无 JS cookie 挑战。
  * 2) 路由：
  *      - 首页 /
  *      - 分类 /video?c=<分类ID>（见 CLASS_LIST，17 个；c=111 日本人 / c=8 巨乳 / c=7 巨屌 等）
@@ -41,7 +41,7 @@
  * 6) 列表/详情/搜索走短 TTL 缓存（PORNHUB_CACHE_TTL，默认 600）；play 不缓存（签名链接随会话刷新）。
  *
  * 【环境变量】（优先复用仓库既有命名）
- *  SITE_HOST          站点基址，默认 https://cn.pornhub.com；主域轮换（如 pornhub.com）改这里
+ *  SITE_HOST          站点基址，默认 https://pornhub.com；换其它镜像域改这里
  *  SITE_COOKIE        可选，站点登录态 Cookie（影响是否出现 Premium / 会员片，普通片不需要）
  *  PORNHUB_CACHE_TTL  页面缓存秒数，默认 600（新增，避免与别的站点 TTL 串用）
  *  PORNHUB_PROXY_URL  可选，能访问 Pornhub 视频 CDN 的出口（仅提示用场，由宿主 OmniBox.request 注入）
@@ -74,17 +74,17 @@ try {
 
 function normalizeHost(value) {
   const raw = String(value || "").trim().replace(/\/+$/, "");
-  if (!raw) return "https://cn.pornhub.com";
+  if (!raw) return "https://pornhub.com";
   const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
   try {
     const u = new URL(withProtocol);
     return `${u.protocol}//${u.host}`;
   } catch (_) {
-    return "https://cn.pornhub.com";
+    return "https://pornhub.com";
   }
 }
 
-const HOST = normalizeHost(process.env.SITE_HOST || "https://cn.pornhub.com");
+const HOST = normalizeHost(process.env.SITE_HOST || "https://pornhub.com");
 const SITE_COOKIE = String(process.env.SITE_COOKIE || "").trim();
 // 视/听首页分类：简体中文镜像实测的 17 个分类（id 来自 /video?c=NNN，名称来自 a 标签 alt）
 const CLASS_LIST = [
