@@ -1,7 +1,7 @@
 // @name 91视频
 // @author 宝宝巴士
 // @description 91视频(2707.zsqwupvt.cc) 采集源：官网同款二级菜单（5 分组 30 子项）；首页/分类/详情/播放；封面 qnlycc AES 解密内联；播放走 POST /videos/{id}/playback 取签名 m3u8 正片（webm 是广告）；多域名轮换
-// @version 1.0.5
+// @version 1.0.7
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91视频.js
 // @dependencies axios,cheerio,crypto
 /**
@@ -265,7 +265,7 @@ async function search(params) {
   return { page: 1, pagecount: 0, total: 0, limit: 0, list: [] };
 }
 
-async function detail(params) {
+async function detail(params, context) {
   const p = (typeof params === 'string') ? { videoId: params } : (params || {});
   const raw = String(p.videoId || p.vod_id || p.id || '').trim();
   if (!raw) return { list: [] };
@@ -282,7 +282,13 @@ async function detail(params) {
     // 播放：页面 <video src=webm> 是广告/预告；真实正片走 POST /videos/{id}/playback
     // 这里只透传视频 ID，play() 里实时请求签名 m3u8（有时效，不能缓存到详情）
     const episodes = [];
-    if (!isArticle && /^\d+$/.test(id)) episodes.push({ name: '正片', playId: `pb:${id}` });
+    if (!isArticle && /^\d+$/.test(id)) {
+      episodes.push({ name: '正片', playId: `pb:${id}` });
+      // embed 播放页线路：某些网页播放器原生 <video> 不支持加密 HLS，
+      // 提供 embed 页让宿主走嗅探/软解兜底
+      episodes.push({ name: '备用-网页播放页', playId: `embed:${HOSTS[0]}/videos/embed/${id}/` });
+      if (context && context.from === 'web') episodes.reverse();
+    }
     const sources = episodes.length ? [{ name: '默认线路', episodes }] : [];
     const playFrom = sources.map((s) => s.name).join('$$$');
     const playUrlField = sources.map((s) => s.episodes.map((e) => `${e.name}$${e.playId}`).join('#')).join('$$$');
@@ -306,8 +312,17 @@ async function play(params) {
   if (!playId) return { urls: [], flag: 'default', header: {}, parse: 1, danmaku: '' };
   try {
     let url = '';
-    // 对齐官网播放器：m3u8/key/ts 请求带 x-cdn-app（官网 xhrSetup 就是这么加的）
-    const headers = { 'User-Agent': UA, Referer: `${HOSTS[0]}/`, 'x-cdn-app': '017' };
+    // 实测 m3u8/key/ts 裸请求 200 + CORS 全开，不需要任何自定义 header。
+    // 网页端播放器对额外 header（尤其 x-cdn-app）处理不一致，返回空 header 最稳。
+    const headers = {};
+    if (playId.startsWith('embed:')) {
+      // 备用线路：把 embed 播放页交给播放器自己嗅探（parse=1）
+      const embedUrl = playId.slice(6);
+      return {
+        urls: [{ name: '网页播放页', url: embedUrl }], flag: 'default', header: {},
+        parse: 1, danmaku: '',
+      };
+    }
     if (playId.startsWith('pb:')) {
       // 真实正片：POST /videos/{id}/playback → streams.main（签名 HLS）
       const vid = playId.slice(3);
