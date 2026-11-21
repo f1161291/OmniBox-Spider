@@ -1,5 +1,5 @@
 // @name PornHub
-// @version 1.0.4
+// @version 1.0.5
 // @author omnibox-spider
 // @description cn.pornhub.com 采集源：首页推荐 + 19 个分类（巨乳/巨屌/内射/女同等）+ 排序 + 搜索分页；列表取 pcVideoListItem 卡片（带 viewkey、封面、时长、观看数、评分），详情页从 flashvars_{id} 解析 mediaDefinitions 的 HLS 直链（仅保留 1080P/720P，1080P 优先）
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/PornHub.js
@@ -254,6 +254,17 @@ function loadHtml(html) {
 // 列表解析（首页 / 分类 / 搜索通用）
 // ---------------------------------------------------------------------------
 
+/**
+ * PornHub 卡片图默认 rs:fit:320:180（缩略图，糊）。
+ * 把尺寸参数升级到 640:360 取更清晰图；PornHub CDN 的 rs:fit:W:H 支持任意尺寸。
+ */
+function upgradePornhubImage(url) {
+  const u = String(url || '').trim();
+  if (!u) return u;
+  // rs:fit:320:180 / rs:fit:150:188 → rs:fit:640:360（保持宽高比由 CDN 处理）
+  return u.replace(/rs:fit:\d{2,4}:\d{2,4}/gi, 'rs:fit:640:360');
+}
+
 function pickCardImages($el) {
   // 高清优先 data-image，其次 data-src，最后 src；最后过滤 1x1 占位图
   const cands = [
@@ -263,9 +274,9 @@ function pickCardImages($el) {
   ].map((x) => (x || "").trim()).filter(Boolean);
   for (const c of cands) {
     if (/^data:image/.test(c)) continue; // 跳过 base64 占位图
-    return c;
+    return upgradePornhubImage(c);
   }
-  return cands[0] || "";
+  return upgradePornhubImage(cands[0] || "");
 }
 
 function parseList(html, tag) {
