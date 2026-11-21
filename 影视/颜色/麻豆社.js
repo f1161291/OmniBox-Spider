@@ -1,5 +1,5 @@
 // @name 🔞麻豆社
-// @version 1.0.1
+// @version 1.1.2
 // @author omnibox-spider
 // @description 麻豆社（madou.club）OmniBox 源：WordPress/Mirages 主题首页·分类·搜索·详情；详情解析 dash.madou.club/share/<id> iframe，实时取 share 页 JWT 后拼 /videos/<id>/index.m3u8，parse=0 直链播放；内置 stdout 消毒。
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/麻豆社.js
@@ -261,6 +261,57 @@ async function getHtml(url, ttl = CACHE_TTL) {
 
 /* ---------------- 列表解析 ---------------- */
 
+/**
+ * 站点卡片图是 -240x180 缩略图（糊）；去掉尺寸后缀取原图。
+ * WordPress/Mirages 命名：xxx-240x180.jpg → xxx.jpg
+ */
+function upgradeCover(url) {
+  const u = String(url || '').trim();
+  if (!u) return u;
+  // 只处理 /covers/ 路径下的 -WxH 后缀（避免误伤其它图）
+  return u.replace(/(\/covers\/[^?#]*?)-\d{2,4}x\d{2,4}(\.(?:jpg|jpeg|png|webp))/i, '$1$2');
+}
+
+/** 原图探测结果缓存：url -> 'ok' | 'fallback' */
+const _coverProbeCache = new Map();
+/**
+ * 尝试原图：探测原图 URL 是否真的返回图片；否则回退到传入的缩略图 URL。
+ * @param {string} thumbUrl 站点给的（可能是 -240x180 缩略图）
+ */
+async function resolveCoverBest(thumbUrl) {
+  const thumb = String(thumbUrl || '').trim();
+  if (!thumb) return '';
+  const original = upgradeCover(thumb);
+  if (original === thumb) return thumb; // 没有尺寸后缀，无需探测
+  if (_coverProbeCache.has(original)) {
+    return _coverProbeCache.get(original) === 'ok' ? original : thumb;
+  }
+  try {
+    const res = await nativeHttpGet(original, { timeout: 6000, maxBytes: 2048, method: 'GET' });
+    const ct = String((res.headers && (res.headers['content-type'] || res.headers['Content-Type'])) || '');
+    const ok = res.statusCode === 200 && /^image\//i.test(ct);
+    _coverProbeCache.set(original, ok ? 'ok' : 'fallback');
+    return ok ? original : thumb;
+  } catch (_) {
+    _coverProbeCache.set(original, 'fallback');
+    return thumb;
+  }
+}
+
+/** 批量把列表封面的缩略图升级为原图（探测失败自动回退），并发 4 */
+async function upgradeCoverList(list) {
+  if (!Array.isArray(list)) return list;
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(4, list.length) }, async () => {
+    while (idx < list.length) {
+      const i = idx++;
+      if (list[i] && list[i].vod_pic) list[i].vod_pic = await resolveCoverBest(list[i].vod_pic);
+    }
+  });
+  await Promise.all(workers);
+  return list;
+}
+
 function pickImage(card) {
   const cands = [];
   const re = /(?:data-src|data-original|data-lazy-src|src)\s*=\s*["']([^"']+)["']/gi;
@@ -339,6 +390,64 @@ function urlFromVideoId(id) {
 
 /* ---------------- 分类 / 筛选 ---------------- */
 
+/**
+ * 官网菜单（2026-11-22 实测 madou.club）：顶级分类 + 「其他原创/企划」二级分组(28 子项)。
+ * 硬编码而非首页动态解析：该站常有 451/跳转，动态抓取易失败。
+ */
+const CATEGORY_GROUPS = [
+  {
+    id: 'group:original', name: '其他原创/企划',
+    subs: [
+      ['HongKongDoll', 'hongkongdoll'], ['PsychopornTW', 'psychoporntw'],
+      ['91制片厂', '91%E5%88%B6%E7%89%87%E5%8E%82'], ['果冻传媒', '%E6%9E%9C%E5%86%BB%E4%BC%A0%E5%AA%92'],
+      ['蜜桃影像', '%E8%9C%9C%E6%A1%83%E5%BD%B1%E5%83%8F'], ['天美传媒', '%E5%A4%A9%E7%BE%8E%E4%BC%A0%E5%AA%92'],
+      ['皇家华人', '%E7%9A%87%E5%AE%B6%E5%8D%8E%E4%BA%BA'], ['兔子先生', '%E5%85%94%E5%AD%90%E5%85%88%E7%94%9F'],
+      ['星空无限传媒', '%E6%98%9F%E7%A9%BA%E6%97%A0%E9%99%90%E4%BC%A0%E5%AA%92'], ['爱豆', '%E7%88%B1%E8%B1%86'],
+      ['麻豆导演系列', '%E9%BA%BB%E8%B1%86%E5%AF%BC%E6%BC%94%E7%B3%BB%E5%88%97'], ['大象传媒', '%E5%A4%A7%E8%B1%A1%E4%BC%A0%E5%AA%92'],
+      ['猫爪影像', '%E7%8C%AB%E7%88%AA%E5%BD%B1%E5%83%8F'], ['精东影业', '%E7%B2%BE%E4%B8%9C%E5%BD%B1%E4%B8%9A'],
+      ['杏吧', '%E6%9D%8F%E5%90%A7'], ['乐播传媒', '%E4%B9%90%E6%92%AD%E4%BC%A0%E5%AA%92'],
+      ['草莓', '%E8%8D%89%E8%8E%93'], ['抖阴', '%E6%8A%96%E9%98%B4'],
+      ['SA国际传媒', 'sa%E5%9B%BD%E9%99%85%E4%BC%A0%E5%AA%92'], ['起点传媒/性视界传媒', '%E8%B5%B7%E7%82%B9%E4%BC%A0%E5%AA%92-%E6%80%A7%E8%A7%86%E7%95%8C%E4%BC%A0%E5%AA%92'],
+      ['大鸟十八', '%E5%A4%A7%E9%B8%9F%E5%8D%81%E5%85%AB'], ['小鹏奇啪行', '%E5%B0%8F%E9%B9%8F%E5%A5%87%E5%93%AA%E8%A1%8C'],
+      ['女优淫娃培训营', '%E5%A5%B3%E4%BC%98%E6%B7%AB%E5%A8%A5%E5%9F%B9%E8%AE%AD%E8%90%A5'], ['淫欲游戏王', '%E6%B7%AB%E6%AC%B2%E6%B8%B8%E6%88%8F%E7%8E%8B'],
+      ['女神羞羞研究所', '%E5%A5%B3%E7%A5%9E%E7%BE%9E%E7%BE%9E%E7%A0%94%E7%A9%B6%E6%89%80'], ['突袭女优家', '%E7%AA%81%E8%A5%B2%E5%A5%B3%E4%BC%98%E5%AE%B6'],
+      ['情趣K歌房', '%E6%83%85%E8%B6%A3K%E6%AD%8C%E6%88%BF'], ['KISS糖果屋', 'kiss%E7%B3%96%E6%9E%9C%E5%B1%8B'],
+    ],
+  },
+];
+const TOP_CATEGORIES = [
+  { type_id: 'likes', type_name: '点赞排行' },
+  { type_id: 'week', type_name: '7天热门' },
+  { type_id: 'month', type_name: '30天热门' },
+  { type_id: '/category/%E9%BA%BB%E8%B1%86%E4%BC%A0%E5%AA%92', type_name: '麻豆传媒' },
+  { type_id: '/category/%E9%BA%BB%E8%B1%86%E7%95%AA%E5%A4%96%E7%AF%87', type_name: '麻豆番外篇' },
+  { type_id: '/category/%E9%BA%BB%E8%B1%86%E8%8A%B1%E7%B5%AE', type_name: '麻豆花絮' },
+  ...CATEGORY_GROUPS.map((g) => ({ type_id: g.id, type_name: g.name })),
+];
+function buildClassFilters() {
+  const filters = {};
+  for (const g of CATEGORY_GROUPS) {
+    filters[g.id] = [{
+      key: 'sub', name: '子分类', init: '',
+      value: [{ name: '全部', value: '' }, ...g.subs.map(([name, slug]) => ({ name, value: `/category/${slug}` }))],
+    }];
+  }
+  return filters;
+}
+function pickSubCategory(body) {
+  const b = body || {};
+  for (const key of ['filters', 'extend', 'ext', 'filter']) {
+    let v = b[key];
+    if (!v) continue;
+    if (typeof v === 'string') { try { v = JSON.parse(v); } catch (_) { v = null; } }
+    if (!v || typeof v !== 'object') continue;
+    const sub = v.sub ?? v['子分类'];
+    const val = String(Array.isArray(sub) ? (sub[0] || '') : (sub || '')).trim();
+    if (val) return val;
+  }
+  return '';
+}
+
 function parseNavCategories(html) {
   const out = [];
   const seen = new Set();
@@ -414,26 +523,33 @@ async function home(params, context) {
   try {
     logI(`[home] from=${context?.from || "web"} 入口`);
     const html = await getHtml(SITE + "/", CACHE_TTL);
-    const list = parseCards(html, 24);
-    const classes = parseNavCategories(html);
-    const classList = [{ type_id: "likes", type_name: "点赞排行" }, ...classes];
-    logI(`[home] list=${list.length} classes=${classList.length}`);
-    return { class: classList, list, filters: {} };
+    const list = await upgradeCoverList(parseCards(html, 24));
+    // 官网同款二级菜单（硬编码，避免 451/跳转导致动态解析失败）
+    const classList = [...TOP_CATEGORIES];
+    const filters = buildClassFilters();
+    logI(`[home] list=${list.length} classes=${classList.length} filters=${Object.keys(filters).length}`);
+    return { class: classList, list, filters };
   } catch (err) {
     logE(`[home] 失败: ${err.message || err}`);
-    return { class: [], list: [], filters: {} };
+    return { class: TOP_CATEGORIES, list: [], filters: buildClassFilters() };
   }
 }
 
 async function category(params, context) {
   const body = objectOf(params);
   const page = Math.max(1, toInt(body.page ?? body.pg, 1));
-  const typeId = str(body.categoryId ?? body.type_id ?? body.id ?? "likes");
+  let typeId = str(body.categoryId ?? body.type_id ?? body.id ?? "likes");
+  const sub = pickSubCategory(body);
+  if (sub) typeId = sub;
+  else if (/^group:/i.test(typeId)) {
+    const g = CATEGORY_GROUPS.find((x) => x.id === typeId);
+    typeId = (g && g.subs[0]) ? `/category/${g.subs[0][1]}` : 'likes';
+  }
   try {
     const url = buildCategoryPageUrl(typeId, page);
     logI(`[category] typeId=${typeId} page=${page} url=${url}`);
     const html = await getHtml(url, CACHE_TTL);
-    const list = parseCards(html, 100);
+    const list = await upgradeCoverList(parseCards(html, 100));
     const pagecount = parsePageCount(html, page);
     logI(`[category] list=${list.length} pagecount=${pagecount}`);
     return { page, pagecount, total: list.length ? (page - 1) * 20 + list.length : 0, limit: 20, list };
@@ -459,7 +575,8 @@ async function detail(params, context) {
     const poster = shareId ? `${DASH}/videos/${shareId}/poster.jpg` : "";
     const ogPic = str((html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) || [])[1] || "");
     const coverPic = str((html.match(/<img[^>]+(?:data-src|src)=["']([^"']*\/covers\/[^"']+)["']/i) || [])[1] || "");
-    const pic = poster || (ogPic ? absUrl(ogPic) : "") || (coverPic ? absUrl(coverPic) : "");
+    // 封面优先用站点 og:image / covers 原图（去 -WxH 缩略后缀）；dash poster 只是兜底（偏糊/偏透明）
+    const pic = await resolveCoverBest(ogPic ? absUrl(ogPic) : (coverPic ? absUrl(coverPic) : (poster || "")));
     const catM = html.match(/<span[^>]*class=["'][^"']*item-3[^"']*["'][^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i);
     const tags = [...html.matchAll(/<a[^>]+href=["'][^"']*\/tag\/[^"']+["'][^>]*>([^<]+)<\/a>/gi)].map((m) => cleanText(m[1])).filter(Boolean);
     const descM = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i);
@@ -503,7 +620,7 @@ async function search(params, context) {
     if (page > 1) url = new URL(`/page/${page}?s=${encodeURIComponent(keyword)}`, SITE).href;
     logI(`[search] keyword=${keyword} page=${page} url=${url}`);
     const html = await getHtml(url, CACHE_TTL);
-    const list = parseCards(html, 100);
+    const list = await upgradeCoverList(parseCards(html, 100));
     const pagecount = parsePageCount(html, page);
     logI(`[search] keyword=${keyword} list=${list.length} pagecount=${pagecount}`);
     return { page, pagecount, total: list.length ? (page - 1) * 20 + list.length : 0, limit: 20, list };
