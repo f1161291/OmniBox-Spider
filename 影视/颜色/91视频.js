@@ -1,7 +1,7 @@
 // @name 91视频
 // @author 宝宝巴士
 // @description 91视频(2707.zsqwupvt.cc) 采集源：官网同款二级菜单（5 分组 30 子项）；首页/分类/详情/播放；封面 qnlycc AES 解密内联；播放直链 webm/m3u8；多域名轮换
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91视频.js
 // @dependencies axios,cheerio,crypto
 /**
@@ -63,10 +63,8 @@ const CATEGORY_GROUPS = [
     ['街头搭讪', 'videos/category/gyds'], ['H动漫', 'videos/category/hdm'],
   ]},
 ];
-const TOP_CLASSES = [
-  { type_id: 'all', type_name: '首页推荐' },
-  ...CATEGORY_GROUPS.map((g) => ({ type_id: g.id, type_name: g.name })),
-];
+// 只保留 5 个分组（首页推荐与首页内容重复，不再单列；category 仍兼容 all→home 兜底）
+const TOP_CLASSES = CATEGORY_GROUPS.map((g) => ({ type_id: g.id, type_name: g.name }));
 function buildClassFilters() {
   const filters = {};
   for (const g of CATEGORY_GROUPS) {
