@@ -1,5 +1,5 @@
 // @name 🔞麻豆社
-// @version 1.1.0
+// @version 1.1.1
 // @author omnibox-spider
 // @description 麻豆社（madou.club）OmniBox 源：WordPress/Mirages 主题首页·分类·搜索·详情；详情解析 dash.madou.club/share/<id> iframe，实时取 share 页 JWT 后拼 /videos/<id>/index.m3u8，parse=0 直链播放；内置 stdout 消毒。
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/麻豆社.js
@@ -261,6 +261,17 @@ async function getHtml(url, ttl = CACHE_TTL) {
 
 /* ---------------- 列表解析 ---------------- */
 
+/**
+ * 站点卡片图是 -240x180 缩略图（糊）；去掉尺寸后缀取原图。
+ * WordPress/Mirages 命名：xxx-240x180.jpg → xxx.jpg
+ */
+function upgradeCover(url) {
+  const u = String(url || '').trim();
+  if (!u) return u;
+  // 只处理 /covers/ 路径下的 -WxH 后缀（避免误伤其它图）
+  return u.replace(/(\/covers\/[^?#]*?)-\d{2,4}x\d{2,4}(\.(?:jpg|jpeg|png|webp))/i, '$1$2');
+}
+
 function pickImage(card) {
   const cands = [];
   const re = /(?:data-src|data-original|data-lazy-src|src)\s*=\s*["']([^"']+)["']/gi;
@@ -271,7 +282,7 @@ function pickImage(card) {
     const abs = absUrl(v);
     if (abs) cands.push(abs);
   }
-  return cands[0] || "";
+  return upgradeCover(cands[0] || "");
 }
 function parseCards(html, limit = 100) {
   const out = [];
@@ -524,7 +535,8 @@ async function detail(params, context) {
     const poster = shareId ? `${DASH}/videos/${shareId}/poster.jpg` : "";
     const ogPic = str((html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) || [])[1] || "");
     const coverPic = str((html.match(/<img[^>]+(?:data-src|src)=["']([^"']*\/covers\/[^"']+)["']/i) || [])[1] || "");
-    const pic = poster || (ogPic ? absUrl(ogPic) : "") || (coverPic ? absUrl(coverPic) : "");
+    // 封面优先用站点 og:image / covers 原图（去 -WxH 缩略后缀）；dash poster 只是兜底（偏糊/偏透明）
+    const pic = upgradeCover(ogPic ? absUrl(ogPic) : (coverPic ? absUrl(coverPic) : (poster || "")));
     const catM = html.match(/<span[^>]*class=["'][^"']*item-3[^"']*["'][^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i);
     const tags = [...html.matchAll(/<a[^>]+href=["'][^"']*\/tag\/[^"']+["'][^>]*>([^<]+)<\/a>/gi)].map((m) => cleanText(m[1])).filter(Boolean);
     const descM = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i);
