@@ -1,5 +1,5 @@
 // @name PornHub
-// @version 1.0.3
+// @version 1.0.4
 // @author omnibox-spider
 // @description cn.pornhub.com 采集源：首页推荐 + 19 个分类（巨乳/巨屌/内射/女同等）+ 排序 + 搜索分页；列表取 pcVideoListItem 卡片（带 viewkey、封面、时长、观看数、评分），详情页从 flashvars_{id} 解析 mediaDefinitions 的 HLS 直链（仅保留 1080P/720P，1080P 优先）
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/PornHub.js
@@ -120,6 +120,24 @@ const SORT_OPTIONS = [
   { name: "最热", value: "ht" },
   { name: "最多收藏", value: "tr" },
   { name: "最长", value: "lg" },
+];
+
+// 「国产剧情」搜索页的相关子分类（对应站内 ?search= 标签）
+const GC_SUB_OPTIONS = [
+  { name: "最新", value: "国产剧情" },
+  { name: "中国极品美女", value: "中国 极 品 美女" },
+  { name: "国产自拍", value: "国产自拍" },
+  { name: "露脸国语对白", value: "露 脸 国 语 对 白" },
+  { name: "麻豆传媒", value: "麻豆传媒" },
+  { name: "国产", value: "国产" },
+  { name: "18岁嫩妹", value: "18岁嫩妹" },
+  { name: "台灣", value: "台灣" },
+  { name: "中国人 chinese", value: "中国人 chinese" },
+  { name: "国产偷拍", value: "国产偷拍" },
+  { name: "剧情", value: "剧情" },
+  { name: "中国 按摩", value: "中国 按摩" },
+  { name: "内射", value: "内射" },
+  { name: "中国", value: "中国" },
 ];
 const SORT_WHITELIST = new Set(SORT_OPTIONS.map((o) => o.value).filter(Boolean));
 
@@ -338,9 +356,17 @@ async function home(params, context) {
     const list = parseList(html, "home");
     const filters = {};
     for (const item of CLASS_LIST) {
-      filters[item.type_id] = [
-        { key: "sort", name: "排序", init: "", value: SORT_OPTIONS },
-      ];
+      if (item.type_id === "search:国产剧情") {
+        // 国产剧情：子分类（站内相关搜索标签）+ 排序
+        filters[item.type_id] = [
+          { key: "sub", name: "子分类", init: "国产剧情", value: GC_SUB_OPTIONS },
+          { key: "sort", name: "排序", init: "", value: SORT_OPTIONS.filter((x) => x.value) },
+        ];
+      } else {
+        filters[item.type_id] = [
+          { key: "sort", name: "排序", init: "", value: SORT_OPTIONS },
+        ];
+      }
     }
     log("info", `[home] 返回分类=${CLASS_LIST.length}, 推荐=${list.length}`);
     return { class: CLASS_LIST, filters, list };
@@ -378,8 +404,14 @@ async function category(params, context) {
     const page = Number(params?.page) || 1;
     const filters = readFilters(params);
     const sort = normalizeSort(filters.sort || filters.o || params?.sort);
-    const url = buildCategoryUrl(categoryId, page, sort);
-    log("info", `[category] categoryId=${categoryId}, page=${page}, sort=${sort}, from=${context?.from || "web"}`);
+    // search: 分类支持子分类（sub=关键词），替换实际搜索词
+    let effectiveId = categoryId;
+    if (categoryId.startsWith("search:")) {
+      const sub = String(filters.sub || "").trim();
+      if (sub) effectiveId = `search:${sub}`;
+    }
+    const url = buildCategoryUrl(effectiveId, page, sort);
+    log("info", `[category] categoryId=${categoryId}${effectiveId !== categoryId ? ` sub=${effectiveId.slice(7)}` : ""}, page=${page}, sort=${sort}, from=${context?.from || "web"}`);
     log("info", `[category] 请求 URL=${url}`);
 
     const html = await fetchHtml(url, CATEGORY_TTL);
