@@ -1,7 +1,7 @@
 // @name 91视频
 // @author 宝宝巴士
 // @description 91视频(2707.zsqwupvt.cc) 采集源：官网同款二级菜单（5 分组 30 子项）；首页/分类/详情/播放；封面 qnlycc AES 解密内联；播放走 POST /videos/{id}/playback 取签名 m3u8 正片（webm 是广告）；多域名轮换
-// @version 1.0.7
+// @version 1.0.8
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91视频.js
 // @dependencies axios,cheerio,crypto
 /**
@@ -312,9 +312,9 @@ async function play(params) {
   if (!playId) return { urls: [], flag: 'default', header: {}, parse: 1, danmaku: '' };
   try {
     let url = '';
-    // 实测 m3u8/key/ts 裸请求 200 + CORS 全开，不需要任何自定义 header。
-    // 网页端播放器对额外 header（尤其 x-cdn-app）处理不一致，返回空 header 最稳。
-    const headers = {};
+    // 1.0.5 实测：OmniBox 播放器带 x-cdn-app 能秒播；1.0.6 去掉后全部端转圈。
+    // 该 CDN（yd-mqfm-*.tjyyjk.cn）实际需要 x-cdn-app 才稳定放行，必须带上。
+    const headers = { 'User-Agent': UA, Referer: `${HOSTS[0]}/`, 'x-cdn-app': '017' };
     if (playId.startsWith('embed:')) {
       // 备用线路：把 embed 播放页交给播放器自己嗅探（parse=1）
       const embedUrl = playId.slice(6);
