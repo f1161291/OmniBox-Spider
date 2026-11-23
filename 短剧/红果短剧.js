@@ -4,7 +4,7 @@
 // @name 红果短剧
 // @author OmniBox
 // @description 红果短剧（hongguoduanju.com）：【重要】播放升级：匿名设备注册 + video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa，参考 guoapp 官方模块），修复 App 接口返回 HTTP 200 空体导致取流失败；官网 SSR 分类/搜索/详情 + App 私有播放模型（完整 Argus 551/Ladon 签名 + gzip + player/v1）+ 内置 CENC Range 解密流服务；直接替代旧《红果短剧.py》+《红果短剧-代理.py》，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 1.5.1
+// @version 1.5.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -119,7 +119,7 @@ function sanitizeCookie(value, iid) {
  * 注册是匿名的：无签名头、无账号，POST ttEncrypt(gzip(JSON))。
  * 参考 N3urda/hongguoTV DeviceRegister.kt（GPL-3.0-only）。
  */
-const DR_HOST = 'https://log5-applog-lf.fqnovel.com';
+const DR_HOST = 'https://log.snssdk.com';
 const DR_PATH = '/service/2/device_register/?tt_data=a&cronet_version=8d40f833_2026-03-03&ttnet_version=4.2.243.31-douyin&use_store_region_cookie=1';
 const DR_MAGIC = Buffer.from('746305100000', 'hex');
 const DR_KDF_SALT = Buffer.from(
@@ -148,9 +148,9 @@ function buildRegisterPayload() {
   const header = {
     magic_tag: 'ss_app_log',
     header: {
-      display_name: '红果免费短剧', update_version_code: 73932, manifest_version_code: 73932,
-      app_version_minor: '7.3.9.32', aid: 8662, channel: '69310258a', package: 'com.phoenix.read',
-      app_version: '7.3.9.32', version_code: 73932, sdk_version: '3.7.0-rc.34-fanqie-xiaoshuo',
+      display_name: '红果免费短剧', update_version_code: 74532, manifest_version_code: 74532,
+      app_version_minor: '7.4.5.32', aid: 8662, channel: '69310258a', package: 'com.phoenix.read',
+      app_version: '7.4.5.32', version_code: 74532, sdk_version: '3.7.0-rc.34-fanqie-xiaoshuo',
       sdk_target_version: 29, git_hash: '3a88f4e', os: 'Android', os_version: '12', os_api: 32,
       device_model: 'AOSP on Intel Platform', device_brand: 'SAMSUNG', device_manufacturer: 'Intel',
       cpu_abi: 'arm64-v8a', release_build: 'b5e187f', density_dpi: 360, display_density: 'mdpi',
