@@ -1,5 +1,5 @@
 // @name 91PORNY
-// @version 1.0.1
+// @version 1.1.0
 // @author omnibox-spider
 // @description 91porny.com（九色/91PORNY）采集源：自拍 /video、蝌蚪 /videos、精选 /vod 三频道 + 14 个自拍分类 + 蝌蚪分类 + 搜索分页；详情页 video[data-src] 直取签名 m3u8/mp4（viewhd 自动规范化为 view 避开 VIP 预告片）；列表广告卡过滤、分页页码/总数解析、短 TTL 缓存、直链→sniff→parse=1 三段式播放兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91PORNY.js
@@ -118,6 +118,47 @@ const CATEGORIES = [
   { type_id: 'videos:swag', type_name: '蝌蚪·SWAG' },
   { type_id: 'vod', type_name: '精选视频' },
 ];
+
+/** 二级菜单：按官网两大板块（自拍 video:* / 蝌蚪 videos:*）分组 */
+const CATEGORY_GROUPS = [
+  { id: 'group:zijia', name: '自拍', subs: [
+    ['最近更新','video:latest'],['高清','video:hd'],['当前最热','video:hot-list'],
+    ['最近加精','video:recent-favorite'],['最近得分','video:recent-rating'],
+    ['非付费','video:nonpaid'],['91原创','video:ori'],['10分钟以上','video:long-list'],
+    ['20分钟以上','video:longer-list'],['本月讨论','video:month-discuss'],
+    ['本月收藏','video:top-favorite'],['收藏最多','video:most-favorite'],
+    ['本月最热','video:top-list'],['上月最热','video:top-last'],
+  ]},
+  { id: 'group:kedou', name: '蝌蚪视频', subs: [
+    ['最高评分','videos:top-rated'],['最近更新','videos:latest-updates'],
+    ['最受欢迎','videos:most-popular'],['日韩','videos:japan-korea'],
+    ['国产','videos:chinese'],['欧美','videos:europe-america'],
+    ['动漫','videos:anime'],['无码','videos:unpixelated'],
+    ['麻豆','videos:madou'],['SWAG','videos:swag'],
+  ]},
+];
+const TOP_CLASSES = [
+  ...CATEGORY_GROUPS.map((g) => ({ type_id: g.id, type_name: g.name })),
+  { type_id: 'vod', type_name: '精选视频' },
+];
+function buildClassFilters() {
+  const filters = {};
+  for (const g of CATEGORY_GROUPS) {
+    filters[g.id] = [{
+      key: 'sub', name: '子分类', init: '',
+      value: [{ name: '全部', value: '' }, ...g.subs.map(([name, tid]) => ({ name, value: tid }))],
+    }];
+  }
+  return filters;
+}
+function pickSubTid(p) {
+  p = p || {};
+  const src = p.filters || p.extend || p.ext || p.filter || {};
+  if (typeof src !== 'object') return '';
+  const sub = src.sub ?? src['子分类'];
+  return String(Array.isArray(sub) ? (sub[0] || '') : (sub || '')).trim();
+}
+
 // ==================== 配置区域结束 ====================
 
 // ==================== 工具函数 ====================
@@ -405,10 +446,10 @@ async function home(params, context) {
     const res = await cachedPage('/', CACHE_TTL, 'home');
     const list = parseCards(res.body, res.host);
     logI(`[home] 返回 ${list.length} 条 cached=${res.cached}`);
-    return { class: CATEGORIES, filters: {}, list };
+    return { class: TOP_CLASSES, filters: buildClassFilters(), list };
   } catch (e) {
     logE(`[home] 失败: ${e.message}`);
-    return { class: CATEGORIES, filters: {}, list: [] };
+    return { class: TOP_CLASSES, filters: buildClassFilters(), list: [] };
   }
 }
 
@@ -416,9 +457,15 @@ async function category(params, context) {
   const p = params || {};
   // 兼容宿主把筛选放在 filters / extend / ext 的三种写法
   const filters = p.filters || p.extend || p.ext || {};
-  const tid = p.categoryId || p.type_id || p.tid
+  let tid = p.categoryId || p.type_id || p.tid
     || (filters && (filters.categoryId || filters.type_id || filters.tid))
     || 'video:latest';
+  const subTid = pickSubTid(p);
+  if (subTid) tid = subTid;
+  else if (/^group:/i.test(tid)) {
+    const g = CATEGORY_GROUPS.find((x) => x.id === tid);
+    tid = (g && g.subs[0]) ? g.subs[0][1] : 'video:latest';
+  }
   const page = safeInt(p.page || p.pg, 1);
   const from = (context && context.from) || p.source || 'web';
   const path = categoryPath(tid, page);
