@@ -4,7 +4,7 @@
 // @name 红果短剧
 // @author OmniBox
 // @description 红果短剧（hongguoduanju.com）：【重要】播放升级：匿名设备注册 + video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa，参考 guoapp 官方模块），修复 App 接口返回 HTTP 200 空体导致取流失败；官网 SSR 分类/搜索/详情 + App 私有播放模型（完整 Argus 551/Ladon 签名 + gzip + player/v1）+ 内置 CENC Range 解密流服务；直接替代旧《红果短剧.py》+《红果短剧-代理.py》，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 1.5.2
+// @version 1.6.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -1340,6 +1340,7 @@ const SERIES_PREFIX = 'hg-series-v1:';
 const UA = 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 const APP_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
 const MEDIA_UA = 'com.phoenix.read/71332';
+const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 const PAGE_ATTEMPTS = 3;
 const QUALITY_ORDER = ['2160', '1440', '1080', '720', '576', '540', '480', '360'];
 // 与红果.py 的 vod_play_from/vod_play_url 保持一致，只输出灵风线路。
@@ -2971,6 +2972,18 @@ async function serveMediaHttp(req, res) {
   }
 }
 
+/**
+ * 官网公开 MP4 直链（2026-11-24 实测可用）：
+ *   https://hongguoduanju.com/video/public/{vid}/360p.mp4
+ * 无需设备注册 / 签名 / series_id，只要分集 vid。画质 360p 但稳定可播。
+ * 作为注册的加密流服务（在部分网络环境下 device_id=0 / 空体）之外的可靠兜底。
+ */
+function webMp4Url(videoId) {
+  const vid = String(videoId || '').trim();
+  if (!/^\d+$/.test(vid)) return '';
+  return `https://hongguoduanju.com/video/public/${vid}/360p.mp4`;
+}
+
 async function play(params, context) {
   const flag = text(bodyOf(params)?.flag, '1080P') || '1080P';
   try {
@@ -2989,6 +3002,22 @@ async function play(params, context) {
     const mediaParams = token.kind === 'series-episode'
       ? { sid: token.seriesId, ep: String(token.episode), q: requestedQuality, hg: 'cenc' }
       : { vid: token.videoId, q: requestedQuality, hg: 'cenc' };
+    // 官网公开 MP4 兜底：无需注册/签名，只要 vid 即可拼出直链（360p）。
+    // 对 series-episode 先解析出 vid；对 video 直接用 videoId。
+    let webVid = token.kind === 'video' ? token.videoId : '';
+    if (!webVid && token.kind === 'series-episode') {
+      try { webVid = await resolveSeriesEpisode(token.seriesId, token.episode); } catch (_) {}
+    }
+    const webUrl = webMp4Url(webVid);
+    if (webUrl && process.env.HG_DISABLE_WEB_MP4 !== '1') {
+      await log('info', `[hg][play] 使用官网 MP4 兜底 vid=${webVid} url=${webUrl}`);
+      return {
+        urls: [{ name: '官网360P', url: webUrl }],
+        flag: 'default',
+        header: { 'User-Agent': WEB_UA, Referer: 'https://hongguoduanju.com/' },
+        parse: 0,
+      };
+    }
     const ready = await ensureStreamService();
     const url = mediaEndpointUrl(mediaParams, context);
     if (!ready) await log('warn', `[hg][play] 流服务未通过健康探测，仍返回地址: ${url}`);
