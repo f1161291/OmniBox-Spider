@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：【重要】v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 已验证的 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa，参考 guoapp 官方模块），修复 App 接口返回 HTTP 200 空体导致取流失败；官网 SSR 分类/搜索/详情 + App 私有播放模型（完整 Argus 551/Ladon 签名 + gzip + player/v1）+ 内置 CENC Range 解密流服务；直接替代旧《红果短剧.py》+《红果短剧-代理.py》，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 2.0.0
+// @description 红果短剧（hongguoduanju.com）：v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
+// @version 2.1.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -72,7 +72,7 @@ function normalizeProxyBase(value) {
   if (!v) return '';
   return /^https?:\/\//i.test(v) ? v : `http://${v}`;
 }
-const VIDEO_API = 'https://reading.snssdk.com/novel/player/multi_video_model/player/v1';
+const VIDEO_API = 'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/player/v1';
 const VIDEO_API_FALLBACK = 'https://api5-normal-sinfonlinea.fqnovel.com/novel/player/multi_video_model/player/v1';
 // 【2026-11-16 多集群 fallback】上游网关会静默丢弃 multi_video_model 请求
 // （HTTP 200 / 0 字节 EMPTY_RESPONSE），单个/双域名容易全军覆没。
@@ -90,16 +90,21 @@ const SHORTPLAY_APIS = [
   'https://api5-normal-lq.fqnovel.com/novel/player/video_model/v1/',
   'https://reading.snssdk.com/novel/player/video_model/v1/',
 ];
-const PLAYBACK_UA = 'com.phoenix.read/74332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
+const PLAYBACK_UA = 'com.phoenix.read/74332 (Linux; U; Android 14; zh_CN; 23127PN0CC; Build/UKQ1.230804.001; Cronet/TTNetVersion:8d40f833 2026-03-03 QuicVersion:21ac1950 2025-11-18)';
 const SHORTPLAY_UA = 'com.dragon.read';
+// v2.1.0：按 /tmp/hg_real_playback_capture.txt 的真实抓包对齐；query 顺序本身是签名输入，
+// 具体发送顺序由 PLAYBACK_QUERY_ORDER 固定（见 signPlaybackV5）。
 const PLAYBACK_DEVICE_74332 = {
-  ac: 'wifi', channel: 'update_64', aid: '8662', app_name: 'novelread',
-  version_code: '74332', version_name: '7.4.3.32', device_platform: 'android', os: 'android',
-  ssmix: 'a', device_type: '25053RT47C', device_brand: 'Redmi', language: 'zh', os_api: '36',
-  os_version: '16', manifest_version_code: '74332', resolution: '1280*2772', dpi: '520',
-  update_version_code: '74332', host_abi: 'arm64-v8a', dragon_device_type: 'phone', pv_player: '74332',
-  compliance_status: '0', need_personal_recommend: '1', player_so_load: '1', is_android_pad_screen: '0',
+  device_platform: 'android', os: 'android', ssmix: 'a', _rticket: '', cdid: '',
+  channel: 'xiaomi_8662_64', aid: '8662', app_name: 'novelread',
+  version_code: '74332', version_name: '7.4.3.32', manifest_version_code: '74332', update_version_code: '74332',
+  resolution: '1200*2670', dpi: '460', device_type: '23127PN0CC', device_brand: 'Xiaomi',
+  language: 'zh', os_api: '34', os_version: '14', ac: 'wifi', host_abi: 'arm64-v8a',
+  dragon_device_type: 'phone', pv_player: '74332', compliance_status: '0', need_personal_recommend: '1',
+  player_so_load: '1', is_android_pad_screen: '0', iid: '', device_id: '',
 };
+// 与抓包完全一致的 query 键顺序（签名与最终 URL 共用同一字符串，禁止 sort）。
+const PLAYBACK_QUERY_ORDER = Object.keys(PLAYBACK_DEVICE_74332);
 const DEFAULT_DEVICE = Object.freeze({
   device_id: '1624456208323876',
   iid: '1624456208327972',
@@ -108,8 +113,9 @@ const DEFAULT_DEVICE = Object.freeze({
 });
 
 function sanitizeCookie(value, iid) {
+  // v2.1.0：ttreq 是注册接口 Set-Cookie 下发的必须项，保留（旧版误将其过滤掉）。
   const clean = String(value || '').split(';').map(x => x.trim())
-    .filter(x => x && !x.toLowerCase().startsWith('ttreq=')).join('; ');
+    .filter(x => x).join('; ');
   return clean || `store-region=cn-bj; store-region-src=did; install_id=${iid}`;
 }
 
@@ -2116,12 +2122,24 @@ function v5Rotl64(x, n) {
   return BigInt.asUintN(64, (x << s) | (x >> (64n - s)));
 }
 
-/** query 必须按键名排序（与官方 encodeQuery 一致） */
-function v5EncodeQuery(values) {
+/**
+ * v5 query 编码。
+ * v2.1.0：playback 的 query 顺序本身是签名输入，必须按真实抓包的固定顺序（order）构造；
+ * 未传 order 时保留原 sort 行为，供 video_tab 等 GET 接口继续使用（不破坏 fallback）。
+ */
+function v5EncodeQuery(values, order) {
   const enc = (x) => encodeURIComponent(String(x == null ? '' : x))
     .replace(/%2A/gi, '*')
     .replace(/[!'()]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
-  return Object.keys(values).sort().map((k) => `${enc(k)}=${enc(values[k])}`).join('&');
+  let keys;
+  if (Array.isArray(order) && order.length) {
+    keys = order.filter((k) => Object.prototype.hasOwnProperty.call(values, k));
+    const seen = new Set(keys);
+    for (const k of Object.keys(values)) if (!seen.has(k)) keys.push(k);
+  } else {
+    keys = Object.keys(values).sort();
+  }
+  return keys.map((k) => `${enc(k)}=${enc(values[k])}`).join('&');
 }
 
 /** v5 分支判定：要求 (iv & 15) === 12 */
@@ -2398,15 +2416,18 @@ function v5Medusa(queryHash, f13, ts, who) {
   ]).toString('base64');
 }
 
-/** 生成 v5 播放请求（抖动 _rticket 命中 branch 12） */
-function signPlaybackV5(base, values, body, nowMs) {
+/** 生成 v5 播放请求（抖动 _rticket 命中 branch 12）
+ *  v2.1.0：opts.queryOrder 指定固定 query 顺序（playback 必填，签名与实际发送同一字符串）。
+ */
+function signPlaybackV5(base, values, body, nowMs, opts = {}) {
   const ts = Math.floor(nowMs / 1000) | 0;
   const hasBody = body != null;
   const bodyMd5 = hasBody ? crypto.createHash('md5').update(body).digest() : Buffer.alloc(16);
   const params = Object.assign({}, values);
+  const queryOrder = Array.isArray(opts.queryOrder) ? opts.queryOrder : null;
   for (let offset = 0; offset < 1024; offset++) {
     params._rticket = String(nowMs + offset);
-    const query = v5EncodeQuery(params);
+    const query = v5EncodeQuery(params, queryOrder);
     const queryHash = sm3(Buffer.from(query, 'utf8'));
     if ((v5IV(queryHash, bodyMd5, ts) & 15) !== 12) continue;
 
@@ -2426,7 +2447,7 @@ function signPlaybackV5(base, values, body, nowMs) {
       headers['X-SS-STUB'] = bodyMd5.toString('hex').toUpperCase();
       headers['Content-Type'] = 'application/json; charset=utf-8';
     }
-    return { url: `${base}?${query}`, headers, offset };
+    return { url: `${base}?${query}`, headers, offset, query };
   }
   throw new Error('无法在 1024 次 ticket 尝试内生成 V5 播放签名');
 }
@@ -2436,24 +2457,40 @@ function signPlaybackV5(base, values, body, nowMs) {
  * App 接口已拒绝 v3（argus/ladon），只认 X-Khronos / X-Helios / X-Medusa。
  */
 function playbackRequest(payload, device, apiBase = VIDEO_API) {
+  const nowMs = Date.now();
+  // v2.1.0：payload 由调用方按抓包字段顺序构造（device_level=1 + disable_video_relate_book=false），
+  // gzip 后的字节同时用于 x-ss-stub 与 v5 签名，确保签名/发送完全一致。
   const body = zlib.gzipSync(Buffer.from(payload));
   const values = Object.assign({}, PLAYBACK_DEVICE_74332, {
     device_id: device.device_id,
     iid: device.iid,
     cdid: device.cdid,
   });
-  const signed = signPlaybackV5(apiBase, values, body, Date.now());
+  const signed = signPlaybackV5(apiBase, values, body, nowMs, { queryOrder: PLAYBACK_QUERY_ORDER });
+  // x-reading-request: millis-abs(int32 random)（openhongguo internal/protocol/request.go）。
+  // 抓包中 millis 与签名选中的 _rticket 完全一致，这里从已签名 query 中取值而非重新 Date.now()。
+  const readingRandom = Math.abs((Math.random() * 0x7fffffff) | 0);
+  const readingMillis = new URL(signed.url).searchParams.get('_rticket') || String(nowMs);
   const headers = {
-    'User-Agent': PLAYBACK_UA,
-    Accept: 'application/json; charset=utf-8,application/x-protobuf',
-    'Content-Encoding': 'gzip',
-    'sdk-version': '2',
-    'passport-sdk-version': '5051452',
-    'x-xs-from-web': '0',
+    'x-khronos': signed.headers['X-Khronos'],
+    'content-type': 'application/json; charset=utf-8',
     'x-ss-dp': '8662',
-    ...signed.headers,
+    'x-xs-from-web': '0',
+    accept: 'application/json; charset=utf-8,application/x-protobuf',
+    'content-encoding': 'gzip',
+    'x-helios': signed.headers['X-Helios'],
+    'x-ss-stub': signed.headers['X-SS-STUB'] || md5Hex(body),
+    'user-agent': PLAYBACK_UA,
+    lc: '101',
+    'x-reading-request': `${readingMillis}-${readingRandom}`,
+    'x-medusa': signed.headers['X-Medusa'],
   };
-  if (device.cookie) headers.Cookie = device.cookie;
+  // Cookie：注册响应已含 install_id/ttreq/store-region；补空 passport_csrf_token（抓包要求）。
+  let cookie = String(device.cookie || '');
+  if (cookie && !/(^|;\s*)passport_csrf_token\s*=/.test(cookie)) {
+    cookie = 'passport_csrf_token=; passport_csrf_token_default=; ' + cookie;
+  }
+  if (cookie) headers.cookie = cookie;
   return { url: signed.url, body, headers, v5: true, ticketOffset: signed.offset };
 }
 /** 官方现行 video_tab GET 接口（2026-11 播放恢复路径）：签名 GET，参数在 query，返回 data.video_model_data */
@@ -3664,9 +3701,15 @@ async function videoModel(videoId, config = {}) {
     await registerPlaybackDevice(false);
   }
   const device = getDevice();
+  // v2.1.0：按真实抓包构造 body，字段顺序也是请求的一部分；device_level 必须为 1，
+  // 3 会拿到播放器解不了的 bytevc2 加密流；disable_video_relate_book=false 为新增字段。
   const payload = JSON.stringify({
+    biz_param: {
+      detail_page_version: 0, device_level: 1, disable_digg_stat: false,
+      disable_video_relate_book: false, need_all_video_definition: true,
+      need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024,
+    },
     dr_scene: 'player',
-    biz_param: { detail_page_version: 0, device_level: 3, disable_digg_stat: false, need_all_video_definition: true, need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024 },
     mixed_video_id_map: { '1004': [String(videoId)] },
   });
   // 【2026-11-16 多集群 fallback】multi_video_model 5 个集群 + shortplay 3 个集群，
