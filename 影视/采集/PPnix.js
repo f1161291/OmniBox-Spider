@@ -1,8 +1,8 @@
 // @name PPnix
 // @author 梦
-// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v1.8.2 修复"方法执行异常: 执行成功"：全部 OmniBox.log 改为 await（官方 SDK log 返回 Promise<void>，未 await 的日志 Promise 被宿主误捕获为执行异常），日志在 handler 返回前完成。v1.8.1：CF 自动处理默认关闭，FlareSolverr 未配置零成本跳过、失败不回退 headless Chromium；play 只复用已有 cookie。v1.8.0：默认开启内联重写 m3u8（key 绝对化 + 分段固定到 ipfs.aleph.cloud）
+// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v1.8.3 修复 web 端"视频加载失败"：web 回退返回原始 m3u8 直链（实测 key 相对路径同站可解析、AES-128 解密可正常还原 TS 流；内联 data-url 因 key 接口无 CORS + m3u8>1500 段过大导致失败），tvbox 分支保留固定稳定网关的内联重写。v1.8.2：全部 OmniBox.log 改为 await。v1.8.1：CF 默认关闭、不空跑绕过。v1.8.0：分段固定 ipfs.aleph.cloud
 // @dependencies: axios, cheerio
-// @version 1.8.2
+// @version 1.8.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/PPnix.js
 
 const OmniBox = require("omnibox_sdk");
@@ -32,9 +32,10 @@ const LANG_PATH = normalizeBasePath(BASE_PATH);
 // 分段网关：ipfs.ppnix.com 每次随机 302 到不稳定第三方网关（部分忽略 Range / 失效），
 // 直接固定到实测支持 Range(206) 的 ipfs.aleph.cloud，避免播放器加载分段失败。
 const PPNIX_SEGMENT_HOST = process.env.PPNIX_SEGMENT_HOST || "https://ipfs.aleph.cloud";
-// 默认开启内联重写 m3u8（key 改绝对地址 + 分段改稳定网关），规避 web 端相对 key / 随机网关问题；
-// 设 PPNIX_REWRITE_M3U8=0 可回退到返回原始 m3u8 地址。
-const PPNIX_REWRITE_M3U8 = process.env.PPNIX_REWRITE_M3U8 !== "0";
+// web 端默认返回原始 m3u8 直链：实测该链路 key 相对路径同站可解析、AES-128 解密可正常还原 TS 流。
+// 内联 data-url 方案因 key 接口无 CORS + m3u8 过大（>1500 段）会让 web 播放器加载失败，仅供 tvbox 分支使用。
+// 需要强制 web 也用内联重写时设 PPNIX_REWRITE_M3U8=1（不推荐）。
+const PPNIX_REWRITE_M3U8 = process.env.PPNIX_REWRITE_M3U8 === "1";
 const PPNIX_CF_COOKIE = process.env.PPNIX_CF_COOKIE || process.env.PPNIX_COOKIE || "";
 // 站点当前直连 200，无需 CF；仅显式 PPNIX_CF_AUTO=1 且真正遇到 403/503 时才启用绕过，
 // 避免每次播放都空跑 FlareSolverr/Chromium 拖垮启播。
