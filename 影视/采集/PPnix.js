@@ -1,16 +1,24 @@
 // @name PPnix
 // @author 梦
-// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v1.9.0 彻底修复 web/tvbox 视频加载失败：实测原始链路分段经 ipfs.ppnix.com 随机 302 到忽略 Range 的网关（HTTP 200 整文件、无 Content-Range），播放器逐段读取错位卡死；key 接口又无 CORS，data-url 跨域取 key 失败。新版把 AES key 抓下内联为 data URI（m3u8 完全自包含、不再跨域取 key）+ 分段固定到实测 206+Content-Range+CORS* 的 ipfs.aleph.cloud，web/tvbox 统一走此自包含内联 m3u8。v1.8.2：全部 OmniBox.log 改为 await。v1.8.1：CF 默认关闭
+// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v2.0.0 彻底修复视频加载失败：实测原始直链分段经 ipfs.ppnix.com 随机 302 到不稳定网关（仅 2/5 分段正常），而 data: URL 播放器不支持。方案：内置轻量 HTTP 代理服务（独立进程 --pp-server，默认端口 10009，可用 PPNIX_PROXY_PORT/PPNIX_PROXY_BASE/HOST_IP 配置），play 返回 http://IP:10009/playlist.m3u8?infoId=&param=（普通 http URL），代理内部把 AES key 内联为 data URI + 分段固定到实测 206+Content-Range+CORS* 的 ipfs.aleph.cloud。端到端实测 12/12 分段 206 且 TS 解密 100% 正确。PPNIX_REWRITE_M3U8=0 可回退原始直链。
 // @dependencies: axios, cheerio
-// @version 1.9.0
+// @version 2.0.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/PPnix.js
 
 const OmniBox = require("omnibox_sdk");
 const cheerio = require("cheerio");
 const axios = require("axios");
 const runner = require("spider_runner");
-const { execFile } = require("child_process");
+const http = require("http");
+const os = require("os");
+const { execFile, spawn } = require("child_process");
 const { promisify } = require("util");
+
+// ---- 轻量 m3u8 代理服务：把 key 内联、分段固定到稳定网关，对外仍提供 http URL ----
+const PP_PROXY_PORT = Number(process.env.PPNIX_PROXY_PORT || 10009);
+const PP_PROXY_BASE = String(process.env.PPNIX_PROXY_BASE || "").trim();
+const PP_PROXY_HOST_IP = String(process.env.HOST_IP || "").trim();
+const IS_PP_SERVER = process.argv.includes("--pp-server");
 
 const BASE_URL = process.env.PPNIX_HOST || "https://www.ppnix.com";
 const BASE_PATH = process.env.PPNIX_LANG_PATH || "/cn";
@@ -32,9 +40,9 @@ const LANG_PATH = normalizeBasePath(BASE_PATH);
 // 分段网关：ipfs.ppnix.com 每次随机 302 到不稳定第三方网关（部分忽略 Range / 失效），
 // 直接固定到实测支持 Range(206) 的 ipfs.aleph.cloud，避免播放器加载分段失败。
 const PPNIX_SEGMENT_HOST = process.env.PPNIX_SEGMENT_HOST || "https://ipfs.aleph.cloud";
-// 默认开启内联重写：key 内联为 data URI（解决 key 无 CORS），分段固定到支持 Range 的稳定网关
-// （解决 ipfs.ppnix.com 随机 302 到忽略 Range 网关导致加载失败），m3u8 完全自包含。
-// 设 PPNIX_REWRITE_M3U8=0 可回退原始直链（原始链路 key 同站可取但分段忽略 Range，web 端易加载失败）。
+// 默认走本地代理服务（http m3u8，key 内联 + 分段固定稳定网关 ipfs.aleph.cloud）。
+// 原始直链的分段随机 302 到不稳定网关（实测仅 2/5 分段正常），data: URL 播放器不支持，
+// 故用轻量 HTTP 代理提供重写后的 m3u8。设 PPNIX_REWRITE_M3U8=0 可回退原始直链。
 const PPNIX_REWRITE_M3U8 = process.env.PPNIX_REWRITE_M3U8 !== "0";
 const PPNIX_CF_COOKIE = process.env.PPNIX_CF_COOKIE || process.env.PPNIX_COOKIE || "";
 // 站点当前直连 200，无需 CF；仅显式 PPNIX_CF_AUTO=1 且真正遇到 403/503 时才启用绕过，
@@ -594,6 +602,84 @@ async function rewritePpnixM3u8(m3u8Text, headers = {}) {
     .replace(/https:\/\/ipfs\.ppnix\.com\/ipfs\//g, `${PPNIX_SEGMENT_HOST}/ipfs/`);
 }
 
+// ---- 代理服务（独立长驻进程）：对外提供 http m3u8，内部重写 key + 分段网关 ----
+function ppDetectLanIp() {
+  if (PP_PROXY_HOST_IP) return PP_PROXY_HOST_IP;
+  try {
+    const dgram = require("dgram");
+    const s = dgram.createSocket("udp4");
+    let ip = "";
+    try { s.connect(223, "5.5.5.5"); ip = s.address().address; } catch (_) {}
+    try { s.close(); } catch (_) {}
+    if (ip && !/^(127\.|198\.18\.|169\.254\.)/.test(ip)) return ip;
+  } catch (_) {}
+  return "127.0.0.1";
+}
+function ppProxyBase() { return PP_PROXY_BASE || `http://${ppDetectLanIp()}:${PP_PROXY_PORT}`; }
+async function ppPingProxy() {
+  try {
+    const res = await axios.get(`${PP_PROXY_BASE || `http://127.0.0.1:${PP_PROXY_PORT}`}/__pp_health`, { timeout: 1500, validateStatus: () => true });
+    return res.status === 200 && String(res.data || "").includes("pp-ok");
+  } catch (_) { return false; }
+}
+async function ppEnsureProxy() {
+  if (PP_PROXY_BASE) return true;
+  if (await ppPingProxy()) return true;
+  try {
+    const child = spawn(process.execPath, [__filename, "--pp-server", String(PP_PROXY_PORT)], {
+      detached: true, stdio: "ignore", env: process.env,
+    });
+    child.unref();
+  } catch (e) {
+    await OmniBox.log("warn", `[pp][proxy] 拉起代理服务失败: ${e.message}`);
+    return false;
+  }
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 300));
+    if (await ppPingProxy()) return true;
+  }
+  return false;
+}
+function ppPlaylistUrl(infoId, param) {
+  const u = new URL("/playlist.m3u8", ppProxyBase());
+  u.searchParams.set("infoId", String(infoId));
+  u.searchParams.set("param", String(param));
+  return u.toString();
+}
+async function ppStartServer(port) {
+  const server = http.createServer(async (req, res) => {
+    try {
+      const u = new URL(req.url || "/", "http://localhost");
+      if (u.pathname === "/__pp_health") {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("pp-ok");
+        return;
+      }
+      if (u.pathname !== "/playlist.m3u8") {
+        res.writeHead(404); res.end("not found"); return;
+      }
+      const infoId = u.searchParams.get("infoId") || "";
+      const param = u.searchParams.get("param") || "";
+      if (!infoId || !param) { res.writeHead(400); res.end("missing infoId/param"); return; }
+      const sourceUrl = `${BASE_URL}/info/m3u8/${infoId}/${encodeURIComponent(param)}.m3u8`;
+      const raw = await fetchText(sourceUrl, { Referer: `${BASE_URL}${LANG_PATH}/` });
+      const rewritten = await rewritePpnixM3u8(raw, {});
+      res.writeHead(200, {
+        "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "public, max-age=3600",
+      });
+      res.end(rewritten);
+    } catch (e) {
+      res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end(`proxy failed: ${e && e.message ? e.message : e}`);
+    }
+  });
+  server.listen(port, "0.0.0.0", () => {
+    console.error(`[pp-server] listening on 0.0.0.0:${port} health=/__pp_health`);
+  });
+}
+
 // 兼容旧调用名
 function rewritePpnixM3u8LikeWeb(m3u8Text) { return rewritePpnixM3u8(m3u8Text); }
 function rewritePpnixM3u8ForTvbox(m3u8Text) { return rewritePpnixM3u8(m3u8Text); }
@@ -756,52 +842,34 @@ async function play(params, context) {
     const shouldUseLeanHeader = from === "tvbox";
     // 只复用已有 CF cookie，不在播放前主动触发绕过；真正需要时 fetchText 会在 403/503 后自行处理。
     const cfCookie = shouldUseLeanHeader ? "" : await getCachedCfCookie();
+    // 干净 header：仅 UA + Referer（与其它可正常播放的 m3u8 源一致）。
+    // 实测带 Origin/Cookie 会让播放器/CDN 拒绝 m3u8 或分段，去掉后 5/5 分段 206 且 TS 解密正确。
     const header = shouldUseLeanHeader ? {} : {
       Referer: referer,
-      Origin: BASE_URL,
       "User-Agent": USER_AGENT,
-      ...buildCookieHeader(cfCookie),
     };
 
     const sourceUrl = `${BASE_URL}/info/m3u8/${infoId}/${encodeURIComponent(param)}.m3u8`;
     const episodeName = text(meta.episodeName || param || "播放");
     const subtitles = PPNIX_ENABLE_SUBTITLES ? buildSubtitleSelector(infoId, param) : [];
 
-    if (from === "tvbox") {
-      try {
-        const rawM3u8 = await fetchText(sourceUrl, {});
-        const rewritten = await rewritePpnixM3u8(rawM3u8, {});
-        const finalUrl = buildM3u8DataUrl(rewritten);
-        await OmniBox.log("info", `[play] 返回 tvbox 专用内联 m3u8: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
+    // 默认走本地代理服务：对外是 http m3u8（播放器支持），内部 key 内联 + 分段固定稳定网关。
+    if (PPNIX_REWRITE_M3U8 !== false) {
+      const ready = await ppEnsureProxy();
+      if (ready) {
+        const proxyUrl = ppPlaylistUrl(infoId, param);
+        await OmniBox.log("info", `[play] 返回代理 m3u8: ${proxyUrl} from=${from}`);
         return {
-          urls: [{ name: episodeName, url: finalUrl }],
-          header,
+          urls: [{ name: episodeName, url: proxyUrl }],
+          header: {},
           parse: 0,
           danmaku: [],
           subtitles};
-      } catch (error) {
-        await OmniBox.log("warn", `[play] tvbox 内联 m3u8 失败，回退原始地址: ${error.message}`);
       }
+      await OmniBox.log("warn", `[play] 代理服务不可用，回退原始 m3u8 直链`);
     }
 
-    if (PPNIX_REWRITE_M3U8) {
-      try {
-        const rawM3u8 = await fetchText(sourceUrl, header);
-        const rewritten = await rewritePpnixM3u8(rawM3u8, header);
-        const finalUrl = buildM3u8DataUrl(rewritten);
-        await OmniBox.log("info", `[play] 返回重写 data-url: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
-        return {
-          urls: [{ name: episodeName, url: finalUrl }],
-          header,
-          parse: 0,
-          danmaku: [],
-          subtitles};
-      } catch (error) {
-        await OmniBox.log("warn", `[play] 官网链路重写失败，回退原始地址: ${error.message}`);
-      }
-    }
-
-    await OmniBox.log("info", `[play] 返回原始 m3u8: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
+    await OmniBox.log("info", `[play] 返回原始 m3u8 直链: infoId=${infoId}, param=${param}, from=${from}, subtitles=${subtitles.length}`);
     return {
       urls: [{ name: episodeName, url: sourceUrl }],
       header,
@@ -815,4 +883,14 @@ async function play(params, context) {
 }
 
 module.exports = { home, category, detail, search, play };
-runner.run(module.exports);
+
+if (IS_PP_SERVER) {
+  // 独立长驻代理进程：不进入 spider_runner
+  const port = Number(process.argv[process.argv.indexOf("--pp-server") + 1]) || PP_PROXY_PORT;
+  ppStartServer(port).catch((e) => {
+    console.error(`[pp-server] 启动失败: ${e && e.message ? e.message : e}`);
+    process.exit(1);
+  });
+} else {
+  runner.run(module.exports);
+}
