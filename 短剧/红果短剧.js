@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：v2.2.1 修复榜单分类偶发"执行异常: 执行成功"：无 filters 与显式 rank_type=hot-drama 会落到同一 /rank/hot-drama，宿主极短时间内重复请求同一 URL 曾触发响应解析竞争；按 URL 加 5 分钟分类页短缓存（仅缓存非空列表），命中即返回，规避竞争并减少上游压力。v2.2.0 修复"加载不出视频"：按 openhongguo SDK 与 open-apex-drama 对齐——播放模型空体时自动更换匿名设备重试（服务端自 2026-10-29 每台设备只放行一次播放模型，旧版复用同一设备 6 小时导致第二集起 200 空体）；补齐 spade_a 的 app_v2/web_v2 解密分支；shortplay fallback device_level 3→1 避免 bytevc2；拉流 UA 改为官方 com.phoenix.newsclient/7.9.3。v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 2.2.1
+// @description 红果短剧（hongguoduanju.com）：v2.2.2 修复视频加载失败：对照 open-apex-drama + openhongguo SDK 修正两处 SERVER 侧解密偏差——① 播放地址解码对齐 SDK playbackURL()：明文直返 / 普通 base64 解码即 URL（旧版只解 0xa8 信封，普通 base64 地址抛错被吞导致"地址格式无效"）；② spade_a 内容密钥提取对齐 SDK spade.go：按 buf[0] 的 versionLen 动态切分 key=buf[1:len-versionLen]，旧版固定 subarray(1,33) 在非 32hex 版本上截错字节导致 CENC 解密失败。v2.2.1 修复榜单分类偶发"执行异常: 执行成功"：无 filters 与显式 rank_type=hot-drama 会落到同一 /rank/hot-drama，宿主极短时间内重复请求同一 URL 曾触发响应解析竞争；按 URL 加 5 分钟分类页短缓存（仅缓存非空列表），命中即返回，规避竞争并减少上游压力。v2.2.0 修复"加载不出视频"：按 openhongguo SDK 与 open-apex-drama 对齐——播放模型空体时自动更换匿名设备重试（服务端自 2026-10-29 每台设备只放行一次播放模型，旧版复用同一设备 6 小时导致第二集起 200 空体）；补齐 spade_a 的 app_v2/web_v2 解密分支；shortplay fallback device_level 3→1 避免 bytevc2；拉流 UA 改为官方 com.phoenix.newsclient/7.9.3。v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
+// @version 2.2.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -3550,8 +3550,18 @@ function deriveContentKey(spade) {
       value[index] = (-21 - ones + (previous ^ value[index])) & 0xff;
     }
   }
-  const material = value.subarray(1, 33).toString('ascii');
-  if (!/^[0-9a-f]{32}$/i.test(material)) throw new Error('spade_a 密钥材料无效');
+  // 对齐 openhongguo internal/drm/spade.go:63-77：buf[0] 是十六进制形式的
+  // versionLen，密钥区为 buf[1 : outLen-versionLen]，其余是 scheme version。
+  // 旧版固定 subarray(1,33) 在密钥非 32 hex 的版本上会截错字节，导致 CENC
+  // 内容密钥错误、视频解密失败。
+  const hexDigit = (b) => (b >= 0x30 && b <= 0x39) ? b - 0x30
+    : (b >= 0x61 && b <= 0x66) ? b - 0x61 + 10
+    : (b >= 0x41 && b <= 0x46) ? b - 0x41 + 10 : -1;
+  const versionLen = hexDigit(value[0]);
+  if (versionLen < 1 || versionLen >= value.length) throw new Error('spade_a 版本长度无效');
+  const keyLen = value.length - versionLen;
+  const material = value.subarray(1, keyLen).toString('ascii');
+  if (!material || material.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(material)) throw new Error('spade_a 密钥材料无效');
   return Buffer.from(material, 'hex');
 }
 
@@ -3567,6 +3577,29 @@ function decryptSpadeUrl(value, keySeed) {
   const pad = plain[plain.length - 1];
   if (pad > 0 && pad <= 16) plain = plain.subarray(0, -pad);
   return plain.toString('utf8').replace(/\0+$/, '');
+}
+
+// 对齐 openhongguo internal/protocol/playback_url.go 的 playbackURL()：
+// 明文 http(s) 直接返回；否则按 base64 解码，0xa8 信封才用 key_seed 走 AES-CBC
+// 解密；其余情况解码字节本身就是 URL 字符串，直接按 utf8 还原。旧版只处理 0xa8，
+// 普通 base64 地址会抛错被吞，进而报“视频地址格式无效”导致加载失败。
+function resolvePlaybackUrl(value, keySeed) {
+  const rawValue = text(value).trim();
+  if (/^https?:\/\//i.test(rawValue)) return rawValue;
+  const raw = decodeBase64(rawValue);
+  if (!raw.length) throw new Error('播放地址既非 http(s) 也非有效 base64');
+  let decoded;
+  if (raw[0] === 0xa8) {
+    if (raw.length < 20 || raw[2] !== 1 || raw[3] !== 0 || (raw.length - 4) % 16 !== 0) {
+      throw new Error('播放地址 0xa8 信封无效');
+    }
+    decoded = decryptSpadeUrl(rawValue, keySeed && keySeed.length ? keySeed : Buffer.alloc(0));
+  } else {
+    decoded = raw.toString('utf8');
+  }
+  const url = String(decoded || '').replace(/\0+$/, '').trim();
+  if (!/^https?:\/\//i.test(url)) throw new Error('播放地址解码后不是 http(s)');
+  return url;
 }
 
 function videoList(model) {
@@ -4412,10 +4445,7 @@ async function mediaSession(videoId, quality, did, iid) {
     const spade = spadeValue(selected);
     if (!url || !spade) throw new Error('红果播放模型缺少媒体地址或 CENC 密钥');
     const keySeed = keySeedOf(model);
-    if (keySeed.length) {
-      try { url = decryptSpadeUrl(url, keySeed); } catch { /* 部分版本直接返回明文媒体地址 */ }
-    }
-    if (!/^https?:\/\//i.test(url)) throw new Error('红果视频地址格式无效');
+    url = resolvePlaybackUrl(url, keySeed);
     const contentKey = deriveContentKey(spade);
     const { total, moovStart, moov, prefix } = await fetchMoov(url);
     const session = new CencMediaSession(url, contentKey, total, moovStart, moov, prefix);
