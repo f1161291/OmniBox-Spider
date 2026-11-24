@@ -1,8 +1,8 @@
 // @name PPnix
 // @author 梦
-// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v1.8.0 修复视频加载不出：默认开启内联重写 m3u8（key 绝对化 + 分段固定到实测支持 Range 的 ipfs.aleph.cloud），规避 ipfs.ppnix.com 随机 302 到不稳定第三方网关导致分段加载失败；PPNIX_REWRITE_M3U8=0 可回退原始地址，PPNIX_SEGMENT_HOST 可自定义网关
+// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v1.8.1 修复播放前空跑 CF 绕过：CF 自动处理默认关闭（PPNIX_CF_AUTO=1 且遇 403/503 才启用），FlareSolverr 去掉硬编码内网地址、未配置时零成本跳过、失败不再回退 headless Chromium；play 只复用已有 cookie。v1.8.0：默认开启内联重写 m3u8（key 绝对化 + 分段固定到实测支持 Range 的 ipfs.aleph.cloud），规避 ipfs.ppnix.com 随机 302 到不稳定网关；PPNIX_REWRITE_M3U8=0 / PPNIX_SEGMENT_HOST 可自定义
 // @dependencies: axios, cheerio
-// @version 1.8.0
+// @version 1.8.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/PPnix.js
 
 const OmniBox = require("omnibox_sdk");
@@ -36,13 +36,15 @@ const PPNIX_SEGMENT_HOST = process.env.PPNIX_SEGMENT_HOST || "https://ipfs.aleph
 // 设 PPNIX_REWRITE_M3U8=0 可回退到返回原始 m3u8 地址。
 const PPNIX_REWRITE_M3U8 = process.env.PPNIX_REWRITE_M3U8 !== "0";
 const PPNIX_CF_COOKIE = process.env.PPNIX_CF_COOKIE || process.env.PPNIX_COOKIE || "";
-const PPNIX_CF_AUTO = process.env.PPNIX_CF_AUTO !== "0";
+// 站点当前直连 200，无需 CF；仅显式 PPNIX_CF_AUTO=1 且真正遇到 403/503 时才启用绕过，
+// 避免每次播放都空跑 FlareSolverr/Chromium 拖垮启播。
+const PPNIX_CF_AUTO = process.env.PPNIX_CF_AUTO === "1";
 const PPNIX_CF_CACHE_KEY = process.env.PPNIX_CF_CACHE_KEY || "ppnix:cf_clearance";
 const PPNIX_CF_MAX_AGE_SECONDS = parseInt(process.env.PPNIX_CF_MAX_AGE_SECONDS || "21600", 10) || 21600;
 const PPNIX_CF_TIMEOUT_MS = parseInt(process.env.PPNIX_CF_TIMEOUT_MS || "45000", 10) || 45000;
 // FlareSolverr 服务地址，优先读取站点专用变量，其次回退通用 FLARESOLVERR_URL。
 // 项目地址：https://github.com/FlareSolverr/FlareSolverr
-const PPNIX_FLARESOLVERR_URL = process.env.PPNIX_FLARESOLVERR_URL || process.env.FLARESOLVERR_URL || "http://192.168.50.50:8191/v1";
+const PPNIX_FLARESOLVERR_URL = process.env.PPNIX_FLARESOLVERR_URL || process.env.FLARESOLVERR_URL || "";
 // FlareSolverr 会话名，用于复用已过验证的浏览器会话。
 const PPNIX_FLARESOLVERR_SESSION = process.env.PPNIX_FLARESOLVERR_SESSION || "";
 // FlareSolverr 单次请求最大等待时间（毫秒），默认沿用 CF 自动处理超时配置。
@@ -273,14 +275,19 @@ async function ensureCfCookie(forceRefresh = false, targetUrl = `${BASE_URL}${LA
     if (cached) return cached;
   }
   if (!PPNIX_CF_AUTO) return "";
+  // 未配置 FlareSolverr 时零成本返回，不回退 headless Chromium（会在短生命周期 runner 里空等数十秒）。
+  if (!text(PPNIX_FLARESOLVERR_URL)) {
+    OmniBox.log("warn", `[cf] 未配置 FlareSolverr 地址，跳过自动绕过（可配 PPNIX_FLARESOLVERR_URL / FLARESOLVERR_URL）`);
+    return "";
+  }
 
   let cookie = "";
   try {
     OmniBox.log("info", `[cf] 开始通过 FlareSolverr 自动获取 cf_clearance`);
     cookie = await fetchCfClearanceWithFlareSolverr(targetUrl);
   } catch (error) {
-    OmniBox.log("warn", `[cf] FlareSolverr 获取失败，回退 headless Chromium: ${error.message}`);
-    cookie = await fetchCfClearanceWithBrowser();
+    OmniBox.log("warn", `[cf] FlareSolverr 获取失败: ${error.message}（不再回退 headless Chromium，避免空等超时）`);
+    return "";
   }
 
   if (cookie) {
@@ -723,7 +730,8 @@ async function play(params, context) {
     const referer = text(meta.referer || `${BASE_URL}${LANG_PATH}/`);
     const from = text(context?.from || "") || "unknown";
     const shouldUseLeanHeader = from === "tvbox";
-    const cfCookie = shouldUseLeanHeader ? "" : await ensureCfCookie(false, referer);
+    // 只复用已有 CF cookie，不在播放前主动触发绕过；真正需要时 fetchText 会在 403/503 后自行处理。
+    const cfCookie = shouldUseLeanHeader ? "" : await getCachedCfCookie();
     const header = shouldUseLeanHeader ? {} : {
       Referer: referer,
       Origin: BASE_URL,
