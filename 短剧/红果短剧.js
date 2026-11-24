@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 2.1.0
+// @description 红果短剧（hongguoduanju.com）：v2.2.0 修复"加载不出视频"：按 openhongguo SDK 与 open-apex-drama 对齐——播放模型空体时自动更换匿名设备重试（服务端自 2026-10-29 每台设备只放行一次播放模型，旧版复用同一设备 6 小时导致第二集起 200 空体）；补齐 spade_a 的 app_v2/web_v2 解密分支；shortplay fallback device_level 3→1 避免 bytevc2；拉流 UA 改为官方 com.phoenix.newsclient/7.9.3。v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
+// @version 2.2.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -1632,6 +1632,19 @@ async function registerPlaybackDevice(force) {
   return REGISTER_INFLIGHT;
 }
 
+/**
+ * 重置当前匿名设备，供播放模型为空（ErrAnonymousLimited）时换设备重试。
+ * 依据 openhongguo SDK：2026-10-29 起服务端基本只给每台匿名设备返回一次播放模型，
+ * 同一设备再次 ResolvePlayback 只会得到 HTTP 200 空体；必须在一次调用内更换设备重试。
+ * 若用户显式配置了 DUANJU_DEVICE_ID，则视为自带稳定设备，不做自动重置。
+ */
+function resetPlaybackDevice() {
+  if (process.env.DUANJU_DEVICE_ID) return false;
+  REGISTERED_DEVICE = null;
+  REGISTER_INFLIGHT = null;
+  return true;
+}
+
 function getDevice() {
   // 优先用匿名注册得到的设备身份（红果内容/播放接口按注册设备放行）；未注册成功则用内置兜底
   const reg = REGISTERED_DEVICE;
@@ -2523,7 +2536,7 @@ function shortplayRequest(vid, device, apiBase = SHORTPLAY_API) {
   const payload = JSON.stringify({
     video_id: String(vid), content_type: 1004,
     biz_param: {
-      detail_page_version: 0, device_level: 3, disable_digg_stat: false,
+      detail_page_version: 0, device_level: 1, disable_digg_stat: false,
       disable_video_relate_book: false, from_video_id: '', need_all_video_definition: true,
       need_mp4_align: false, source: 4, use_os_player: false, use_server_dns: false,
       video_platform: 3,
@@ -2771,7 +2784,9 @@ const SERIES_EPISODE_PREFIX = 'hg-series-episode-v1:';
 const SERIES_PREFIX = 'hg-series-v1:';
 const UA = 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 const APP_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
-const MEDIA_UA = 'com.phoenix.read/71332';
+// 拉流 UA 对齐官方客户端（open-apex-drama lib/player/video_output.dart kCdnUserAgent）；
+// 旧值 com.phoenix.read/71332 会被 CDN 拒绝/掐断，导致有模型但加载不出视频。
+const MEDIA_UA = 'com.phoenix.newsclient/7.9.3 (Linux; Android 14; 23127PN0CC; Build/UKQ1.230917.001;)';
 const PAGE_ATTEMPTS = 3;
 const QUALITY_ORDER = ['2160', '1440', '1080', '720', '576', '540', '480', '360'];
 // 与红果.py 的 vod_play_from/vod_play_url 保持一致，只输出灵风线路。
@@ -3464,19 +3479,57 @@ function decodeBase64(value) {
   try { return Buffer.from(clean + '='.repeat((4 - clean.length % 4) % 4), 'base64'); } catch { return Buffer.alloc(0); }
 }
 
+function spadeIsV2(raw) {
+  // 对齐 openhongguo internal/drm/spade.go：尾部 tag 判定 app_v2 / web_v2。
+  const marker = raw[0] ^ raw[1] ^ raw[2];
+  const prefixLen = marker - 0x30;
+  if (prefixLen < 1 || prefixLen > raw.length) return false;
+  const tail = raw.length - prefixLen;
+  if (tail - 2 < 0) return false;
+  const b16 = raw[tail - 2]; const b14 = raw[tail - 1];
+  let tag = '';
+  for (let i = 0; i < prefixLen; i++) {
+    if (i + tail >= raw.length) return false;
+    tag += String.fromCharCode(b14 ^ b16 ^ raw[i + tail]);
+  }
+  return tag.startsWith('app_v2') || tag.startsWith('web_v2');
+}
+
 function deriveContentKey(spade) {
   const raw = decodeBase64(spade);
   if (raw.length < 3) throw new Error('spade_a 太短');
+  const v2 = spadeIsV2(raw);
   let length = raw.length - (raw[0] ^ raw[1] ^ raw[2]) + 47;
   if (length <= 0 || 1 + length > raw.length) length = raw.length - 1;
   if (length < 33) throw new Error('spade_a 长度异常');
   const value = Buffer.from(raw.subarray(1, 1 + length));
-  let va = 85; let vb = 246;
-  for (let index = 0; index < length; index++) {
-    const previous = index & 1 ? va : vb;
-    if (index & 1) va = value[index]; else vb = value[index];
-    const ones = index.toString(2).split('').filter((bit) => bit === '1').length;
-    value[index] = (-21 - ones + (previous ^ value[index])) & 0xff;
+  // v2（app_v2/web_v2）：先相邻字节交换，再做带减法 rolling（openhongguo internal/drm/spade.go）。
+  if (v2) {
+    for (let i = 0; i + 1 < value.length; i += 2) {
+      const tmp = value[i]; value[i] = value[i + 1]; value[i + 1] = tmp;
+    }
+    let prev = 0x55; let cur = 0xfa;
+    for (let i = 0; i < value.length; i++) {
+      const b = value[i];
+      const ones = i.toString(2).split('').filter(bit => bit === '1').length;
+      const term = (-(0x15 + ones)) & 0xff;
+      if ((i & 1) === 0) {
+        value[i] = (((cur ^ b) - prev + term) & 0xff);
+        cur = b;
+      } else {
+        value[i] = (((prev ^ b) - prev + term) & 0xff);
+        prev = b;
+      }
+    }
+  } else {
+    // v1（原逻辑，保持不变）：交替 rolling 加法。
+    let va = 85; let vb = 246;
+    for (let index = 0; index < length; index++) {
+      const previous = index & 1 ? va : vb;
+      if (index & 1) va = value[index]; else vb = value[index];
+      const ones = index.toString(2).split('').filter((bit) => bit === '1').length;
+      value[index] = (-21 - ones + (previous ^ value[index])) & 0xff;
+    }
   }
   const material = value.subarray(1, 33).toString('ascii');
   if (!/^[0-9a-f]{32}$/i.test(material)) throw new Error('spade_a 密钥材料无效');
@@ -3688,7 +3741,7 @@ async function coreSixgod(url, params, device, body, headers) {
 const MODEL_CACHE_TTL = 3 * 60 * 1000;
 const MODEL_CACHE_LIMIT = 64;
 const modelCache = new Map();
-async function videoModel(videoId, config = {}) {
+async function videoModelOnce(videoId, config = {}) {
   const cacheKey = String(videoId);
   const hit = modelCache.get(cacheKey);
   if (hit && Date.now() < hit.expires) {
@@ -3795,8 +3848,37 @@ async function videoModel(videoId, config = {}) {
   } catch (e) {
     await log('warn', `[hg][model] vid=${videoId} video_tab fallback 失败: ${e.message || e}`);
   }
-  await log('error', `[hg][model] vid=${videoId} 播放模型为空: ${lastReason}`);
-  throw new Error(`红果 video_model 为空（${lastReason}）`);
+  const emptyErr = new Error(`红果 video_model 为空（${lastReason}）`);
+  // 仅在"所有集群都是空体"时标记为可换设备重试；网络/签名异常不触发换设备。
+  emptyErr.hgEmpty = allEmpty;
+  throw emptyErr;
+}
+
+/**
+ * 播放模型获取入口（带匿名设备自动更换）。
+ * openhongguo SDK 明确：2026-10-29 起服务端基本只给每台匿名设备返回一次播放模型，
+ * 同一设备第二次 ResolvePlayback 只会得到 HTTP 200 空体（ErrAnonymousLimited）。
+ * 因此在单集解析内按需重置设备并重新注册，最多 DEVICE_RESETS 台，对齐 SDK 默认 2。
+ * 非"空体"错误（网络/签名异常）不换设备，直接抛出。
+ */
+const DEVICE_RESETS = Math.max(0, Math.min(5, Number(process.env.HG_DEVICE_RESETS || 2) || 0));
+async function videoModel(videoId, config = {}) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= DEVICE_RESETS; attempt++) {
+    try {
+      return await videoModelOnce(videoId, config);
+    } catch (err) {
+      lastErr = err;
+      const empty = !!(err && err.hgEmpty);
+      if (!empty || attempt >= DEVICE_RESETS) break;
+      const changed = resetPlaybackDevice();
+      if (!changed) break;  // 用户自带固定设备，无法重置
+      await log('warn', `[hg][model] vid=${videoId} 播放模型空体，更换匿名设备重试 ${attempt + 1}/${DEVICE_RESETS}`);
+      try { await registerPlaybackDevice(true); } catch (_) { /* 注册失败仍会用内置兜底重试 */ }
+      await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+    }
+  }
+  throw lastErr || new Error('红果 video_model 为空');
 }
 
 const MEDIA_SESSION_TTL = 15 * 60 * 1000;
