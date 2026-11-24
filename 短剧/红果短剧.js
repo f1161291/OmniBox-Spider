@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：v2.2.0 修复"加载不出视频"：按 openhongguo SDK 与 open-apex-drama 对齐——播放模型空体时自动更换匿名设备重试（服务端自 2026-10-29 每台设备只放行一次播放模型，旧版复用同一设备 6 小时导致第二集起 200 空体）；补齐 spade_a 的 app_v2/web_v2 解密分支；shortplay fallback device_level 3→1 避免 bytevc2；拉流 UA 改为官方 com.phoenix.newsclient/7.9.3。v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 2.2.0
+// @description 红果短剧（hongguoduanju.com）：v2.2.1 修复榜单分类偶发"执行异常: 执行成功"：无 filters 与显式 rank_type=hot-drama 会落到同一 /rank/hot-drama，宿主极短时间内重复请求同一 URL 曾触发响应解析竞争；按 URL 加 5 分钟分类页短缓存（仅缓存非空列表），命中即返回，规避竞争并减少上游压力。v2.2.0 修复"加载不出视频"：按 openhongguo SDK 与 open-apex-drama 对齐——播放模型空体时自动更换匿名设备重试（服务端自 2026-10-29 每台设备只放行一次播放模型，旧版复用同一设备 6 小时导致第二集起 200 空体）；补齐 spade_a 的 app_v2/web_v2 解密分支；shortplay fallback device_level 3→1 避免 bytevc2；拉流 UA 改为官方 com.phoenix.newsclient/7.9.3。v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
+// @version 2.2.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -2798,6 +2798,18 @@ const QUALITY_NAMES = {
 };
 const MANJU_KEYWORDS = ['漫剧', '动漫短剧', '二次元', '漫画短剧', '国漫短剧', '日漫', '动态漫', '动画剧'];
 const AI_MANJU_KEYWORDS = ['AI漫剧', 'AI动画', 'AI短剧', 'AI动漫', '漫剧AI', '二次元AI', 'AI漫画', '动画短剧'];
+// 榜单/分类页短缓存：宿主要在极短时间内连续请求同一 URL（如无 filters 与显式
+// rank_type=hot-drama 会落到同一个 /rank/hot-drama），并发重复请求曾触发宿主
+// "执行异常: 执行成功" 的响应解析竞争。按 URL 缓存 5 分钟，命中即直接返回，
+// 既规避竞争也减少上游压力。仅缓存成功的非空列表，失败不缓存。
+const CATEGORY_PAGE_CACHE_TTL = 5 * 60 * 1000;
+const CATEGORY_PAGE_CACHE_LIMIT = 64;
+const _categoryPageCache = new Map();
+function setCategoryPageCache(key, value) {
+  _categoryPageCache.set(key, { value, expires: Date.now() + CATEGORY_PAGE_CACHE_TTL });
+  while (_categoryPageCache.size > CATEGORY_PAGE_CACHE_LIMIT) _categoryPageCache.delete(_categoryPageCache.keys().next().value);
+}
+
 const SERIES_DETAIL_CACHE_TTL = 30 * 60 * 1000;
 const SERIES_DETAIL_CACHE_LIMIT = 2000;
 const seriesDetailCache = new Map();
@@ -3230,6 +3242,9 @@ function routeOf(id, page, extend = {}) {
 
 async function loadCategory(page, id, extend) {
   const url = routeOf(id, page, extend);
+  const cacheKey = `${page}|${url}`;
+  const cached = _categoryPageCache.get(cacheKey);
+  if (cached && Date.now() < cached.expires) return cached.value;
   const raw = await getPageRaw(url);
   const html = typeof raw === 'string' ? raw : JSON.stringify(raw);
   let data = raw && typeof raw === 'object' && !Buffer.isBuffer(raw) ? pageObject(raw) : {};
@@ -3250,13 +3265,17 @@ async function loadCategory(page, id, extend) {
     // 路由键会随官网版本变化；Python 版本会遍历整个状态树，这里保持同样的兜底。
     if (!list.length) list = collectItems(data);
     if (!list.length) extractHtmlItems(html, list, new Set(list.map((item) => item.vod_id)));
-    return { page, pagecount: list.length >= 12 ? page + 1 : page, limit: 20, total: list.length >= 12 ? 999 : list.length, list };
+    const result = { page, pagecount: list.length >= 12 ? page + 1 : page, limit: 20, total: list.length >= 12 ? 999 : list.length, list };
+    if (list.length) setCategoryPageCache(cacheKey, result);
+    return result;
   }
   // 与红果.py 的 categoryContent 一样遍历 loaderData 全树，兼容
   // recommendList 改名或嵌套层级变化的页面版本。
   const list = collectItems(data);
   if (!list.length) extractHtmlItems(html, list, new Set(list.map((item) => item.vod_id)));
-  return { page, pagecount: list.length >= 12 ? page + 1 : page, limit: 20, total: list.length >= 12 ? 999 : list.length, list };
+  const result = { page, pagecount: list.length >= 12 ? page + 1 : page, limit: 20, total: list.length >= 12 ? 999 : list.length, list };
+  if (list.length) setCategoryPageCache(cacheKey, result);
+  return result;
 }
 
 async function init(params, context) {
