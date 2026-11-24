@@ -1,8 +1,8 @@
 // @name PPnix
 // @author 梦
-// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v2.0.0 彻底修复视频加载失败：实测原始直链分段经 ipfs.ppnix.com 随机 302 到不稳定网关（仅 2/5 分段正常），而 data: URL 播放器不支持。方案：内置轻量 HTTP 代理服务（独立进程 --pp-server，默认端口 10009，可用 PPNIX_PROXY_PORT/PPNIX_PROXY_BASE/HOST_IP 配置），play 返回 http://IP:10009/playlist.m3u8?infoId=&param=（普通 http URL），代理内部把 AES key 内联为 data URI + 分段固定到实测 206+Content-Range+CORS* 的 ipfs.aleph.cloud。端到端实测 12/12 分段 206 且 TS 解密 100% 正确。PPNIX_REWRITE_M3U8=0 可回退原始直链。
+// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v2.1.0 修复代理返回后仍转圈：改为全资源同源代理——playlist/key/分段全部走 http://IP:10009（/playlist.m3u8、/key、/seg/{cid}），不再有 data: key 和跨域分段，规避部分播放器不识别 data URI / 跨域 header 问题；分段 Range 透传到实测稳定的 ipfs.aleph.cloud。端到端实测 6/6 分段 206+Content-Range 且 AES 解密 TS 同步 100%。v2.0.0：内置轻量 HTTP 代理（--pp-server，默认 10009，PPNIX_PROXY_PORT/PPNIX_PROXY_BASE/HOST_IP 可配）。PPNIX_REWRITE_M3U8=0 回退原始直链。
 // @dependencies: axios, cheerio
-// @version 2.0.0
+// @version 2.1.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/PPnix.js
 
 const OmniBox = require("omnibox_sdk");
@@ -10,6 +10,7 @@ const cheerio = require("cheerio");
 const axios = require("axios");
 const runner = require("spider_runner");
 const http = require("http");
+const https = require("https");
 const os = require("os");
 const { execFile, spawn } = require("child_process");
 const { promisify } = require("util");
@@ -596,10 +597,14 @@ async function fetchKeyDataUri(headers = {}) {
 // 重写 m3u8：key 内联为 data URI（解决无 CORS），分段固定到支持 Range 的稳定网关
 // （解决 ipfs.ppnix.com 随机 302 到忽略 Range 的网关导致加载失败）。
 async function rewritePpnixM3u8(m3u8Text, headers = {}) {
-  const keyUri = await fetchKeyDataUri(headers);
+  // 全资源同源代理：key 与分段都指向本地代理路径，播放器面对的只有普通 http URL，
+  // 规避 data: key 不被部分播放器识别、以及跨域分段 header/CORS 问题。
+  const base = ppProxyBase();
+  const keyPath = `${base}/key`;
+  const segPrefix = `${base}/seg/`;
   return String(m3u8Text || "")
-    .replace(/URI="[^"]*key[^"]*"/gi, `URI="${keyUri}"`)
-    .replace(/https:\/\/ipfs\.ppnix\.com\/ipfs\//g, `${PPNIX_SEGMENT_HOST}/ipfs/`);
+    .replace(/URI="[^"]*key[^"]*"/gi, `URI="${keyPath}"`)
+    .replace(/https:\/\/[^\/"']*\/ipfs\/([a-zA-Z0-9]+)/g, `${segPrefix}$1`);
 }
 
 // ---- 代理服务（独立长驻进程）：对外提供 http m3u8，内部重写 key + 分段网关 ----
@@ -646,6 +651,30 @@ function ppPlaylistUrl(infoId, param) {
   u.searchParams.set("param", String(param));
   return u.toString();
 }
+// 透传 Range 请求到上游，并把状态码/关键响应头回写给播放器
+function ppRelay(url, req, res, headers = {}) {
+  const lib = url.startsWith("https:") ? https : http;
+  const h = { "User-Agent": USER_AGENT, ...headers };
+  for (const name of ["range", "if-range"]) {
+    if (req.headers[name]) h[name.charAt(0).toUpperCase() + name.slice(1)] = req.headers[name];
+  }
+  const upstream = lib.get(url, { headers: h }, (r) => {
+    const outHeaders = {};
+    for (const name of ["content-type", "content-range", "content-length", "accept-ranges", "etag", "last-modified"]) {
+      if (r.headers[name]) outHeaders[name] = r.headers[name];
+    }
+    outHeaders["Access-Control-Allow-Origin"] = "*";
+    res.writeHead(r.statusCode || 502, outHeaders);
+    if (String(req.method || "GET").toUpperCase() === "HEAD") { r.destroy(); res.end(); return; }
+    r.pipe(res);
+  });
+  upstream.on("error", (e) => {
+    if (!res.headersSent) { res.writeHead(502, { "Content-Type": "text/plain" }); res.end(`relay failed: ${e.message}`); }
+    else res.destroy(e);
+  });
+  upstream.setTimeout(30000, () => upstream.destroy(new Error("relay timeout")));
+}
+
 async function ppStartServer(port) {
   const server = http.createServer(async (req, res) => {
     try {
@@ -653,6 +682,17 @@ async function ppStartServer(port) {
       if (u.pathname === "/__pp_health") {
         res.writeHead(200, { "Content-Type": "text/plain" });
         res.end("pp-ok");
+        return;
+      }
+      // AES key：转发到站点（带 Referer），同源返回给播放器
+      if (u.pathname === "/key") {
+        ppRelay(`${BASE_URL}/info/m3u8/key`, req, res, { Referer: `${BASE_URL}${LANG_PATH}/` });
+        return;
+      }
+      // 分段：CID 透传到实测稳定的 aleph.cloud，支持 Range
+      const segMatch = u.pathname.match(/^\/seg\/([a-zA-Z0-9]+)$/);
+      if (segMatch) {
+        ppRelay(`${PPNIX_SEGMENT_HOST}/ipfs/${segMatch[1]}`, req, res, {});
         return;
       }
       if (u.pathname !== "/playlist.m3u8") {
