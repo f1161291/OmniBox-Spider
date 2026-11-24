@@ -1,8 +1,8 @@
 // @name PPnix
 // @author 梦
-// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox，优先返回已重写的内联 m3u8 以规避代理链路问题
+// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v1.8.0 修复视频加载不出：默认开启内联重写 m3u8（key 绝对化 + 分段固定到实测支持 Range 的 ipfs.aleph.cloud），规避 ipfs.ppnix.com 随机 302 到不稳定第三方网关导致分段加载失败；PPNIX_REWRITE_M3U8=0 可回退原始地址，PPNIX_SEGMENT_HOST 可自定义网关
 // @dependencies: axios, cheerio
-// @version 1.7.5
+// @version 1.8.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/PPnix.js
 
 const OmniBox = require("omnibox_sdk");
@@ -29,8 +29,12 @@ function normalizeBasePath(path = "") {
 
 const LANG_PATH = normalizeBasePath(BASE_PATH);
 
-const PPNIX_SEGMENT_HOST = process.env.PPNIX_SEGMENT_HOST || "https://1.ppnix.com";
-const PPNIX_REWRITE_M3U8 = process.env.PPNIX_REWRITE_M3U8 === "1";
+// 分段网关：ipfs.ppnix.com 每次随机 302 到不稳定第三方网关（部分忽略 Range / 失效），
+// 直接固定到实测支持 Range(206) 的 ipfs.aleph.cloud，避免播放器加载分段失败。
+const PPNIX_SEGMENT_HOST = process.env.PPNIX_SEGMENT_HOST || "https://ipfs.aleph.cloud";
+// 默认开启内联重写 m3u8（key 改绝对地址 + 分段改稳定网关），规避 web 端相对 key / 随机网关问题；
+// 设 PPNIX_REWRITE_M3U8=0 可回退到返回原始 m3u8 地址。
+const PPNIX_REWRITE_M3U8 = process.env.PPNIX_REWRITE_M3U8 !== "0";
 const PPNIX_CF_COOKIE = process.env.PPNIX_CF_COOKIE || process.env.PPNIX_COOKIE || "";
 const PPNIX_CF_AUTO = process.env.PPNIX_CF_AUTO !== "0";
 const PPNIX_CF_CACHE_KEY = process.env.PPNIX_CF_CACHE_KEY || "ppnix:cf_clearance";
@@ -551,9 +555,9 @@ function buildM3u8DataUrl(m3u8Text) {
 }
 
 function rewritePpnixM3u8LikeWeb(m3u8Text) {
-  const keyUrl = `${BASE_URL}/info/m3u8/key`;
-  return String(m3u8Text || "")
-    .replace(/URI="\.\.\/key"/g, `URI="${keyUrl}"`);
+  // 与 tvbox 分支保持一致：key 改绝对地址，同时把分段固定到稳定网关，
+  // 避免 web 端落到 ipfs.ppnix.com 的随机第三方网关导致加载失败。
+  return rewritePpnixM3u8ForTvbox(m3u8Text);
 }
 
 function rewritePpnixM3u8ForTvbox(m3u8Text) {
