@@ -1,8 +1,8 @@
 // @name PPnix
 // @author 梦
-// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v1.8.1 修复播放前空跑 CF 绕过：CF 自动处理默认关闭（PPNIX_CF_AUTO=1 且遇 403/503 才启用），FlareSolverr 去掉硬编码内网地址、未配置时零成本跳过、失败不再回退 headless Chromium；play 只复用已有 cookie。v1.8.0：默认开启内联重写 m3u8（key 绝对化 + 分段固定到实测支持 Range 的 ipfs.aleph.cloud），规避 ipfs.ppnix.com 随机 302 到不稳定网关；PPNIX_REWRITE_M3U8=0 / PPNIX_SEGMENT_HOST 可自定义
+// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v1.8.2 修复"方法执行异常: 执行成功"：全部 OmniBox.log 改为 await（官方 SDK log 返回 Promise<void>，未 await 的日志 Promise 被宿主误捕获为执行异常），日志在 handler 返回前完成。v1.8.1：CF 自动处理默认关闭，FlareSolverr 未配置零成本跳过、失败不回退 headless Chromium；play 只复用已有 cookie。v1.8.0：默认开启内联重写 m3u8（key 绝对化 + 分段固定到 ipfs.aleph.cloud）
 // @dependencies: axios, cheerio
-// @version 1.8.1
+// @version 1.8.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/PPnix.js
 
 const OmniBox = require("omnibox_sdk");
@@ -96,7 +96,7 @@ async function getCachedCfCookie() {
     const cached = await OmniBox.getCache(PPNIX_CF_CACHE_KEY);
     return text(cached || "");
   } catch (error) {
-    OmniBox.log("warn", `[cf] 读取缓存失败: ${error.message}`);
+    await OmniBox.log("warn", `[cf] 读取缓存失败: ${error.message}`);
     return "";
   }
 }
@@ -107,7 +107,7 @@ async function setCachedCfCookie(cookie) {
   try {
     await OmniBox.setCache(PPNIX_CF_CACHE_KEY, value, PPNIX_CF_MAX_AGE_SECONDS);
   } catch (error) {
-    OmniBox.log("warn", `[cf] 写入缓存失败: ${error.message}`);
+    await OmniBox.log("warn", `[cf] 写入缓存失败: ${error.message}`);
   }
 }
 
@@ -148,7 +148,7 @@ async function fetchCfClearanceWithFlareSolverr(targetUrl = `${BASE_URL}${LANG_P
     throw new Error(`FlareSolverr 未返回 cf_clearance，message=${text(res.data.message || "") || "unknown"}`);
   }
 
-  OmniBox.log("info", `[cf] FlareSolverr 已返回 cookies=${cookies.length}, ua=${text(solution.userAgent || "")}`);
+  await OmniBox.log("info", `[cf] FlareSolverr 已返回 cookies=${cookies.length}, ua=${text(solution.userAgent || "")}`);
   return cookie;
 }
 
@@ -277,29 +277,29 @@ async function ensureCfCookie(forceRefresh = false, targetUrl = `${BASE_URL}${LA
   if (!PPNIX_CF_AUTO) return "";
   // 未配置 FlareSolverr 时零成本返回，不回退 headless Chromium（会在短生命周期 runner 里空等数十秒）。
   if (!text(PPNIX_FLARESOLVERR_URL)) {
-    OmniBox.log("warn", `[cf] 未配置 FlareSolverr 地址，跳过自动绕过（可配 PPNIX_FLARESOLVERR_URL / FLARESOLVERR_URL）`);
+    await OmniBox.log("warn", `[cf] 未配置 FlareSolverr 地址，跳过自动绕过（可配 PPNIX_FLARESOLVERR_URL / FLARESOLVERR_URL）`);
     return "";
   }
 
   let cookie = "";
   try {
-    OmniBox.log("info", `[cf] 开始通过 FlareSolverr 自动获取 cf_clearance`);
+    await OmniBox.log("info", `[cf] 开始通过 FlareSolverr 自动获取 cf_clearance`);
     cookie = await fetchCfClearanceWithFlareSolverr(targetUrl);
   } catch (error) {
-    OmniBox.log("warn", `[cf] FlareSolverr 获取失败: ${error.message}（不再回退 headless Chromium，避免空等超时）`);
+    await OmniBox.log("warn", `[cf] FlareSolverr 获取失败: ${error.message}（不再回退 headless Chromium，避免空等超时）`);
     return "";
   }
 
   if (cookie) {
     await setCachedCfCookie(cookie);
-    OmniBox.log("info", `[cf] 已自动获取 cf_clearance，长度=${cookie.length}`);
+    await OmniBox.log("info", `[cf] 已自动获取 cf_clearance，长度=${cookie.length}`);
   }
   return cookie;
 }
 
 async function requestPage(path) {
   const url = joinUrl(path);
-  OmniBox.log("info", `[request] ${url}`);
+  await OmniBox.log("info", `[request] ${url}`);
   let cookie = await getCachedCfCookie();
   let res = await axios.get(url, {
     timeout: 20000,
@@ -596,14 +596,14 @@ async function home(params, context) {
       tv: buildCategoryFilters($tv),
     };
 
-    OmniBox.log("info", `[home] 分类=${CATEGORIES.length}, 推荐=${list.length}, movieFilters=${filters.movie?.length || 0}, tvFilters=${filters.tv?.length || 0}`);
+    await OmniBox.log("info", `[home] 分类=${CATEGORIES.length}, 推荐=${list.length}, movieFilters=${filters.movie?.length || 0}, tvFilters=${filters.tv?.length || 0}`);
     return {
       class: CATEGORIES,
       filters,
       list,
     };
   } catch (error) {
-    OmniBox.log("error", `[home] 失败: ${error.message}`);
+    await OmniBox.log("error", `[home] 失败: ${error.message}`);
     return { class: CATEGORIES, filters: {}, list: [] };
   }
 }
@@ -628,7 +628,7 @@ async function category(params, context) {
     }
 
     const categoryFilters = buildCategoryFilters($);
-    OmniBox.log("info", `[category] categoryId=${categoryId}, page=${page}, path=${path}, list=${list.length}, pagecount=${pagecount}`);
+    await OmniBox.log("info", `[category] categoryId=${categoryId}, page=${page}, path=${path}, list=${list.length}, pagecount=${pagecount}`);
     return {
       list,
       page,
@@ -637,7 +637,7 @@ async function category(params, context) {
       filters: categoryFilters.length ? { [categoryId]: categoryFilters } : {},
     };
   } catch (error) {
-    OmniBox.log("error", `[category] 失败: ${error.message}`);
+    await OmniBox.log("error", `[category] 失败: ${error.message}`);
     return { list: [], page: 1, pagecount: 0, total: 0, filters: {} };
   }
 }
@@ -682,10 +682,10 @@ async function detail(params, context) {
       vod_play_sources: episodes.length ? [{ name: "PPnix", episodes }] : undefined,
     };
 
-    OmniBox.log("info", `[detail] infoId=${infoId}, episodes=${episodes.length}`);
+    await OmniBox.log("info", `[detail] infoId=${infoId}, episodes=${episodes.length}`);
     return { list: [vod] };
   } catch (error) {
-    OmniBox.log("error", `[detail] 失败: ${error.message}`);
+    await OmniBox.log("error", `[detail] 失败: ${error.message}`);
     return { list: [] };
   }
 }
@@ -705,7 +705,7 @@ async function search(params, context) {
     const list = mapListItems($, ".lists-content > ul > li, .lists .lists-content ul li")
       .filter((item) => /\/(movie|tv)\/\d+\.html/.test(item.vod_id));
 
-    OmniBox.log("info", `[search] keyword=${keyword}, page=${page}, list=${list.length}`);
+    await OmniBox.log("info", `[search] keyword=${keyword}, page=${page}, list=${list.length}`);
     return {
       list,
       page,
@@ -713,7 +713,7 @@ async function search(params, context) {
       total: list.length,
     };
   } catch (error) {
-    OmniBox.log("error", `[search] 失败: ${error.message}`);
+    await OmniBox.log("error", `[search] 失败: ${error.message}`);
     return { list: [], page: 1, pagecount: 0, total: 0 };
   }
 }
@@ -748,7 +748,7 @@ async function play(params, context) {
         const rawM3u8 = await fetchText(sourceUrl, {});
         const rewritten = rewritePpnixM3u8ForTvbox(rawM3u8);
         const finalUrl = buildM3u8DataUrl(rewritten);
-        OmniBox.log("info", `[play] 返回 tvbox 专用内联 m3u8: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
+        await OmniBox.log("info", `[play] 返回 tvbox 专用内联 m3u8: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
         return {
           urls: [{ name: episodeName, url: finalUrl }],
           header,
@@ -756,7 +756,7 @@ async function play(params, context) {
           danmaku: [],
           subtitles};
       } catch (error) {
-        OmniBox.log("warn", `[play] tvbox 内联 m3u8 失败，回退原始地址: ${error.message}`);
+        await OmniBox.log("warn", `[play] tvbox 内联 m3u8 失败，回退原始地址: ${error.message}`);
       }
     }
 
@@ -765,7 +765,7 @@ async function play(params, context) {
         const rawM3u8 = await fetchText(sourceUrl, header);
         const rewritten = rewritePpnixM3u8LikeWeb(rawM3u8);
         const finalUrl = buildM3u8DataUrl(rewritten);
-        OmniBox.log("info", `[play] 返回重写 data-url: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
+        await OmniBox.log("info", `[play] 返回重写 data-url: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
         return {
           urls: [{ name: episodeName, url: finalUrl }],
           header,
@@ -773,11 +773,11 @@ async function play(params, context) {
           danmaku: [],
           subtitles};
       } catch (error) {
-        OmniBox.log("warn", `[play] 官网链路重写失败，回退原始地址: ${error.message}`);
+        await OmniBox.log("warn", `[play] 官网链路重写失败，回退原始地址: ${error.message}`);
       }
     }
 
-    OmniBox.log("info", `[play] 返回原始 m3u8: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
+    await OmniBox.log("info", `[play] 返回原始 m3u8: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
     return {
       urls: [{ name: episodeName, url: sourceUrl }],
       header,
@@ -785,7 +785,7 @@ async function play(params, context) {
       danmaku: [],
       subtitles};
   } catch (error) {
-    OmniBox.log("error", `[play] 失败: ${error.message}`);
+    await OmniBox.log("error", `[play] 失败: ${error.message}`);
     return { urls: [], header: {}, parse: 1, danmaku: [] };
   }
 }
