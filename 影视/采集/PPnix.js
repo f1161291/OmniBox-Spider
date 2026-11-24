@@ -1,8 +1,8 @@
 // @name PPnix
 // @author 梦
-// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v1.8.3 修复 web 端"视频加载失败"：web 回退返回原始 m3u8 直链（实测 key 相对路径同站可解析、AES-128 解密可正常还原 TS 流；内联 data-url 因 key 接口无 CORS + m3u8>1500 段过大导致失败），tvbox 分支保留固定稳定网关的内联重写。v1.8.2：全部 OmniBox.log 改为 await。v1.8.1：CF 默认关闭、不空跑绕过。v1.8.0：分段固定 ipfs.aleph.cloud
+// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：兼容 TVBox；v1.9.0 彻底修复 web/tvbox 视频加载失败：实测原始链路分段经 ipfs.ppnix.com 随机 302 到忽略 Range 的网关（HTTP 200 整文件、无 Content-Range），播放器逐段读取错位卡死；key 接口又无 CORS，data-url 跨域取 key 失败。新版把 AES key 抓下内联为 data URI（m3u8 完全自包含、不再跨域取 key）+ 分段固定到实测 206+Content-Range+CORS* 的 ipfs.aleph.cloud，web/tvbox 统一走此自包含内联 m3u8。v1.8.2：全部 OmniBox.log 改为 await。v1.8.1：CF 默认关闭
 // @dependencies: axios, cheerio
-// @version 1.8.3
+// @version 1.9.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/PPnix.js
 
 const OmniBox = require("omnibox_sdk");
@@ -32,10 +32,10 @@ const LANG_PATH = normalizeBasePath(BASE_PATH);
 // 分段网关：ipfs.ppnix.com 每次随机 302 到不稳定第三方网关（部分忽略 Range / 失效），
 // 直接固定到实测支持 Range(206) 的 ipfs.aleph.cloud，避免播放器加载分段失败。
 const PPNIX_SEGMENT_HOST = process.env.PPNIX_SEGMENT_HOST || "https://ipfs.aleph.cloud";
-// web 端默认返回原始 m3u8 直链：实测该链路 key 相对路径同站可解析、AES-128 解密可正常还原 TS 流。
-// 内联 data-url 方案因 key 接口无 CORS + m3u8 过大（>1500 段）会让 web 播放器加载失败，仅供 tvbox 分支使用。
-// 需要强制 web 也用内联重写时设 PPNIX_REWRITE_M3U8=1（不推荐）。
-const PPNIX_REWRITE_M3U8 = process.env.PPNIX_REWRITE_M3U8 === "1";
+// 默认开启内联重写：key 内联为 data URI（解决 key 无 CORS），分段固定到支持 Range 的稳定网关
+// （解决 ipfs.ppnix.com 随机 302 到忽略 Range 网关导致加载失败），m3u8 完全自包含。
+// 设 PPNIX_REWRITE_M3U8=0 可回退原始直链（原始链路 key 同站可取但分段忽略 Range，web 端易加载失败）。
+const PPNIX_REWRITE_M3U8 = process.env.PPNIX_REWRITE_M3U8 !== "0";
 const PPNIX_CF_COOKIE = process.env.PPNIX_CF_COOKIE || process.env.PPNIX_COOKIE || "";
 // 站点当前直连 200，无需 CF；仅显式 PPNIX_CF_AUTO=1 且真正遇到 403/503 时才启用绕过，
 // 避免每次播放都空跑 FlareSolverr/Chromium 拖垮启播。
@@ -562,18 +562,41 @@ function buildM3u8DataUrl(m3u8Text) {
   return `data:application/vnd.apple.mpegurl;base64,${Buffer.from(String(m3u8Text || ""), "utf8").toString("base64")}`;
 }
 
-function rewritePpnixM3u8LikeWeb(m3u8Text) {
-  // 与 tvbox 分支保持一致：key 改绝对地址，同时把分段固定到稳定网关，
-  // 避免 web 端落到 ipfs.ppnix.com 的随机第三方网关导致加载失败。
-  return rewritePpnixM3u8ForTvbox(m3u8Text);
+// 抓取 AES key 并内联为 data URI：key 接口无 CORS，data-url 播放时跨域取 key 会失败，
+// 必须把 32 字节 key 内嵌进 m3u8，让播放列表完全自包含。
+async function fetchKeyDataUri(headers = {}) {
+  const keyUrl = `${BASE_URL}/info/m3u8/key`;
+  let cookie = await getCachedCfCookie();
+  const doGet = () => axios.get(keyUrl, {
+    timeout: 20000,
+    responseType: "arraybuffer",
+    headers: { "User-Agent": USER_AGENT, Referer: `${BASE_URL}${LANG_PATH}/`, ...headers, ...buildCookieHeader(cookie) },
+    validateStatus: () => true,
+  });
+  let res = await doGet();
+  if ((res.status === 403 || res.status === 503) && PPNIX_CF_AUTO) {
+    cookie = await ensureCfCookie(!cookie, keyUrl);
+    res = await doGet();
+  }
+  if (res.status !== 200 || !res.data || Buffer.byteLength(res.data) < 16) {
+    throw new Error(`key 获取失败 HTTP ${res.status}`);
+  }
+  const buf = Buffer.from(res.data);
+  return `data:application/octet-stream;base64,${buf.toString("base64")}`;
 }
 
-function rewritePpnixM3u8ForTvbox(m3u8Text) {
-  const keyUrl = `${BASE_URL}/info/m3u8/key`;
+// 重写 m3u8：key 内联为 data URI（解决无 CORS），分段固定到支持 Range 的稳定网关
+// （解决 ipfs.ppnix.com 随机 302 到忽略 Range 的网关导致加载失败）。
+async function rewritePpnixM3u8(m3u8Text, headers = {}) {
+  const keyUri = await fetchKeyDataUri(headers);
   return String(m3u8Text || "")
-    .replace(/URI="\.\.\/key"/g, `URI="${keyUrl}"`)
+    .replace(/URI="[^"]*key[^"]*"/gi, `URI="${keyUri}"`)
     .replace(/https:\/\/ipfs\.ppnix\.com\/ipfs\//g, `${PPNIX_SEGMENT_HOST}/ipfs/`);
 }
+
+// 兼容旧调用名
+function rewritePpnixM3u8LikeWeb(m3u8Text) { return rewritePpnixM3u8(m3u8Text); }
+function rewritePpnixM3u8ForTvbox(m3u8Text) { return rewritePpnixM3u8(m3u8Text); }
 
 async function home(params, context) {
   try {
@@ -747,7 +770,7 @@ async function play(params, context) {
     if (from === "tvbox") {
       try {
         const rawM3u8 = await fetchText(sourceUrl, {});
-        const rewritten = rewritePpnixM3u8ForTvbox(rawM3u8);
+        const rewritten = await rewritePpnixM3u8(rawM3u8, {});
         const finalUrl = buildM3u8DataUrl(rewritten);
         await OmniBox.log("info", `[play] 返回 tvbox 专用内联 m3u8: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
         return {
@@ -764,7 +787,7 @@ async function play(params, context) {
     if (PPNIX_REWRITE_M3U8) {
       try {
         const rawM3u8 = await fetchText(sourceUrl, header);
-        const rewritten = rewritePpnixM3u8LikeWeb(rawM3u8);
+        const rewritten = await rewritePpnixM3u8(rawM3u8, header);
         const finalUrl = buildM3u8DataUrl(rewritten);
         await OmniBox.log("info", `[play] 返回重写 data-url: infoId=${infoId}, param=${param}, from=${from}, leanHeader=${shouldUseLeanHeader ? "yes" : "no"}, cookie=${cfCookie ? "yes" : "no"}, subtitles=${subtitles.length}`);
         return {
