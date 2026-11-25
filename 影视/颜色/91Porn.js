@@ -1,6 +1,6 @@
 /**
  * @name 91porn
- * @version 1.5.2
+ * @version 1.5.3
  * @description 91porn.com 采集源（OmniBox Spider，多基址容灾：主站 + 91p618 镜像；列表封面/标题反混淆真值回填）
  * @downloadURL https://raw.githubusercontent.com/omnibox-spider/main/影视/采集/91porn.js
  */
@@ -60,6 +60,21 @@ const CATEGORIES = [
   { type_id: 'hd', type_name: '高清' }
 ];
 
+// 跳板落点缓存：跳板 host（meta-refresh 中转）→ 真实站点 host。
+// 91p618.com 这类域名根路径是 meta-refresh 跳板、带具体路径直接 404（不保留路径），
+// 因此首次遇到 404 时探测一次根路径，跟随跳板拿到真实落点后用落点重试原路径。
+const hopLanding = new Map();
+// 提取 <meta http-equiv=refresh content="0; URL=..."> 里的目标地址（兼容属性顺序/引号差异）。
+function metaRefreshTarget(html) {
+  const tags = String(html).match(/<meta[^>]*>/gi) || [];
+  for (const tag of tags) {
+    if (!/http-equiv\s*=\s*["']?refresh["']?/i.test(tag)) continue;
+    const content = (tag.match(/content\s*=\s*["']([^"']*)["']/i) || [])[1] || '';
+    const m = content.match(/url\s*=\s*([^;]+)/i);
+    if (m) return m[1].trim().replace(/^["']|["']$/g, '');
+  }
+  return '';
+}
 function httpRequest(urlStr, options = {}, redirectCount = 0) {
   return new Promise((resolve, reject) => {
     if (redirectCount > 5) return reject(new Error('重定向过多'));
@@ -81,7 +96,20 @@ function httpRequest(urlStr, options = {}, redirectCount = 0) {
         }
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
-        res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf-8'), _host: u.host }));
+        res.on('end', () => {
+          const body = Buffer.concat(chunks).toString('utf-8');
+          // meta-refresh 跳板跟随：短页面 + refresh 标签才跟随，避免误伤真实内容页。
+          if (res.statusCode === 200 && body.length < 4096 && redirectCount < 5) {
+            const target = metaRefreshTarget(body);
+            if (target) {
+              logI(`[hop] ${u.host} meta-refresh -> ${target}`);
+              return httpRequest(new URL(target, u.href).href, options, redirectCount + 1)
+                .then((r) => { hopLanding.set(u.host, r._host); resolve(r); })
+                .catch(reject);
+            }
+          }
+          resolve({ statusCode: res.statusCode, headers: res.headers, body, _host: u.host });
+        });
       }
     );
     req.on('error', reject);
@@ -98,9 +126,29 @@ async function fetchWithFailover(path, options = {}) {
   for (const idx of order) {
     const host = HOSTS[idx];
     try {
-      const res = await httpRequest(`${host}${path}`, options);
-      // 视为失败的响应：5xx、403（Cloudflare 拦截/封禁）、空体
-      if (res.statusCode >= 500 || res.statusCode === 403 || !res.body) {
+      let res = await httpRequest(`${host}${path}`, options);
+      // 跳板镜像带路径请求返回 404（跳板不保留路径）：先探测根路径拿真实落点，再用落点重试原路径。
+      const hostKey = new URL(host).host;
+      if (res.statusCode === 404) {
+        if (!hopLanding.has(hostKey)) {
+          logI(`[hop] ${host} 路径 404，探测跳板落点...`);
+          try {
+            const probe = await httpRequest(`${host}/`, options);
+            if (probe._host && probe._host !== hostKey) {
+              hopLanding.set(hostKey, probe._host);
+              logI(`[hop] ${hostKey} 跳板落点 -> ${probe._host}`);
+            }
+          } catch (e) { logE(`[hop] ${hostKey} 落点探测失败: ${e.message}`); }
+        }
+        const landing = hopLanding.get(hostKey);
+        if (landing) {
+          const alt = `${new URL(host).protocol}//${landing}${path}`;
+          logI(`[hop] 用落点重试 ${alt}`);
+          res = await httpRequest(alt, options);
+        }
+      }
+      // 视为失败的响应：404（路径失效/跳板未命中）、5xx、403（Cloudflare 拦截/封禁）、空体
+      if (res.statusCode >= 500 || res.statusCode === 403 || res.statusCode === 404 || !res.body) {
         logE(`[failover] ${host}${path} -> HTTP ${res.statusCode}${!res.body ? ' 空体' : ''}, 切下一个`);
         lastErr = new Error(`HTTP ${res.statusCode}`);
         continue;
