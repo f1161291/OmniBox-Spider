@@ -1,7 +1,7 @@
 // @name 17吃瓜
 // @author OmniBox
 // @description 17吃瓜（17cg.me / 17chigua.tv）：从 App 的 WordPress REST API 采文章+视频，4 域名自动轮换，session_id 签名；首页/分类/搜索/详情；详情 DPlayer config 直取 m3u8（parse=0）。多域名容错 + 封面内联。参考 51吃瓜/黑料网。
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/17吃瓜.js
 // @dependencies axios
 /**
@@ -235,7 +235,7 @@ function parseDPlayer(content) {
 async function detail(params, context) {
   const vid = String((params && (params.videoId ?? params.id)) || '').trim();
   log('info', `detail 入口 vid=${vid}`);
-  if (!vid) return { vod_id: vid, vod_name: '', vod_play_sources: [] };
+  if (!vid) return { list: [] };
   try {
     const cacheKey = `detail:${vid}`;
     let built = memGet(cacheKey, 10 * 60 * 1000);
@@ -261,24 +261,29 @@ async function detail(params, context) {
       };
       if (built.sources.length) { memSet(cacheKey, built); await cacheSet(cacheKey, built, 1800); }
     }
-    log('info', `detail 返回 vid=${vid} sources=${built.sources.length} eps=${built.sources.reduce((n, s) => n + s.episodes.length, 0)}`);
+    const playSources = built.sources.map(s => ({ name: s.name, episodes: s.episodes.map(e => ({ name: e.name, playId: e.playId })) }));
+    log('info', `detail 返回 vid=${vid} sources=${playSources.length} eps=${playSources.reduce((n, s) => n + s.episodes.length, 0)}`);
+    // 图文/吃瓜站按宿主约定返回 list 包裹结构（对齐 51吃瓜/黑料网），扁平结构宿主无法识别详情项
     return {
-      vod_id: vid, vod_name: built.name, vod_pic: built.pic, vod_content: built.content,
-      vod_play_sources: built.sources.map(s => ({ name: s.name, episodes: s.episodes.map(e => ({ name: e.name, playId: e.playId })) })),
+      list: [{
+        vod_id: vid, vod_name: built.name, vod_pic: built.pic, vod_content: built.content,
+        type_name: '吃瓜',
+        vod_play_sources: playSources.length ? playSources : undefined,
+      }],
     };
-  } catch (e) { log('error', `detail 失败: ${e.message}`); return { vod_id: vid, vod_name: '', vod_play_sources: [] }; }
+  } catch (e) { log('error', `detail 失败: ${e.message}`); return { list: [] }; }
 }
 
 async function play(params, context) {
+  const flag = String((params && params.flag) || '17吃瓜');
   const raw = String((params && (params.playId ?? params.url ?? params.id)) || '').trim();
-  log('info', `play 入口 from=${(context && context.from) || 'web'}`);
-  if (!raw) return { urls: [], parse: 0 };
+  log('info', `play 入口 from=${(context && context.from) || 'web'} flag=${flag}`);
+  const header = { 'User-Agent': UA, Referer: HOSTS[preferred] + '/', Origin: HOSTS[preferred] };
+  if (!raw) return { urls: [], flag, header, parse: 0 };
   try {
-    if (/^https?:\/\//i.test(raw) && /\.(m3u8|mp4)(?:\?|$)/i.test(raw)) {
-      return { urls: [{ name: '17吃瓜', url: raw }], parse: 0, header: { 'User-Agent': UA, Referer: HOSTS[preferred] + '/' } };
-    }
-    return { urls: [{ name: '17吃瓜', url: raw }], parse: 1, header: { 'User-Agent': UA, Referer: HOSTS[preferred] + '/' } };
-  } catch (e) { log('error', `play 失败: ${e.message}`); return { urls: [], parse: 0 }; }
+    const parse = /^https?:\/\//i.test(raw) && /\.(m3u8|mp4)(?:\?|$)/i.test(raw) ? 0 : 1;
+    return { urls: [{ name: '播放', url: raw }], flag, header, parse };
+  } catch (e) { log('error', `play 失败: ${e.message}`); return { urls: [], flag, header, parse: 0 }; }
 }
 
 module.exports = { home, category, detail, search, play };
