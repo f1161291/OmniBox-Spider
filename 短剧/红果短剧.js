@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：v2.2.3 修复 v1 spade 密钥错误导致 CENC 解密失败：对照 open-apex-drama 指定 SDK(openhongguo 193086fc) internal/drm/spade.go scramble()，v1（非 app_v2/web_v2）偶数位初始 cur 应为 0xfa=250，旧版误写 246，导致 v1 密钥所有偶数位字节错误；同时长度非法改为直接报错（对齐 SDK），不再静默截断派生错误密钥。单元验证：修正后 v1 输出与 SDK scramble 逐字节一致。v2.2.2 修复视频加载失败：对照 open-apex-drama + openhongguo SDK 修正两处 SERVER 侧解密偏差——① 播放地址解码对齐 SDK playbackURL()：明文直返 / 普通 base64 解码即 URL（旧版只解 0xa8 信封，普通 base64 地址抛错被吞导致"地址格式无效"）；② spade_a 内容密钥提取对齐 SDK spade.go：按 buf[0] 的 versionLen 动态切分 key=buf[1:len-versionLen]，旧版固定 subarray(1,33) 在非 32hex 版本上截错字节导致 CENC 解密失败。v2.2.1 修复榜单分类偶发"执行异常: 执行成功"：无 filters 与显式 rank_type=hot-drama 会落到同一 /rank/hot-drama，宿主极短时间内重复请求同一 URL 曾触发响应解析竞争；按 URL 加 5 分钟分类页短缓存（仅缓存非空列表），命中即返回，规避竞争并减少上游压力。v2.2.0 修复"加载不出视频"：按 openhongguo SDK 与 open-apex-drama 对齐——播放模型空体时自动更换匿名设备重试（服务端自 2026-10-29 每台设备只放行一次播放模型，旧版复用同一设备 6 小时导致第二集起 200 空体）；补齐 spade_a 的 app_v2/web_v2 解密分支；shortplay fallback device_level 3→1 避免 bytevc2；拉流 UA 改为官方 com.phoenix.newsclient/7.9.3。v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 2.2.3
+// @description 红果短剧（hongguoduanju.com）：v2.2.4 对齐 open-apex-drama 8小时前更新(SDK 8223867a)——服务端自 2026-11-23 起 video_model/v1 播放请求必须带 x-medusa（缺它回 200 空体，与 11-10 旧要求相反），SDK 因此把 SignPlaybackPOST 删掉的 medusa 加回。本源 shortplay fallback 此前只有 argus/ladon 无 medusa，V5 空响应回退到这里必拿空体；补上 genMedusa。注意：SDK 新版 medusa 字段21=369(真机布局,377 模拟器被拒)、version v04.10.03，本源 medusa 是旧版 v04.06.04 实现(字段21=call_type=312)，完整移植需大改，本次先补「有 medusa」这一确定性缺口。v2.2.3 修复 v1 spade 密钥错误导致 CENC 解密失败：对照 open-apex-drama 指定 SDK(openhongguo 193086fc) internal/drm/spade.go scramble()，v1（非 app_v2/web_v2）偶数位初始 cur 应为 0xfa=250，旧版误写 246，导致 v1 密钥所有偶数位字节错误；同时长度非法改为直接报错（对齐 SDK），不再静默截断派生错误密钥。单元验证：修正后 v1 输出与 SDK scramble 逐字节一致。v2.2.2 修复视频加载失败：对照 open-apex-drama + openhongguo SDK 修正两处 SERVER 侧解密偏差——① 播放地址解码对齐 SDK playbackURL()：明文直返 / 普通 base64 解码即 URL（旧版只解 0xa8 信封，普通 base64 地址抛错被吞导致"地址格式无效"）；② spade_a 内容密钥提取对齐 SDK spade.go：按 buf[0] 的 versionLen 动态切分 key=buf[1:len-versionLen]，旧版固定 subarray(1,33) 在非 32hex 版本上截错字节导致 CENC 解密失败。v2.2.1 修复榜单分类偶发"执行异常: 执行成功"：无 filters 与显式 rank_type=hot-drama 会落到同一 /rank/hot-drama，宿主极短时间内重复请求同一 URL 曾触发响应解析竞争；按 URL 加 5 分钟分类页短缓存（仅缓存非空列表），命中即返回，规避竞争并减少上游压力。v2.2.0 修复"加载不出视频"：按 openhongguo SDK 与 open-apex-drama 对齐——播放模型空体时自动更换匿名设备重试（服务端自 2026-10-29 每台设备只放行一次播放模型，旧版复用同一设备 6 小时导致第二集起 200 空体）；补齐 spade_a 的 app_v2/web_v2 解密分支；shortplay fallback device_level 3→1 避免 bytevc2；拉流 UA 改为官方 com.phoenix.newsclient/7.9.3。v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
+// @version 2.2.4
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -2543,16 +2543,24 @@ function shortplayRequest(vid, device, apiBase = SHORTPLAY_API) {
     },
   });
   const body = Buffer.from(payload);
-  return {
-    url: `${apiBase}?${query}`,
-    body,
-    headers: {
-      'User-Agent': SHORTPLAY_UA,
-      'Content-Type': 'application/json; charset=utf-8',
-      ...PlayerSigner.headers(query, body, khronos),
-      Cookie: device.cookie,
-    },
+  const signedUrl = `${apiBase}?${query}`;
+  const headers = {
+    'User-Agent': SHORTPLAY_UA,
+    'Content-Type': 'application/json; charset=utf-8',
+    ...PlayerSigner.headers(query, body, khronos),
+    Cookie: device.cookie,
   };
+  // 【2026-11-25 对齐 openhongguo SDK 8223867a / 709cf6a7ab】
+  // 服务端自 2026-11-23 起要求 video_model/v1 播放请求携带 x-medusa（设备布局），
+  // 缺它一律回 HTTP 200 空体——与 11-10 的旧要求正好相反。SDK 因此把
+  // SignPlaybackPOST 删掉的 medusa 重新加回。本源 shortplay fallback 此前只有
+  // argus/ladon 没有 medusa，V5 空响应回退到这里必然拿到空体。补上自研 medusa
+  // （genMedusa 是同步的，字段沿用已验证的 v04 设备布局）。
+  try {
+    const medusa = genMedusa(signedUrl, Object.fromEntries(new URLSearchParams(query)), device, payload, khronos, 'application/json; charset=utf-8');
+    if (medusa) headers['x-medusa'] = medusa;
+  } catch (_) { /* medusa 生成失败不阻断请求 */ }
+  return { url: signedUrl, body, headers };
 }
 
 // ---------------------------------------------------------------------------
