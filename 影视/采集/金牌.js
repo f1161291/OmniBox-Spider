@@ -1,7 +1,7 @@
 // @name 金牌
 // @author 梦
-// @description API 站：https://m.jiabaide.cn，支持首页、分类、搜索、详情与播放解析
-// @version 1.1.5
+// @description API 站：https://jpyy2.com（跳转落点 m.vv3nwjk.com；旧域 m.jiabaide.cn），支持首页、分类、搜索、详情与播放解析
+// @version 1.1.6
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/金牌.js
 // @dependencies crypto-js
 
@@ -9,7 +9,8 @@ const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");
 const CryptoJS = require("crypto-js");
 
-const BASE_URL = process.env.JINPAI_HOST || "https://m.jiabaide.cn";
+// 新主域 jpyy2.com 会 302 到 m.vv3nwjk.com；默认直用落点，避免跳转丢失 t/sign 签名头。可用 JINPAI_HOST 覆盖。
+const BASE_URL = process.env.JINPAI_HOST || "https://m.vv3nwjk.com";
 const MOBILE_UA = "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36";
 const APP_KEY = process.env.JINPAI_APP_KEY || "cb808529bae6b6be45ecfab29a4889bc";
 const BASE_HEADERS = { "User-Agent": MOBILE_UA, Referer: `${BASE_URL}/` };
