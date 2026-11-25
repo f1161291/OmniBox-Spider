@@ -1,7 +1,7 @@
 // @name 热播之家
 // @author OmniBox
 // @description 热播之家（rebozj.cc）：仅采集站内网盘资源（百度/夸克/UC/阿里/迅雷/天翼/115/123）。MacCMS 前台解析：详情页网盘 tab -> 播放页 player_aaaa.url 取分享链接 -> SDK 展开文件列表 -> 真实直链播放。统一变量：SITE_API / DRIVE_ORDER / DRIVE_TYPE_CONFIG / SOURCE_NAMES_CONFIG / PANCHECK_* / DANMU_API。刮削+弹幕+播放记录。
-// @version 1.0.3
+// @version 1.0.4
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/热播之家.js
 
 /**
@@ -96,40 +96,48 @@ function cleanText(s) {
 }
 
 // ============ HTTP ============
-// 宿主沙箱可能禁用原生 http/https，优先用 SDK 的 OmniBox.request（返回 {statusCode, body}），
-// 本地无该能力时回退原生 http/https。两条链路都做 gzip 容错解压。
-function decodeBody(buf, encoding) {
-  // 宿主 SDK 的 body 常是 Uint8Array（Buffer.isBuffer 对它返回 false，直接 String() 会得到数字串）
-  let b;
-  // 跨 vm/realm 时 instanceof Uint8Array 会失效，用 ArrayBuffer.isView + .buffer 判断更可靠
-  if (Buffer.isBuffer(buf)) b = buf;
-  else if (ArrayBuffer.isView(buf) && buf.buffer) b = Buffer.from(buf.buffer, buf.byteOffset || 0, buf.byteLength);
-  else if (buf && buf.buffer instanceof ArrayBuffer && typeof buf.byteLength === "number") b = Buffer.from(buf.buffer, buf.byteOffset || 0, buf.byteLength);
-  else if (Array.isArray(buf)) b = Buffer.from(buf);
-  else b = Buffer.from(String(buf || ""));
+// 关键：宿主原生 http/https 可用（91Porn 同源脚本已证实），且宿主的 gzip 解压常出问题，
+// 因此请求头不带 Accept-Encoding（服务器返回明文 HTML），完全对齐 91Porn.js 的请求方式。
+// 链路：原生优先（失败/异常再走 SDK OmniBox.request 兜底）。两条链路都按 magic 自动识别 gzip。
+function toBuffer(buf) {
+  if (Buffer.isBuffer(buf)) return buf;
+  // 跨 vm/realm 时 instanceof Uint8Array 失效，用 ArrayBuffer.isView + .buffer
+  if (typeof ArrayBuffer !== "undefined") {
+    if (ArrayBuffer.isView(buf) && buf.buffer) return Buffer.from(buf.buffer, buf.byteOffset || 0, buf.byteLength);
+    if (buf && buf.buffer instanceof ArrayBuffer && typeof buf.byteLength === "number") return Buffer.from(buf.buffer, buf.byteOffset || 0, buf.byteLength);
+  }
+  if (Array.isArray(buf)) return Buffer.from(buf);
+  return Buffer.from(String(buf || ""));
+}
+function decodeBody(buf) {
+  let b = toBuffer(buf);
+  // 按 magic 自动识别压缩（不依赖 content-encoding 头，规避宿主 header 丢失/误标）
   try {
-    const enc = String(encoding || "").toLowerCase();
-    if (enc === "gzip") b = zlib.gunzipSync(b);
-    else if (enc === "deflate") b = zlib.inflateSync(b);
+    if (b.length > 2 && b[0] === 0x1f && b[1] === 0x8b) b = zlib.gunzipSync(b);
+    else if (b.length > 2 && b[0] === 0x78 && (b[1] === 0x9c || b[1] === 0x01 || b[1] === 0xda)) b = zlib.inflateSync(b);
   } catch (_) {}
   return b.toString("utf-8");
 }
-function sdkGet(urlStr, headers) {
-  return Promise.resolve().then(async () => {
-    if (typeof OmniBox.request !== "function") return null;
-    const res = await OmniBox.request(urlStr, { method: "GET", headers, timeout: TIMEOUT });
-    if (!res) return null;
-    // 兼容三种返回：{statusCode,body} / {status,body} / 直接字符串 body
-    if (typeof res === "string" || Buffer.isBuffer(res)) return { status: 200, body: decodeBody(res), headers: {} };
-    const status = Number(res.statusCode || res.status || 200);
-    const bodyRaw = ("body" in res ? res.body : (res.data ?? res.text ?? res.content ?? ""));
-    const body = decodeBody(bodyRaw, res.headers && (res.headers["content-encoding"] || res.headers["Content-Encoding"]));
-    log("info", `[http] ${urlStr.slice(0, 90)} status=${status} statusRaw=${res.statusCode ?? res.status ?? "none"} bodyType=${Object.prototype.toString.call(bodyRaw)} len=${body.length} preview=${body.slice(0, 80).replace(/\s+/g, " ")}`);
-    return { status, body, headers: res.headers || {} };
+function httpGet(urlStr, headers = {}, redirect = 0) {
+  return httpGetNative(urlStr, headers, redirect).catch((nativeErr) => {
+    log("info", `[http] 原生失败(${nativeErr.message})，尝试 SDK: ${urlStr.slice(0, 80)}`);
+    return sdkGet(urlStr, headers);
   });
 }
-function httpGet(urlStr, headers = {}, redirect = 0) {
-  return sdkGet(urlStr, headers).then((sdkRes) => { if (sdkRes) return sdkRes; return httpGetNative(urlStr, headers, redirect); });
+function sdkGet(urlStr, headers) {
+  return Promise.resolve().then(async () => {
+    if (typeof OmniBox.request !== "function") throw new Error("无 SDK request 能力");
+    const res = await OmniBox.request(urlStr, { method: "GET", headers, timeout: TIMEOUT });
+    if (!res) throw new Error("SDK request 返回空");
+    let status = 200, bodyRaw = res;
+    if (typeof res !== "string" && !Buffer.isBuffer(res) && !ArrayBuffer.isView(res)) {
+      status = Number(res.statusCode || res.status || 200);
+      bodyRaw = ("body" in res ? res.body : (res.data ?? res.text ?? res.content ?? ""));
+    }
+    const body = decodeBody(bodyRaw);
+    log("info", `[http-sdk] ${urlStr.slice(0, 80)} status=${status} len=${body.length}`);
+    return { status, body, headers: (res && res.headers) || {} };
+  });
 }
 function httpGetNative(urlStr, headers = {}, redirect = 0) {
   return new Promise((resolve, reject) => {
@@ -140,9 +148,10 @@ function httpGetNative(urlStr, headers = {}, redirect = 0) {
     const req = client.request({
       protocol: u.protocol, hostname: u.hostname, port: u.port || (u.protocol === "https:" ? 443 : 80),
       path: u.pathname + u.search, method: "GET", timeout: TIMEOUT, rejectUnauthorized: false,
+      // 不带 Accept-Encoding：对齐 91Porn，服务器返回明文，规避宿主 gzip 解压问题
       headers: Object.assign({
-        "User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*",
-        "Accept-Language": "zh-CN,zh;q=0.9", "Accept-Encoding": "gzip, deflate", "Referer": SITE + "/",
+        "User-Agent": UA, "Accept": "*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8", "Referer": SITE + "/",
       }, headers),
     }, (res) => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
@@ -152,12 +161,9 @@ function httpGetNative(urlStr, headers = {}, redirect = 0) {
       const chunks = [];
       res.on("data", (c) => chunks.push(c));
       res.on("end", () => {
-        let buf = Buffer.concat(chunks);
-        try {
-          if (res.headers["content-encoding"] === "gzip") buf = zlib.gunzipSync(buf);
-          else if (res.headers["content-encoding"] === "deflate") buf = zlib.inflateSync(buf);
-        } catch (_) {}
-        resolve({ status: res.statusCode, body: buf.toString("utf-8"), headers: res.headers });
+        const body = decodeBody(Buffer.concat(chunks));
+        log("info", `[http] ${urlStr.slice(0, 80)} status=${res.statusCode} len=${body.length}`);
+        resolve({ status: res.statusCode, body, headers: res.headers });
       });
     });
     req.on("error", reject);
