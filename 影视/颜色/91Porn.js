@@ -1,6 +1,6 @@
 /**
  * @name 91porn
- * @version 1.5.4
+ * @version 1.5.5
  * @description 91porn.com 采集源（OmniBox Spider，多基址容灾：主站 + 91p618 镜像；列表封面/标题反混淆真值回填）
  * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91Porn.js
  */
@@ -63,7 +63,36 @@ const CATEGORIES = [
 // 跳板落点缓存：跳板 host（meta-refresh 中转）→ 真实站点 host。
 // 91p618.com 这类域名根路径是 meta-refresh 跳板、带具体路径直接 404（不保留路径），
 // 因此首次遇到 404 时探测一次根路径，跟随跳板拿到真实落点后用落点重试原路径。
+// 内存 Map 服务当前调用；SDK 缓存跨 detail/play 等 handler 调用持久，
+// 命中一次后后续请求直达落点，不再重复「打 404 → 探根路径 → 重试」的探测链。
 const hopLanding = new Map();
+const HOP_CACHE_KEY = '91porn:hoplanding';
+async function loadHopCache() {
+  if (hopLanding.size) return;
+  try {
+    const raw = await OmniBox.getCache(HOP_CACHE_KEY);
+    const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (obj && typeof obj === 'object') {
+      for (const [k, v] of Object.entries(obj)) if (k && v && typeof v === 'string') hopLanding.set(k, v);
+    }
+    if (hopLanding.size) logI(`[hop] 命中落点缓存 ${JSON.stringify(Object.fromEntries(hopLanding))}`);
+  } catch (_) { /* 缓存不可用时仅用内存层 */ }
+}
+function persistHopCache() {
+  try {
+    Promise.resolve(OmniBox.setCache(HOP_CACHE_KEY, JSON.stringify(Object.fromEntries(hopLanding)), 7 * 24 * 3600)).catch(() => {});
+  } catch (_) { /* 缓存写失败不影响主链路 */ }
+}
+function rememberHop(hostKey, landing) {
+  if (!hostKey || !landing || hostKey === landing) return;
+  hopLanding.set(hostKey, landing);
+  persistHopCache();
+}
+function forgetHop(hostKey) {
+  if (!hostKey || !hopLanding.has(hostKey)) return;
+  hopLanding.delete(hostKey);
+  persistHopCache();
+}
 // 提取 <meta http-equiv=refresh content="0; URL=..."> 里的目标地址（兼容属性顺序/引号差异）。
 function metaRefreshTarget(html) {
   const tags = String(html).match(/<meta[^>]*>/gi) || [];
@@ -104,7 +133,7 @@ function httpRequest(urlStr, options = {}, redirectCount = 0) {
             if (target) {
               logI(`[hop] ${u.host} meta-refresh -> ${target}`);
               return httpRequest(new URL(target, u.href).href, options, redirectCount + 1)
-                .then((r) => { hopLanding.set(u.host, r._host); resolve(r); })
+                .then((r) => { rememberHop(u.host, r._host); resolve(r); })
                 .catch(reject);
             }
           }
@@ -119,23 +148,37 @@ function httpRequest(urlStr, options = {}, redirectCount = 0) {
   });
 }
 
-// 基址容灾：相对路径按 HOSTS 顺序尝试（优选基址优先），网络错误/403/5xx/空体自动切下一个。
+// 基址容灾：相对路径按 HOSTS 顺序尝试（优选基址优先），网络错误/403/5xx/404/空体自动切下一个。
+// 已知跳板基址在请求前直接用落点（命中一次后不再重复探测链）；落点失效自动清除映射重新探测。
 async function fetchWithFailover(path, options = {}) {
+  await loadHopCache();
   const order = [PREFERRED, ...HOSTS.map((_, i) => i).filter(i => i !== PREFERRED)];
   let lastErr;
   for (const idx of order) {
     const host = HOSTS[idx];
     try {
-      let res = await httpRequest(`${host}${path}`, options);
-      // 跳板镜像带路径请求返回 404（跳板不保留路径）：先探测根路径拿真实落点，再用落点重试原路径。
       const hostKey = new URL(host).host;
+      const cached = hopLanding.get(hostKey);
+      let target = host;
+      if (cached) {
+        target = `${new URL(host).protocol}//${cached}`;
+        logI(`[hop] 直达落点 ${target}${path}`);
+      }
+      let res = await httpRequest(`${target}${path}`, options);
+      // 落点失效自愈：清掉映射，回原基址重走一次探测链刷新落点。
+      if (cached && (res.statusCode >= 400 || !res.body)) {
+        logE(`[hop] 落点 ${cached} 失效(HTTP ${res.statusCode})，清除映射重新探测`);
+        forgetHop(hostKey);
+        res = await httpRequest(`${host}${path}`, options);
+      }
+      // 跳板镜像带路径请求返回 404（跳板不保留路径）：先探测根路径拿真实落点，再用落点重试原路径。
       if (res.statusCode === 404) {
         if (!hopLanding.has(hostKey)) {
           logI(`[hop] ${host} 路径 404，探测跳板落点...`);
           try {
             const probe = await httpRequest(`${host}/`, options);
             if (probe._host && probe._host !== hostKey) {
-              hopLanding.set(hostKey, probe._host);
+              rememberHop(hostKey, probe._host);
               logI(`[hop] ${hostKey} 跳板落点 -> ${probe._host}`);
             }
           } catch (e) { logE(`[hop] ${hostKey} 落点探测失败: ${e.message}`); }
