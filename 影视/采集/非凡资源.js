@@ -1,7 +1,7 @@
 // @name 🎬非凡资源
-// @version 2.0.1
+// @version 2.1.0
 // @author omnibox-spider
-// @description 非凡资源（ffzyapi.com 采集站）OmniBox Spider：ac=videolist 全字段直取、叶子分类（父分类接口恒 0 条已剔除）、year/area/今日更新筛选、分享页 const url 解 m3u8、直链 parse=0 + 嗅探兜底、SDK 弹幕 + 播放记录、页面级缓存
+// @description 非凡资源（ffzyapi.com 采集站）OmniBox Spider：ac=videolist 全字段直取、按电影/剧集/综艺/动漫大类分组（大类聚合入口+叶子子类，逗号拼接叶子id一次取回）、year/area/今日更新筛选、分享页 const url 解 m3u8、直链 parse=0 + 嗅探兜底、SDK 弹幕 + 播放记录、页面级缓存
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/非凡资源.js
 
 // 【环境变量】
@@ -54,8 +54,37 @@ function normalizeApi(s) {
 }
 const SITE_API = normalizeApi(process.env.SITE_API || DEFAULT_API);
 
-// 父分类名（只用于给叶子分类加前缀；父分类本身不进 class 列表）
+// 父分类定义：父 type_id -> { 名称, 虚拟聚合 id }。
+// 实测父分类直接查 videolist 多为 total=0（仅"动漫片"t=4 有少量直挂影片），
+// 因此大类入口统一用其下所有叶子 type_id 逗号拼接聚合查询（接口支持，已实测）。
+const PARENTS = [
+  { pid: "1", name: "电影", vkey: "p1" },
+  { pid: "2", name: "剧集", vkey: "p2" },
+  { pid: "3", name: "综艺", vkey: "p3" },
+  { pid: "4", name: "动漫", vkey: "p4" },
+];
 const PARENT_NAMES = { "1": "电影", "2": "剧集", "3": "综艺", "4": "动漫" };
+const VIRTUAL_PARENTS = new Set(PARENTS.map((p) => p.vkey));
+// 虚拟大类 id -> 该大类所有叶子 type_id（供 category 聚合用）。
+// 缓存命中时也需重建（不能只在网络请求时构建），因此提供从 class 列表反推的 helper。
+let PARENT_LEAVES = {};
+function rebuildParentLeaves(list) {
+  const out = {};
+  for (const p of PARENTS) out[p.vkey] = [];
+  for (const item of list) {
+    const id = str(item.type_id);
+    const name = str(item.type_name);
+    if (!id || !name) continue;
+    // 子分类名形如 "电影·动作片"：按前缀归入对应大类
+    for (const p of PARENTS) {
+      if (name.startsWith(p.name + "·") && !VIRTUAL_PARENTS.has(id)) {
+        out[p.vkey].push(id);
+        break;
+      }
+    }
+  }
+  PARENT_LEAVES = out;
+}
 
 // 实测可用的筛选值（未列出的值接口会返回 total=0 或直接忽略参数）
 const YEAR_OPTIONS = [
@@ -322,28 +351,41 @@ function buildLegacyFields(sources) {
 // ==================== 分类 ====================
 async function loadClasses(force) {
   const hit = memGet("classes", 6 * 3600 * 1000);
-  if (hit && !force) return hit;
+  if (hit && !force) { rebuildParentLeaves(hit); return hit; }
   if (!force) {
     const cached = await cacheGet("classes", "all");
     if (cached && Array.isArray(cached.list) && cached.list.length) {
       memSet("classes", cached.list);
+      rebuildParentLeaves(cached.list);
       return cached.list;
     }
   }
   const data = await requestJson({ ac: "class" }, "class");
   const raw = Array.isArray(data.class) ? data.class : [];
   const leaves = raw.filter((c) => c && str(c.type_pid) !== "0" && str(c.type_id) && str(c.type_name));
-  const list = leaves.map((c) => {
-    const parent = PARENT_NAMES[str(c.type_pid)] || "";
-    const name = str(c.type_name);
-    return {
-      type_id: str(c.type_id),
-      type_name: parent && !name.startsWith(parent) ? `${parent}·${name}` : name,
-    };
-  });
-  // 虚拟分类：今日更新（h=24）
-  list.unshift({ type_id: VIRTUAL_NEW, type_name: "今日更新" });
-  logI(`[class] 原始=${raw.length} 叶子=${leaves.length} 输出=${list.length} 示例=${list.slice(0, 4).map((x) => `${x.type_id}:${x.type_name}`).join(",")}`);
+  // 按大类分组：父分类聚合入口 + 其下所有叶子（叶子名带"大类·"前缀），大类间连续排列。
+  PARENT_LEAVES = {};
+  const list = [{ type_id: VIRTUAL_NEW, type_name: "今日更新" }];
+  for (const p of PARENTS) {
+    const kids = leaves.filter((c) => str(c.type_pid) === p.pid);
+    PARENT_LEAVES[p.vkey] = kids.map((c) => str(c.type_id));
+    // 大类聚合入口：点进去用逗号拼接该类全部叶子 id 一次取回
+    list.push({ type_id: p.vkey, type_name: `📁${p.name}` });
+    for (const c of kids) {
+      const name = str(c.type_name);
+      list.push({
+        type_id: str(c.type_id),
+        type_name: !name.startsWith(p.name) ? `${p.name}·${name}` : name,
+      });
+    }
+  }
+  // 兜底：未知父分类的叶子（接口新增分类时不至于丢失）
+  const known = new Set(Object.values(PARENT_LEAVES).flat());
+  for (const c of leaves) {
+    const id = str(c.type_id);
+    if (!known.has(id)) list.push({ type_id: id, type_name: str(c.type_name) });
+  }
+  logI(`[class] 原始=${raw.length} 叶子=${leaves.length} 输出=${list.length} 大类=${PARENTS.map(p => `${p.vkey}:${PARENT_LEAVES[p.vkey].length}`).join(",")} 示例=${list.slice(0, 5).map((x) => `${x.type_id}:${x.type_name}`).join(",")}`);
   if (list.length > 1) {
     memSet("classes", list);
     await cacheSet("classes", "all", { list }, 6 * 3600);
@@ -359,6 +401,11 @@ function buildFilters(categoryId) {
   if (categoryId === VIRTUAL_NEW) {
     // 今日更新本身就是 h=24 时间流，只留地区筛选
     return [area];
+  }
+  if (VIRTUAL_PARENTS.has(categoryId)) {
+    // 大类聚合：年份 + 地区筛选
+    const year = { key: "year", name: "年份", init: "", value: YEAR_OPTIONS.map(([name, value]) => ({ name, value })) };
+    return [year, area];
   }
   const year = {
     key: "year", name: "年份", init: "",
@@ -604,9 +651,20 @@ async function category(params, context) {
   logI(`[category] 入口 categoryId=${categoryId} page=${page} filters=${JSON.stringify(f)} from=${from}`);
   if (!categoryId) return { page: 1, pagecount: 0, total: 0, list: [], filters: {} };
   try {
+    // 大类聚合入口（p1~p4）：用逗号拼接该类全部叶子 id，一次请求聚合（接口实测支持）。
+    // 若菜单尚未加载（PARENT_LEAVES 为空），先同步拉一次分类再取。
+    let leafIds = "";
+    if (VIRTUAL_PARENTS.has(categoryId)) {
+      leafIds = (PARENT_LEAVES[categoryId] || []).join(",");
+      if (!leafIds) {
+        await loadClasses(true);
+        leafIds = (PARENT_LEAVES[categoryId] || []).join(",");
+      }
+      logI(`[category] 大类聚合 ${categoryId} -> 叶子 ${leafIds}`);
+    }
     const query = categoryId === VIRTUAL_NEW
       ? { ac: "videolist", h: 24, pg: page, year: f.year, area: f.area }
-      : { ac: "videolist", t: categoryId, pg: page, year: f.year, area: f.area };
+      : { ac: "videolist", t: leafIds || categoryId, pg: page, year: f.year, area: f.area };
     const cacheKey = JSON.stringify(query);
     let payload = memGet(`cat:${cacheKey}`, 60 * 1000);
     if (!payload) {
