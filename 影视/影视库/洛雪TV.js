@@ -1,8 +1,8 @@
 // @name 洛雪TV
 // @author OmniBox
-// @description 站点：tv.lxyy.club（洛雪TV）。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
+// @description 站点：tv.lxyy.club（洛雪TV）。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1（仅 ok影视 有效，其它端忽略导致加载失败），改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回并合并嗅探 header，失败才回退 parse=1。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
 // @dependencies []
-// @version 2.0.0
+// @version 2.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/影视库/洛雪TV.js
 
 /**
@@ -56,6 +56,7 @@ try {
     async getCache() { return null; },
     async setCache() {},
     async deleteCache() {},
+    async sniffVideo() { return null; },
   };
 }
 
@@ -1192,7 +1193,31 @@ async function play(params, context) {
       urls.push({ name: "原始播放页", url: meta.u });
 
       logInfo(`play 解析入口=${playerPage ? "有" : "无"} src=${meta.s}/${meta.i} 线路=${meta.g || "-"} page=${meta.u.slice(0, 60)}`);
-      // 平台播放页需要解析/嗅探，parse=1 交给播放器处理
+
+      // 平台播放页/解析页不是媒体直链；parse=1 仅 ok影视 有效，其它客户端会忽略导致加载失败。
+      // 先用 SDK 嗅探真实媒体地址，命中直链即 parse=0 返回（兼容所有端）。
+      if (typeof OmniBox.sniffVideo === "function") {
+        for (const candidate of urls.slice(0, 2)) {
+          try {
+            logInfo(`play 开始嗅探 ${candidate.name} ${candidate.url.slice(0, 70)}`);
+            const sniffed = await OmniBox.sniffVideo(candidate.url, { ...header, Referer: `${HOST}/` });
+            const sniffUrl = sniffed && (sniffed.url || sniffed.mediaUrl);
+            if (sniffUrl && /^https?:\/\//i.test(String(sniffUrl))) {
+              logInfo(`play 嗅探成功 ${String(sniffUrl).slice(0, 90)}`);
+              return {
+                urls: [{ name: meta.g || "解析播放", url: sniffUrl }],
+                flag: meta.g || "洛雪TV",
+                parse: 0,
+                header: Object.assign({}, header, sniffed.header || {}),
+              };
+            }
+            logInfo(`play 嗅探无结果 ${candidate.name}`);
+          } catch (error) {
+            logInfo(`play 嗅探失败 ${candidate.name}: ${error && error.message ? error.message : error}`);
+          }
+        }
+      }
+      // 嗅探全部失败：回退 parse=1（ok影视 可继续嗅探），并把解析入口排在原始页前面
       return { urls, flag: meta.g || "洛雪TV", parse: 1, header };
     }
 
