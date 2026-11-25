@@ -1,8 +1,8 @@
 // @name 洛雪TV
 // @author OmniBox
-// @description 站点：tv.lxyy.club（洛雪TV）。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1（仅 ok影视 有效，其它端忽略导致加载失败），改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回并合并嗅探 header，失败才回退 parse=1。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
+// @description 站点：tv.lxyy.club（洛雪TV）。v2.0.2 修复播放失败+集数列表异常：① 分集名站点返回纯数字（"1"/"2"…）统一补成「第N集」，宿主列表正常显示；② playId 去掉全剧冗余的 t/g 字段，vod_play_url 从 42KB 降到 33KB（-22%），避免长剧列表解析异常；③ 嗅探 Referer 改为按候选页域名自动生成（qlplayer 用洛雪站、B站等原始页用其源站），提高嗅探成功率。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
 // @dependencies []
-// @version 2.0.1
+// @version 2.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/影视库/洛雪TV.js
 
 /**
@@ -543,14 +543,18 @@ function buildProxyEpisodes(detail) {
     eps.forEach((ep, ei) => {
       const url = String((ep && ep.url) || "").trim();
       if (!url) return;
-      const epName = normalizeText(ep && ep.name) || `第${ei + 1}集`;
+      // 站点分集名常是纯数字（"1"/"2"…），直接返回会让宿主列表显示异常；
+      // 统一补成「第N集」，已是「第X集/Upack」等可读形式则保留。
+      let epName = normalizeText(ep && ep.name) || `第${ei + 1}集`;
+      if (/^\d+$/.test(epName)) epName = `第${epName}集`;
+      // playId 精简：t(片名)/g(线路) 全剧每集都相同属冗余，去掉可显著缩短
+      // vod_play_url（长剧 200+ 集时从 42KB 降到 ~20KB，避免宿主解析/显示异常）。
+      // play() 里 meta.g 有 fallback，不影响播放。
       const meta = {
         u: url,
         p: playerApi,
         s: String((detail && detail.source) || ""),
         i: String((detail && detail.id) || ""),
-        t: normalizeText(detail && detail.name),
-        g: groupName,
       };
       out.push({
         name: groups.length > 1 ? `${groupName} ${epName}` : epName,
@@ -1199,8 +1203,12 @@ async function play(params, context) {
       if (typeof OmniBox.sniffVideo === "function") {
         for (const candidate of urls.slice(0, 2)) {
           try {
-            logInfo(`play 开始嗅探 ${candidate.name} ${candidate.url.slice(0, 70)}`);
-            const sniffed = await OmniBox.sniffVideo(candidate.url, { ...header, Referer: `${HOST}/` });
+            // 嗅探 Referer 必须匹配被嗅探页面本身：qlplayer 解析页用洛雪站，
+            // B站/爱奇艺等原始播放页用其自身源站，否则页面会因 Referer 校验失败而嗅探不到。
+            let sniffReferer = `${HOST}/`;
+            try { sniffReferer = `${new URL(candidate.url).origin}/`; } catch (_) { /* 保留默认 */ }
+            logInfo(`play 开始嗅探 ${candidate.name} ${candidate.url.slice(0, 70)} ref=${sniffReferer}`);
+            const sniffed = await OmniBox.sniffVideo(candidate.url, { ...header, Referer: sniffReferer });
             const sniffUrl = sniffed && (sniffed.url || sniffed.mediaUrl);
             if (sniffUrl && /^https?:\/\//i.test(String(sniffUrl))) {
               logInfo(`play 嗅探成功 ${String(sniffUrl).slice(0, 90)}`);
