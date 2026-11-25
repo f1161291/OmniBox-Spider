@@ -1,8 +1,8 @@
 // @name 洛雪TV
 // @author OmniBox
-// @description 站点：tv.lxyy.club（洛雪TV）。v2.0.2 修复播放失败+集数列表异常：① 分集名站点返回纯数字（"1"/"2"…）统一补成「第N集」，宿主列表正常显示；② playId 去掉全剧冗余的 t/g 字段，vod_play_url 从 42KB 降到 33KB（-22%），避免长剧列表解析异常；③ 嗅探 Referer 改为按候选页域名自动生成（qlplayer 用洛雪站、B站等原始页用其源站），提高嗅探成功率。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
+// @description 站点：tv.lxyy.club（洛雪TV）。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
 // @dependencies []
-// @version 2.0.2
+// @version 2.0.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/影视库/洛雪TV.js
 
 /**
@@ -532,38 +532,48 @@ async function proxyDetail(id, source) {
  * playId 直接透传所需信息，play() 不必再回源：
  *   playId = "px|" + base64(JSON{u:播放页url, p:player_api, s:source, i:id, t:片名, g:线路})
  */
-function buildProxyEpisodes(detail) {
-  const groups = Array.isArray(detail && detail.episodes) ? detail.episodes : [];
-  const playerApi = String((detail && detail.player_api) || "").trim();
-  const out = [];
+function normalizeEpisodeName(raw, index) {
+  // 站点分集名常是纯数字（"1"/"2"…）或"第 1 集"，统一成「第N集」避免列表显示异常。
+  const name = normalizeText(raw) || `第${index + 1}集`;
+  const m = name.match(/(\d+)/);
+  if (/^\d+$/.test(name) || /^第\s*\d+\s*集$/.test(name)) return `第${m ? m[1] : index + 1}集`;
+  return name;
+}
 
+function buildEpisodeMeta(detail, url) {
+  // playId 精简：t(片名)/g(线路) 全剧每集都相同属冗余，去掉可显著缩短
+  // vod_play_url（长剧 200+ 集时从 42KB 降到 ~20KB，避免宿主解析/显示异常）。
+  // play() 里 meta.g 有 fallback，不影响播放。
+  const meta = {
+    u: String(url || "").trim(),
+    p: String((detail && detail.player_api) || "").trim(),
+    s: String((detail && detail.source) || ""),
+    i: String((detail && detail.id) || ""),
+  };
+  return `px|${Buffer.from(JSON.stringify(meta), "utf8").toString("base64")}`;
+}
+
+// 按站点线路分组拆成多条 vod_play_source：线路名（如 jlm3u8/jlplayer）体现在线路名上，
+// 不再拼进每个分集名——否则列表里每集都带 "jlm3u8 第N集"，看起来像乱码/异常。
+function buildProxySources(detail, fallbackName) {
+  const groups = Array.isArray(detail && detail.episodes) ? detail.episodes : [];
+  const sources = [];
   groups.forEach((group, gi) => {
     const groupName = normalizeText(group && group.group) || `线路${gi + 1}`;
     const eps = Array.isArray(group && group.episodes) ? group.episodes : [];
+    const episodes = [];
     eps.forEach((ep, ei) => {
       const url = String((ep && ep.url) || "").trim();
       if (!url) return;
-      // 站点分集名常是纯数字（"1"/"2"…），直接返回会让宿主列表显示异常；
-      // 统一补成「第N集」，已是「第X集/Upack」等可读形式则保留。
-      let epName = normalizeText(ep && ep.name) || `第${ei + 1}集`;
-      if (/^\d+$/.test(epName)) epName = `第${epName}集`;
-      // playId 精简：t(片名)/g(线路) 全剧每集都相同属冗余，去掉可显著缩短
-      // vod_play_url（长剧 200+ 集时从 42KB 降到 ~20KB，避免宿主解析/显示异常）。
-      // play() 里 meta.g 有 fallback，不影响播放。
-      const meta = {
-        u: url,
-        p: playerApi,
-        s: String((detail && detail.source) || ""),
-        i: String((detail && detail.id) || ""),
-      };
-      out.push({
-        name: groups.length > 1 ? `${groupName} ${epName}` : epName,
-        playId: `px|${Buffer.from(JSON.stringify(meta), "utf8").toString("base64")}`,
-      });
+      episodes.push({ name: normalizeEpisodeName(ep && ep.name, ei), playId: buildEpisodeMeta(detail, url) });
     });
+    if (episodes.length) sources.push({ name: normalizeText(fallbackName) || groupName, episodes });
   });
+  return sources;
+}
 
-  return out;
+function buildProxyEpisodes(detail) {
+  return buildProxySources(detail).reduce((all, source) => all.concat(source.episodes), []);
 }
 
 function decodePlayId(playId) {
@@ -855,13 +865,16 @@ async function matchTmdbByTitle(title, year) {
 async function detailFromCollect(source, id, vodId) {
   const d = await proxyDetail(id, source);
   if (!d) return null;
-  const episodes = buildProxyEpisodes(d);
+  let sources = buildProxySources(d);
+  const totalEps = sources.reduce((n, s) => n + s.episodes.length, 0);
+  // 单线路用站点源名（官采蓝光）更友好；多线路保留各自分组名（jlm3u8/jlplayer）便于选择。
+  if (sources.length === 1) sources = [{ ...sources[0], name: normalizeText(d.source_name) || sources[0].name }];
 
   const parts = [];
   if (d.remarks) parts.push(normalizeText(d.remarks));
   if (d.year) parts.push(String(d.year));
-  if (episodes.length > 1) parts.push(`全${episodes.length}集`);
-  else if (episodes.length === 1) parts.push("正片");
+  if (totalEps > 1) parts.push(`全${totalEps}集`);
+  else if (totalEps === 1) parts.push("正片");
 
   const vod = {
     vod_id: vodId || `cs|${source}|${id}`,
@@ -875,11 +888,12 @@ async function detailFromCollect(source, id, vodId) {
     type_name: normalizeText(d.type) || normalizeText(d.source_name) || "影视",
     vod_actor: normalizeText(d.actor),
     vod_director: normalizeText(d.director),
-    vod_play_sources: episodes.length ? [{ name: normalizeText(d.source_name) || "采集站", episodes }] : [],
+    vod_play_sources: sources,
   };
-  if (episodes.length) {
-    vod.vod_play_from = vod.vod_play_sources[0].name;
-    vod.vod_play_url = episodes.map((ep) => `${ep.name}$${ep.playId}`).join("#");
+  if (sources.length) {
+    vod.vod_play_from = sources.map((s) => s.name).join("$$$");
+    // 兼容旧端：只取第一条线路的集数生成 vod_play_url（避免多线路混在一起）。
+    vod.vod_play_url = sources[0].episodes.map((ep) => `${ep.name}$${ep.playId}`).join("#");
   }
   return vod;
 }
@@ -948,17 +962,16 @@ async function detailFromTmdb(mediaType, id, vodId) {
   const title = normalizeText(data.title || data.name);
 
   // TMDB 条目也尝试走采集站拿真实播放列表
-  let episodes = [];
-  let playName = "";
+  let sources = [];
   try {
     const results = await proxySearch(title, 1);
     const exact = results.find((r) => normalizeText(r.name) === title) || results[0];
     if (exact) {
       const d = await proxyDetail(exact.id, exact.source);
       if (d) {
-        episodes = buildProxyEpisodes(d);
-        playName = normalizeText(d.source_name) || "采集站";
-        logInfo(`[detail] TMDB「${title}」→ 采集站 ${exact.source}/${exact.id} 分集=${episodes.length}`);
+        sources = buildProxySources(d);
+        if (sources.length === 1) sources = [{ ...sources[0], name: normalizeText(d.source_name) || sources[0].name }];
+        logInfo(`[detail] TMDB「${title}」→ 采集站 ${exact.source}/${exact.id} 线路=${sources.length}`);
       }
     }
   } catch (error) {
@@ -984,11 +997,11 @@ async function detailFromTmdb(mediaType, id, vodId) {
     type_name: genres.join("/") || (mediaType === "tv" ? "剧集" : "电影"),
     vod_actor: "",
     vod_director: "",
-    vod_play_sources: episodes.length ? [{ name: playName || "采集站", episodes }] : [],
+    vod_play_sources: sources,
   };
-  if (episodes.length) {
-    vod.vod_play_from = vod.vod_play_sources[0].name;
-    vod.vod_play_url = episodes.map((ep) => `${ep.name}$${ep.playId}`).join("#");
+  if (sources.length) {
+    vod.vod_play_from = sources.map((s) => s.name).join("$$$");
+    vod.vod_play_url = sources[0].episodes.map((ep) => `${ep.name}$${ep.playId}`).join("#");
   }
   return vod;
 }
