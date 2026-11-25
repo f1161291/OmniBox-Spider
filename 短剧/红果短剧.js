@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：v2.2.5 修复视频加载失败（真正根因）：对照 N3urda/hongguoTV 0.16.15 PR#122（2026-11-25 最新），服务端要求 Medusa v5 完整设备信封——旧版 v5Medusa 只发 14 个 env.device 字段、字段21=377、flags 全零、counter=[1,1,1,1]，服务端静默回 200 空体。补齐到 v04.10.03 的 36 字段（含 float 16-21/时间戳25-28/f16-f5 deviceToken/品牌回显）、字段21=312、flags=4480000000000000、counter=[305,4,694367,1621072674]、env 加 launch/pid/report；v5Proto 增加 float(wire5) 支持。结构验证：device 36 字段/message 20 字段全部对齐。v2.2.4 对齐 open-apex-drama 8小时前更新(SDK 8223867a)——服务端自 2026-11-23 起 video_model/v1 播放请求必须带 x-medusa（缺它回 200 空体，与 11-10 旧要求相反），SDK 因此把 SignPlaybackPOST 删掉的 medusa 加回。本源 shortplay fallback 此前只有 argus/ladon 无 medusa，V5 空响应回退到这里必拿空体；补上 genMedusa。注意：SDK 新版 medusa 字段21=369(真机布局,377 模拟器被拒)、version v04.10.03，本源 medusa 是旧版 v04.06.04 实现(字段21=call_type=312)，完整移植需大改，本次先补「有 medusa」这一确定性缺口。v2.2.3 修复 v1 spade 密钥错误导致 CENC 解密失败：对照 open-apex-drama 指定 SDK(openhongguo 193086fc) internal/drm/spade.go scramble()，v1（非 app_v2/web_v2）偶数位初始 cur 应为 0xfa=250，旧版误写 246，导致 v1 密钥所有偶数位字节错误；同时长度非法改为直接报错（对齐 SDK），不再静默截断派生错误密钥。单元验证：修正后 v1 输出与 SDK scramble 逐字节一致。v2.2.2 修复视频加载失败：对照 open-apex-drama + openhongguo SDK 修正两处 SERVER 侧解密偏差——① 播放地址解码对齐 SDK playbackURL()：明文直返 / 普通 base64 解码即 URL（旧版只解 0xa8 信封，普通 base64 地址抛错被吞导致"地址格式无效"）；② spade_a 内容密钥提取对齐 SDK spade.go：按 buf[0] 的 versionLen 动态切分 key=buf[1:len-versionLen]，旧版固定 subarray(1,33) 在非 32hex 版本上截错字节导致 CENC 解密失败。v2.2.1 修复榜单分类偶发"执行异常: 执行成功"：无 filters 与显式 rank_type=hot-drama 会落到同一 /rank/hot-drama，宿主极短时间内重复请求同一 URL 曾触发响应解析竞争；按 URL 加 5 分钟分类页短缓存（仅缓存非空列表），命中即返回，规避竞争并减少上游压力。v2.2.0 修复"加载不出视频"：按 openhongguo SDK 与 open-apex-drama 对齐——播放模型空体时自动更换匿名设备重试（服务端自 2026-10-29 每台设备只放行一次播放模型，旧版复用同一设备 6 小时导致第二集起 200 空体）；补齐 spade_a 的 app_v2/web_v2 解密分支；shortplay fallback device_level 3→1 避免 bytevc2；拉流 UA 改为官方 com.phoenix.newsclient/7.9.3。v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 2.2.5
+// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.2.6 精简：移除无调用的 v3 遗留死代码（coreSixgod/encryptGorgon/encryptHelios/genMedusaSafe），压缩头注释。v2.2.5 播放主路径 V5 签名对齐 hongguoTV 0.16.15（Medusa 36 字段完整设备信封/field21=312，carrier+sbox 经官方向量验证）。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
+// @version 2.2.6
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -3728,99 +3728,10 @@ function reverseBits(value) {
   return result;
 }
 
-function encryptGorgon(body, query, khronos, randomValue) {
-  const bodyMd5 = body ? Buffer.from(md5Hex(body), 'hex') : Buffer.alloc(0);
-  const data = Buffer.alloc(20);
-  createHash('md5').update(query).digest().copy(data, 0, 0, 4);
-  if (bodyMd5.length) bodyMd5.copy(data, 4, 0, 4);
-  data.writeUInt32LE(67503104, 8);
-  data.writeUInt32BE(khronos >>> 0, 16);
-  const key = Buffer.from([0x4a, 320 & 0xff, 0x16, (randomValue >> 8) & 0xff, 0x47, 0x6c, 1, randomValue & 0xff]);
-  const result = xgRc4(data, key);
-  for (let index = 0; index < result.length; index++) {
-    const value = ((result[index] >> 4) | (result[index] << 4)) & 0xff;
-    const next = result[(index + 1) % result.length];
-    result[index] = (~(reverseBits(next ^ value) ^ 20)) & 0xff;
-  }
-  const header = Buffer.alloc(4);
-  header.writeUInt16LE(randomValue, 0);
-  header.writeUInt16LE(320, 2);
-  return Buffer.concat([Buffer.from([0x84, 0x04]), header, result]).toString('hex');
-}
-
 function rotateRight64(value, count) {
   const bits = BigInt(count % 64);
   const mask = (1n << 64n) - 1n;
   return bits ? ((value >> bits) | ((value << (64n - bits)) & mask)) & mask : value & mask;
-}
-
-function encryptHelios(khronos, randomValue = 0) {
-  const value = randomValue || randomBytes(4).readUInt32LE(0);
-  const seed = Buffer.from([value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, (value >> 24) & 0xff]);
-  const digest = createHash('md5').update(Buffer.concat([seed, Buffer.from('8662')])).digest();
-  // Python 版本使用 digest 的 ASCII 十六进制文本（32 字节），不能把
-  // 16 个 Buffer 直接交给 Buffer.from(array)，后者只会保留每项的首字节。
-  const keyBytes = Buffer.from(digest.toString('hex'), 'ascii');
-  const words = Array.from({ length: 4 }, (_, index) => keyBytes.readBigUInt64LE(index * 8));
-  let first = words[0];
-  let second = words[1];
-  const expanded = words.slice(2);
-  const table = [words[0]];
-  for (let index = 0; index < 0x22; index++) {
-    let value2 = (rotateRight64(second, 8) + first) & ((1n << 64n) - 1n);
-    value2 = (value2 ^ BigInt(index)) & ((1n << 64n) - 1n);
-    expanded.push(value2);
-    value2 = (value2 ^ rotateRight64(first, 61)) & ((1n << 64n) - 1n);
-    table.push(value2);
-    first = value2;
-    second = expanded.shift();
-  }
-  const raw = Buffer.from(`${khronos}-1588093228-8662`);
-  const padding = 16 - (raw.length % 16);
-  const padded = Buffer.concat([raw, Buffer.alloc(padding, padding)]);
-  const output = Buffer.alloc(padded.length);
-  for (let offset = 0; offset < padded.length; offset += 16) {
-    let left = padded.readBigUInt64LE(offset);
-    let right = padded.readBigUInt64LE(offset + 8);
-    for (let index = 0; index < 0x22; index++) {
-      right = (table[index] ^ (left + rotateRight64(right, 8))) & ((1n << 64n) - 1n);
-      left = (right ^ rotateRight64(left, 61)) & ((1n << 64n) - 1n);
-    }
-    output.writeBigUInt64LE(left, offset);
-    output.writeBigUInt64LE(right, offset + 8);
-  }
-  return Buffer.concat([seed, output]).toString('base64');
-}
-
-async function genMedusaSafe(url, params, device, body, khronos, dataType) {
-  return genMedusa(url, params, device, body, khronos, dataType);
-}
-
-async function coreSixgod(url, params, device, body, headers) {
-  const values = { ...params };
-  for (const [key, value] of Object.entries(device || {})) {
-    if (Object.prototype.hasOwnProperty.call(values, key)) values[key] = value;
-    else if (key === 'device_id' && Object.prototype.hasOwnProperty.call(values, 'did')) values.did = value;
-  }
-  const khronos = Math.floor(Date.now() / 1000);
-  values.ts = khronos;
-  values._rticket = Date.now();
-  const query = Object.entries(values).map(([key, value]) => `${pythonQueryEncode(key)}=${pythonQueryEncode(value)}`).join('&');
-  const signedUrl = `${String(url).split('?')[0]}?${query}`;
-  const randomValue = randomBytes(2).readUInt16BE(0);
-  const resultHeaders = Object.fromEntries(Object.entries(headers || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
-  const bodyText = typeof body === 'string' ? body : JSON.stringify(body);
-  resultHeaders['x-ladon'] = Buffer.from([(khronos >>> 24) & 255, (khronos >>> 16) & 255, (khronos >>> 8) & 255, khronos & 255]).toString('base64');
-  resultHeaders['x-khronos'] = String(khronos);
-  resultHeaders['x-argus'] = Buffer.from([khronos & 255, (khronos >>> 8) & 255, (khronos >>> 16) & 255, (khronos >>> 24) & 255]).toString('base64');
-  resultHeaders['x-gorgon'] = encryptGorgon(bodyText, query, khronos, randomValue);
-  resultHeaders['x-helios'] = encryptHelios(khronos);
-  const medusa = await genMedusaSafe(signedUrl, values, device || {}, bodyText, khronos, resultHeaders['content-type']);
-  if (medusa) resultHeaders['x-medusa'] = medusa;
-  if (bodyText) resultHeaders['x-ss-stub'] = md5Hex(bodyText);
-  resultHeaders['x-tt-dt'] = String(device?.x_tt_dt || '');
-  if (device?.ua) resultHeaders['user-agent'] = String(device.ua);
-  return { url: signedUrl, headers: resultHeaders };
 }
 
 const MODEL_CACHE_TTL = 3 * 60 * 1000;
