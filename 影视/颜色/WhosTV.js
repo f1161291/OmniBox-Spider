@@ -1,8 +1,7 @@
 // @name 🔞WhosTV
 // @author OmniBox
 // @description 站点：whos.tv（AV 影片百科 + 在线播放，影片库 34 万部，详情路径 /videos/{番号}，分页 /videos/page-N）。HTML 路由受 Cloudflare 托管挑战保护，本源采用「直连优先 + Reader 通道兜底」抓页面，视频流则完全直连（HLS，无需 Cookie/Referer）。支持首页、分类（排序/标签/演员）、详情、搜索、播放。
-// @dependencies []
-// @version 2.1.0
+// @version 2.1.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/WhosTV.js
 
 /**

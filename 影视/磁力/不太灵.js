@@ -1,8 +1,7 @@
 // @name 不太灵
 // @author 梦
 // @description 资源网：ge_js_validator JS cookie 挑战解算 + 磁力/电驴/种子/网盘资源展示 + legacy 播放字段兼容
-// @dependencies
-// @version 1.3.0
+// @version 1.3.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/磁力/不太灵.js
 
 // 本地直接 require 调试时，SDK / runner 缺失不应导致脚本在入口阶段崩溃

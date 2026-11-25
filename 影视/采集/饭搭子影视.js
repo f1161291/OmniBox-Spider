@@ -1,9 +1,8 @@
 // @name 饭搭子影视
-// @version 1.0.5
+// @version 1.0.6
 // @author omnibox-spider
 // @description 饭搭子影视（fdzys.com）OmniBox Spider：官网 SSR 首页/分类/搜索/详情，播放页 player_aaaa 解直链，多线路自动探测 m3u8 + 首分片后自动选择最优线路；支持官方平台页面嗅探/parse=1 兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/饭搭子影视.js
-// @dependencies []
 
 // 【环境变量】站点是 HTML 前台而非 JSON 采集 API，因此站点地址使用 XXX_HOST 风格的 FDZYS_HOST，
 // 不复用 SITE_API（SITE_API 在仓库语义里是采集站 JSON 接口）。

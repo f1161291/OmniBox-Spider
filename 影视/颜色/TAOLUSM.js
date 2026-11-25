@@ -1,9 +1,8 @@
 // @name TAOLUSM
 // @author 宝宝巴士
 // @description taolusm.com（套路调教视频）：只用主域 + 内置域名池轮换，不再从发布页拉取新域名；修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默）；首页/分类/搜索/详情/播放；列表 module-poster-item 取封面；详情 const source 取 preview_mp4，免费或有权限时补 /v/{id}/manifest 完整 m3u8
-// @version 1.1.1
+// @version 1.1.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/TAOLUSM.js
-// @dependencies []
 /**
  * ============================================================================
  * TAOLUSM（taolusm.com）OmniBox 采集源

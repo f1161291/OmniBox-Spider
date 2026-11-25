@@ -1,9 +1,8 @@
 // @name 厂长资源
 // @author 宝宝巴士
 // @description 厂长资源（4kcz.com / czzy）：WordPress mibt 主题；分类/搜索/详情/播放；播放页 /v_play/{base64} 经 SDK 嗅探 + parse=1 兜底
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/4kcz.js
-// @dependencies []
 /**
  * ============================================================================
  * 厂长资源（4kcz.com）OmniBox 采集源

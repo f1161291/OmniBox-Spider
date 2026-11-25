@@ -1,9 +1,8 @@
 // @name 🎬非凡资源
-// @version 2.0.0
+// @version 2.0.1
 // @author omnibox-spider
 // @description 非凡资源（ffzyapi.com 采集站）OmniBox Spider：ac=videolist 全字段直取、叶子分类（父分类接口恒 0 条已剔除）、year/area/今日更新筛选、分享页 const url 解 m3u8、直链 parse=0 + 嗅探兜底、SDK 弹幕 + 播放记录、页面级缓存
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/非凡资源.js
-// @dependencies []
 
 // 【环境变量】
 //  SITE_API            采集站接口基址，默认 https://api.ffzyapi.com/api.php/provide/vod（沿用通用采集站变量）

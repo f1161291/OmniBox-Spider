@@ -1,9 +1,8 @@
 // @name 91PORNY
-// @version 1.1.0
+// @version 1.1.1
 // @author omnibox-spider
 // @description 91porny.com（九色/91PORNY）采集源：自拍 /video、蝌蚪 /videos、精选 /vod 三频道 + 14 个自拍分类 + 蝌蚪分类 + 搜索分页；详情页 video[data-src] 直取签名 m3u8/mp4（viewhd 自动规范化为 view 避开 VIP 预告片）；列表广告卡过滤、分页页码/总数解析、短 TTL 缓存、直链→sniff→parse=1 三段式播放兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91PORNY.js
-// @dependencies []
 
 /**
  * 实站事实（2026-11-14 实测，改代码前先读这段）

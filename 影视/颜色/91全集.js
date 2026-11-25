@@ -1,9 +1,8 @@
 // @name 91全集
-// @version 1.1.1
+// @version 1.1.2
 // @author omnibox-spider
 // @description 91quanji.com（木瓜视频/KVS Paysite）采集源：只用主域 + 内置域名池轮换，不再从发布页拉取新域名；修复封面（图床 pics.uoepp.com 有 Referer 防盗链，脚本内带 Referer 抓取并转 data:image 内联）+ 补 Node 直连兜底（宿主缺 OmniBox.request 时不再整体失败）；10 个真实分类 + 首页推荐 + 搜索分页；卡片解析封面/标题；详情页反混淆 eval(I(...)) 直取签名 m3u8；tag 分类 token 分页链（进程内+SDK 缓存）、搜索 p=N、三段式播放兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91全集.js
-// @dependencies []
 
 /**
  * 实站事实（2026-11-14 实测，改代码前先读这段）

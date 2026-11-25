@@ -1,9 +1,8 @@
 // @name Korean Porn Movie
 // @author 宝宝巴士
 // @description koreanpornmovie.com：WordPress 视频站；首页/分类/标签/搜索/分页；卡片 article 取标题/封面/时长；详情页 itemprop="contentUrl" 直取 mp4 直链（HTTP 200 + Range 206 实测可播）
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/KoreanPornMovie.js
-// @dependencies []
 /**
  * ============================================================================
  * Korean Porn Movie（koreanpornmovie.com）OmniBox 采集源

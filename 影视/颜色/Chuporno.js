@@ -1,9 +1,8 @@
 // @name Chuporno
 // @author 宝宝巴士
 // @description Chuporno（chuporno.com）：西语视频站；首页/分类/搜索/详情/播放；详情页 embedUrl -> embed 页 slh 直取 m3u8（含 720p）
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/Chuporno.js
-// @dependencies []
 /**
  * ============================================================================
  * Chuporno（chuporno.com）OmniBox 采集源

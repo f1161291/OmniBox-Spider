@@ -1,9 +1,8 @@
 // @name Chinese Angels
 // @author 宝宝巴士
 // @description Chinese Angels（chinese-angels.com）：WordPress 视频站；首页/分类/详情/播放；详情页 <video><source> 直取带签名 mp4 直链
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/ChineseAngels.js
-// @dependencies []
 /**
  * ============================================================================
  * Chinese Angels（chinese-angels.com）OmniBox 采集源

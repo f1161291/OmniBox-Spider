@@ -1,9 +1,8 @@
 // @name 每日大赛
 // @author 宝宝巴士
 // @description 每日大赛（mrds66.com）：WordPress Mirages 主题；分类/搜索/详情/播放；DPlayer data-config 直取 m3u8；图床图片 AES-128-CBC 加密，脚本内解密还原为 data:image；只用主域+内置域名池轮换，不再从发布页拉取域名
-// @version 1.0.2
+// @version 1.0.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/每日大赛.js
-// @dependencies crypto
 /**
  * ============================================================================
  * 每日大赛（mrds66.com）OmniBox 采集源

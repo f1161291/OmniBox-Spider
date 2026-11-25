@@ -1,9 +1,8 @@
 // @name 海角社区
 // @author 宝宝巴士
 // @description 海角社区（hjsqn.com）：修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默）；只用主域+内置域名池轮换，不再从发布页拉取域名；首页排行/往期列表/搜索/详情/播放；DPlayer data-config 取 /media/m3u8/ 代理直链；封面图床 AES-128-CBC 内联解密
-// @version 1.1.1
+// @version 1.1.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角社区.js
-// @dependencies crypto
 /**
  * ============================================================================
  * 海角社区（hjsqn.com）OmniBox 采集源

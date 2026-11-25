@@ -1,9 +1,8 @@
 // @name 海角网
 // @author 宝宝巴士
 // @description hjw01.com（海角网）：首页/分类/标签/分页/详情/播放；列表 xqbj-list-rows 取标题/封面；详情页 DPlayer data-config 直取带签名 m3u8；封面图床 pic.gyezbp.cn 为 AES-128-CBC 密文，脚本内解密转 data:image；域名池软隔离（本机 DNS 黑洞/连接重置不计失败，永不删空池）+ 裸域自动补 www.；只用主域+内置域名池，不再从发布页拉取
-// @version 1.1.5
+// @version 1.1.6
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/海角网.js
-// @dependencies crypto
 /**
  * ============================================================================
  * 海角网（www.hjw01.com）OmniBox 采集源

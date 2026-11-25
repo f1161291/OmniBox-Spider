@@ -1,9 +1,8 @@
 // @name 91Studio
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
 // @description 91.studio（Ionic/Angular SPA）采集源：POST /js 单端点 RPC + CryptoJS AES(xxx) 解密；/sevenVideos 列表 24 条/页、/searchSevenVideos 多条件搜索、/sevenVideos/<id> 详情取 m3u8s 直链；30 个真实分类、8 个 API 主机容灾、短 TTL 缓存、三段式播放兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91Studio.js
-// @dependencies []
 
 /**
  * 实站事实（2026-11-14 逆向前端 bundle 实测，改代码前先读这段）

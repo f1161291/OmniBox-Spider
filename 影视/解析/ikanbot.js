@@ -1,8 +1,7 @@
 // @name 爱看机器人
-// @version 1.0.4
+// @version 1.0.5
 // @description 爱看机器人 ikanbot.com 采集源（OmniBox Spider）：首页/分类/榜单/搜索 + /api/getResN 线路接口 + get_tks 令牌还原 + 电影/剧集分集 + 页面级缓存 + 多基址容灾
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/解析/ikanbot.js
-// @dependencies []
 //
 // 【环境变量】
 //  SITE_API        主站基址，默认 https://www1.ikanbot.com（复用通用采集站变量）
