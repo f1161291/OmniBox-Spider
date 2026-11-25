@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：v2.2.2 修复视频加载失败：对照 open-apex-drama + openhongguo SDK 修正两处 SERVER 侧解密偏差——① 播放地址解码对齐 SDK playbackURL()：明文直返 / 普通 base64 解码即 URL（旧版只解 0xa8 信封，普通 base64 地址抛错被吞导致"地址格式无效"）；② spade_a 内容密钥提取对齐 SDK spade.go：按 buf[0] 的 versionLen 动态切分 key=buf[1:len-versionLen]，旧版固定 subarray(1,33) 在非 32hex 版本上截错字节导致 CENC 解密失败。v2.2.1 修复榜单分类偶发"执行异常: 执行成功"：无 filters 与显式 rank_type=hot-drama 会落到同一 /rank/hot-drama，宿主极短时间内重复请求同一 URL 曾触发响应解析竞争；按 URL 加 5 分钟分类页短缓存（仅缓存非空列表），命中即返回，规避竞争并减少上游压力。v2.2.0 修复"加载不出视频"：按 openhongguo SDK 与 open-apex-drama 对齐——播放模型空体时自动更换匿名设备重试（服务端自 2026-10-29 每台设备只放行一次播放模型，旧版复用同一设备 6 小时导致第二集起 200 空体）；补齐 spade_a 的 app_v2/web_v2 解密分支；shortplay fallback device_level 3→1 避免 bytevc2；拉流 UA 改为官方 com.phoenix.newsclient/7.9.3。v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 2.2.2
+// @description 红果短剧（hongguoduanju.com）：v2.2.3 修复 v1 spade 密钥错误导致 CENC 解密失败：对照 open-apex-drama 指定 SDK(openhongguo 193086fc) internal/drm/spade.go scramble()，v1（非 app_v2/web_v2）偶数位初始 cur 应为 0xfa=250，旧版误写 246，导致 v1 密钥所有偶数位字节错误；同时长度非法改为直接报错（对齐 SDK），不再静默截断派生错误密钥。单元验证：修正后 v1 输出与 SDK scramble 逐字节一致。v2.2.2 修复视频加载失败：对照 open-apex-drama + openhongguo SDK 修正两处 SERVER 侧解密偏差——① 播放地址解码对齐 SDK playbackURL()：明文直返 / 普通 base64 解码即 URL（旧版只解 0xa8 信封，普通 base64 地址抛错被吞导致"地址格式无效"）；② spade_a 内容密钥提取对齐 SDK spade.go：按 buf[0] 的 versionLen 动态切分 key=buf[1:len-versionLen]，旧版固定 subarray(1,33) 在非 32hex 版本上截错字节导致 CENC 解密失败。v2.2.1 修复榜单分类偶发"执行异常: 执行成功"：无 filters 与显式 rank_type=hot-drama 会落到同一 /rank/hot-drama，宿主极短时间内重复请求同一 URL 曾触发响应解析竞争；按 URL 加 5 分钟分类页短缓存（仅缓存非空列表），命中即返回，规避竞争并减少上游压力。v2.2.0 修复"加载不出视频"：按 openhongguo SDK 与 open-apex-drama 对齐——播放模型空体时自动更换匿名设备重试（服务端自 2026-10-29 每台设备只放行一次播放模型，旧版复用同一设备 6 小时导致第二集起 200 空体）；补齐 spade_a 的 app_v2/web_v2 解密分支；shortplay fallback device_level 3→1 避免 bytevc2；拉流 UA 改为官方 com.phoenix.newsclient/7.9.3。v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
+// @version 2.2.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -3519,8 +3519,8 @@ function deriveContentKey(spade) {
   if (raw.length < 3) throw new Error('spade_a 太短');
   const v2 = spadeIsV2(raw);
   let length = raw.length - (raw[0] ^ raw[1] ^ raw[2]) + 47;
-  if (length <= 0 || 1 + length > raw.length) length = raw.length - 1;
-  if (length < 33) throw new Error('spade_a 长度异常');
+  // 对齐 SDK spade.go:44-46：长度非法直接报错，不再静默截断（截断会派生出错误密钥）。
+  if (length < 2 || 1 + length > raw.length) throw new Error('spade_a 长度异常');
   const value = Buffer.from(raw.subarray(1, 1 + length));
   // v2（app_v2/web_v2）：先相邻字节交换，再做带减法 rolling（openhongguo internal/drm/spade.go）。
   if (v2) {
@@ -3541,8 +3541,9 @@ function deriveContentKey(spade) {
       }
     }
   } else {
-    // v1（原逻辑，保持不变）：交替 rolling 加法。
-    let va = 85; let vb = 246;
+    // v1：交替 rolling。对齐 SDK spade.go:94 初始 cur=0xfa=250（旧版误写 246，
+    // 导致 v1（非 app_v2/web_v2）密钥的所有偶数位字节错误 → CENC 解密失败）。
+    let va = 85; let vb = 250;
     for (let index = 0; index < length; index++) {
       const previous = index & 1 ? va : vb;
       if (index & 1) va = value[index]; else vb = value[index];
