@@ -1,7 +1,7 @@
 // @name 热播之家
 // @author OmniBox
 // @description 热播之家（rebozj.cc）：仅采集站内网盘资源（百度/夸克/UC/阿里/迅雷/天翼/115/123）。MacCMS 前台解析：详情页网盘 tab -> 播放页 player_aaaa.url 取分享链接 -> SDK 展开文件列表 -> 真实直链播放。统一变量：SITE_API / DRIVE_ORDER / DRIVE_TYPE_CONFIG / SOURCE_NAMES_CONFIG / PANCHECK_* / DANMU_API。刮削+弹幕+播放记录。
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/热播之家.js
 
 /**
@@ -95,8 +95,35 @@ function cleanText(s) {
   return decodeEntities(String(s || "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
 }
 
-// ============ HTTP（内置模块，支持 gzip）============
+// ============ HTTP ============
+// 宿主沙箱可能禁用原生 http/https，优先用 SDK 的 OmniBox.request（返回 {statusCode, body}），
+// 本地无该能力时回退原生 http/https。两条链路都做 gzip 容错解压。
+function decodeBody(buf, encoding) {
+  let b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf || ""));
+  try {
+    const enc = String(encoding || "").toLowerCase();
+    if (enc === "gzip") b = zlib.gunzipSync(b);
+    else if (enc === "deflate") b = zlib.inflateSync(b);
+  } catch (_) {}
+  return b.toString("utf-8");
+}
+function sdkGet(urlStr, headers) {
+  return Promise.resolve().then(async () => {
+    if (typeof OmniBox.request !== "function") return null;
+    const res = await OmniBox.request(urlStr, { method: "GET", headers, timeout: TIMEOUT });
+    if (!res) return null;
+    // 兼容三种返回：{statusCode,body} / {status,body} / 直接字符串 body
+    if (typeof res === "string" || Buffer.isBuffer(res)) return { status: 200, body: decodeBody(res), headers: {} };
+    const status = Number(res.statusCode || res.status || 200);
+    const bodyRaw = "body" in res ? res.body : (res.data ?? res.text ?? "");
+    const body = decodeBody(bodyRaw, res.headers && (res.headers["content-encoding"] || res.headers["Content-Encoding"]));
+    return { status, body, headers: res.headers || {} };
+  });
+}
 function httpGet(urlStr, headers = {}, redirect = 0) {
+  return sdkGet(urlStr, headers).then((sdkRes) => { if (sdkRes) return sdkRes; return httpGetNative(urlStr, headers, redirect); });
+}
+function httpGetNative(urlStr, headers = {}, redirect = 0) {
   return new Promise((resolve, reject) => {
     if (redirect > 5) return reject(new Error("重定向过多"));
     let u;
