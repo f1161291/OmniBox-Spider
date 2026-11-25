@@ -1,6 +1,6 @@
 /**
  * @name 91porn
- * @version 1.5.1
+ * @version 1.5.2
  * @description 91porn.com 采集源（OmniBox Spider，多基址容灾：主站 + 91p618 镜像；列表封面/标题反混淆真值回填）
  * @downloadURL https://raw.githubusercontent.com/omnibox-spider/main/影视/采集/91porn.js
  */
@@ -32,11 +32,10 @@ const NINETYONE_PROXY_BASE = (() => {
 // 推荐栏形态：c=uyklk&viewtype=&category=，与首页真实链接一致。
 const NINETYONE_PLAY_MODE = String(process.env.NINETYONE_PLAY_MODE || 'auto').trim().toLowerCase();
 
-// 站点基址容灾：主站 + 91p618.com 最终镜像落点（903.9p234.com）。
-// 91p618.com 本身只是 meta-refresh 跳板，不可直接请求，因此填其最终落点。
+// 站点基址容灾：主站 + 镜像兜底（91p618.com）。
 // SITE_API 仍可单独覆盖主站；SITE_HOSTS 可用逗号自定义多个基址（会追加镜像为兜底）。
 const PRIMARY_API = (process.env.SITE_API || 'https://91porn.com').replace(/\/+$/, '');
-const MIRROR_API = 'https://903.9p234.com';
+const MIRROR_API = 'https://91p618.com';
 const HOSTS = (() => {
   const fromEnv = String(process.env.SITE_HOSTS || PRIMARY_API)
     .split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
