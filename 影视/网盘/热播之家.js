@@ -1,7 +1,7 @@
 // @name 热播之家
 // @author OmniBox
 // @description 热播之家（rebozj.cc）：仅采集站内网盘资源（百度/夸克/UC/阿里/迅雷/天翼/115/123）。MacCMS 前台解析：详情页网盘 tab -> 播放页 player_aaaa.url 取分享链接 -> SDK 展开文件列表 -> 真实直链播放。统一变量：SITE_API / DRIVE_ORDER / DRIVE_TYPE_CONFIG / SOURCE_NAMES_CONFIG / PANCHECK_* / DANMU_API。刮削+弹幕+播放记录。
-// @version 1.0.1
+// @version 1.0.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/热播之家.js
 
 /**
@@ -99,7 +99,14 @@ function cleanText(s) {
 // 宿主沙箱可能禁用原生 http/https，优先用 SDK 的 OmniBox.request（返回 {statusCode, body}），
 // 本地无该能力时回退原生 http/https。两条链路都做 gzip 容错解压。
 function decodeBody(buf, encoding) {
-  let b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf || ""));
+  // 宿主 SDK 的 body 常是 Uint8Array（Buffer.isBuffer 对它返回 false，直接 String() 会得到数字串）
+  let b;
+  // 跨 vm/realm 时 instanceof Uint8Array 会失效，用 ArrayBuffer.isView + .buffer 判断更可靠
+  if (Buffer.isBuffer(buf)) b = buf;
+  else if (ArrayBuffer.isView(buf) && buf.buffer) b = Buffer.from(buf.buffer, buf.byteOffset || 0, buf.byteLength);
+  else if (buf && buf.buffer instanceof ArrayBuffer && typeof buf.byteLength === "number") b = Buffer.from(buf.buffer, buf.byteOffset || 0, buf.byteLength);
+  else if (Array.isArray(buf)) b = Buffer.from(buf);
+  else b = Buffer.from(String(buf || ""));
   try {
     const enc = String(encoding || "").toLowerCase();
     if (enc === "gzip") b = zlib.gunzipSync(b);
@@ -115,8 +122,9 @@ function sdkGet(urlStr, headers) {
     // 兼容三种返回：{statusCode,body} / {status,body} / 直接字符串 body
     if (typeof res === "string" || Buffer.isBuffer(res)) return { status: 200, body: decodeBody(res), headers: {} };
     const status = Number(res.statusCode || res.status || 200);
-    const bodyRaw = "body" in res ? res.body : (res.data ?? res.text ?? "");
+    const bodyRaw = ("body" in res ? res.body : (res.data ?? res.text ?? res.content ?? ""));
     const body = decodeBody(bodyRaw, res.headers && (res.headers["content-encoding"] || res.headers["Content-Encoding"]));
+    log("info", `[http] ${urlStr.slice(0, 90)} status=${status} statusRaw=${res.statusCode ?? res.status ?? "none"} bodyType=${Object.prototype.toString.call(bodyRaw)} len=${body.length} preview=${body.slice(0, 80).replace(/\s+/g, " ")}`);
     return { status, body, headers: res.headers || {} };
   });
 }
