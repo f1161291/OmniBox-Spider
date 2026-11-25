@@ -1,8 +1,8 @@
 // @name 洛雪TV
 // @author OmniBox
-// @description 站点：tv.lxyy.club（洛雪TV）。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
+// @description 站点：tv.lxyy.club（洛雪TV）。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
 // @dependencies []
-// @version 2.0.3
+// @version 2.0.4
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/影视库/洛雪TV.js
 
 /**
@@ -549,6 +549,7 @@ function buildEpisodeMeta(detail, url) {
     p: String((detail && detail.player_api) || "").trim(),
     s: String((detail && detail.source) || ""),
     i: String((detail && detail.id) || ""),
+    t: normalizeText(detail && detail.name), // 剧名：嗅探失败时用于跨源搜索 m3u8 直链兜底
   };
   return `px|${Buffer.from(JSON.stringify(meta), "utf8").toString("base64")}`;
 }
@@ -1187,6 +1188,43 @@ function buildPlayerPageUrl(playerApi, playPageUrl) {
   return `${api}${encodeURIComponent(target)}`;
 }
 
+// 嗅探失败兜底：平台播放页（B站/芒果/爱奇艺…）交给 MPV 等外部播放器会报
+// "unrecognized file format"，因为那是 HTML 页不是媒体。改用站点 jl/mj 等源的
+// m3u8 直链：按剧名搜同名资源，优先取 t=json 且分集含 .m3u8 的线路。
+async function findDirectFallback(meta) {
+  const title = normalizeText(meta && meta.t);
+  if (!title) return null;
+  try {
+    const results = await proxySearch(title, 1);
+    // 优先 jl/mj 这类给直链的源；其次任意源里 detail 含 m3u8 的
+    const preferred = ["jl", "mj", "360zy", "ik"];
+    const candidates = (results || []).slice().sort((a, b) => {
+      const ai = preferred.indexOf(String(a.source || ""));
+      const bi = preferred.indexOf(String(b.source || ""));
+      return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+    }).slice(0, 4);
+    for (const c of candidates) {
+      try {
+        const d = await proxyDetail(c.id, c.source);
+        if (!d) continue;
+        const sources = buildProxySources(d);
+        for (const src of sources) {
+          for (const ep of src.episodes) {
+            const u = decodePlayId(ep.playId);
+            if (u && isDirectMedia(u.u)) {
+              logInfo(`play 跨源直链兜底命中 ${c.source}/${c.id} 线路=${src.name} 集=${ep.name}`);
+              return { url: u.u, header: { "User-Agent": UA, Referer: `${HOST}/` }, flag: src.name || c.source };
+            }
+          }
+        }
+      } catch (_) { /* 单源失败继续下一个 */ }
+    }
+  } catch (error) {
+    logInfo(`play 跨源直链兜底失败: ${error && error.message ? error.message : error}`);
+  }
+  return null;
+}
+
 async function play(params, context) {
   const rawId = String((params && (params.playId || params.id)) || "").trim();
   const from = (context && context.from) || "web";
@@ -1238,7 +1276,14 @@ async function play(params, context) {
           }
         }
       }
-      // 嗅探全部失败：回退 parse=1（ok影视 可继续嗅探），并把解析入口排在原始页前面
+      // 嗅探全部失败：MPV 等外部播放器无法打开 HTML 解析页，先用同名 jl/mj 源的
+      // m3u8 直链兜底（parse:0），彻底避免 "unrecognized file format"。
+      const direct = await findDirectFallback(meta);
+      if (direct) {
+        logInfo(`play 返回跨源直链 ${direct.url.slice(0, 80)}`);
+        return { urls: [{ name: direct.flag || "直链", url: direct.url }], flag: direct.flag || "洛雪TV", parse: 0, header: direct.header };
+      }
+      // 直链兜底也失败：回退 parse=1（ok影视 可继续嗅探），解析入口排在原始页前面
       return { urls, flag: meta.g || "洛雪TV", parse: 1, header };
     }
 
