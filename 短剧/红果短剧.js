@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：v2.2.4 对齐 open-apex-drama 8小时前更新(SDK 8223867a)——服务端自 2026-11-23 起 video_model/v1 播放请求必须带 x-medusa（缺它回 200 空体，与 11-10 旧要求相反），SDK 因此把 SignPlaybackPOST 删掉的 medusa 加回。本源 shortplay fallback 此前只有 argus/ladon 无 medusa，V5 空响应回退到这里必拿空体；补上 genMedusa。注意：SDK 新版 medusa 字段21=369(真机布局,377 模拟器被拒)、version v04.10.03，本源 medusa 是旧版 v04.06.04 实现(字段21=call_type=312)，完整移植需大改，本次先补「有 medusa」这一确定性缺口。v2.2.3 修复 v1 spade 密钥错误导致 CENC 解密失败：对照 open-apex-drama 指定 SDK(openhongguo 193086fc) internal/drm/spade.go scramble()，v1（非 app_v2/web_v2）偶数位初始 cur 应为 0xfa=250，旧版误写 246，导致 v1 密钥所有偶数位字节错误；同时长度非法改为直接报错（对齐 SDK），不再静默截断派生错误密钥。单元验证：修正后 v1 输出与 SDK scramble 逐字节一致。v2.2.2 修复视频加载失败：对照 open-apex-drama + openhongguo SDK 修正两处 SERVER 侧解密偏差——① 播放地址解码对齐 SDK playbackURL()：明文直返 / 普通 base64 解码即 URL（旧版只解 0xa8 信封，普通 base64 地址抛错被吞导致"地址格式无效"）；② spade_a 内容密钥提取对齐 SDK spade.go：按 buf[0] 的 versionLen 动态切分 key=buf[1:len-versionLen]，旧版固定 subarray(1,33) 在非 32hex 版本上截错字节导致 CENC 解密失败。v2.2.1 修复榜单分类偶发"执行异常: 执行成功"：无 filters 与显式 rank_type=hot-drama 会落到同一 /rank/hot-drama，宿主极短时间内重复请求同一 URL 曾触发响应解析竞争；按 URL 加 5 分钟分类页短缓存（仅缓存非空列表），命中即返回，规避竞争并减少上游压力。v2.2.0 修复"加载不出视频"：按 openhongguo SDK 与 open-apex-drama 对齐——播放模型空体时自动更换匿名设备重试（服务端自 2026-10-29 每台设备只放行一次播放模型，旧版复用同一设备 6 小时导致第二集起 200 空体）；补齐 spade_a 的 app_v2/web_v2 解密分支；shortplay fallback device_level 3→1 避免 bytevc2；拉流 UA 改为官方 com.phoenix.newsclient/7.9.3。v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
-// @version 2.2.4
+// @description 红果短剧（hongguoduanju.com）：v2.2.5 修复视频加载失败（真正根因）：对照 N3urda/hongguoTV 0.16.15 PR#122（2026-11-25 最新），服务端要求 Medusa v5 完整设备信封——旧版 v5Medusa 只发 14 个 env.device 字段、字段21=377、flags 全零、counter=[1,1,1,1]，服务端静默回 200 空体。补齐到 v04.10.03 的 36 字段（含 float 16-21/时间戳25-28/f16-f5 deviceToken/品牌回显）、字段21=312、flags=4480000000000000、counter=[305,4,694367,1621072674]、env 加 launch/pid/report；v5Proto 增加 float(wire5) 支持。结构验证：device 36 字段/message 20 字段全部对齐。v2.2.4 对齐 open-apex-drama 8小时前更新(SDK 8223867a)——服务端自 2026-11-23 起 video_model/v1 播放请求必须带 x-medusa（缺它回 200 空体，与 11-10 旧要求相反），SDK 因此把 SignPlaybackPOST 删掉的 medusa 加回。本源 shortplay fallback 此前只有 argus/ladon 无 medusa，V5 空响应回退到这里必拿空体；补上 genMedusa。注意：SDK 新版 medusa 字段21=369(真机布局,377 模拟器被拒)、version v04.10.03，本源 medusa 是旧版 v04.06.04 实现(字段21=call_type=312)，完整移植需大改，本次先补「有 medusa」这一确定性缺口。v2.2.3 修复 v1 spade 密钥错误导致 CENC 解密失败：对照 open-apex-drama 指定 SDK(openhongguo 193086fc) internal/drm/spade.go scramble()，v1（非 app_v2/web_v2）偶数位初始 cur 应为 0xfa=250，旧版误写 246，导致 v1 密钥所有偶数位字节错误；同时长度非法改为直接报错（对齐 SDK），不再静默截断派生错误密钥。单元验证：修正后 v1 输出与 SDK scramble 逐字节一致。v2.2.2 修复视频加载失败：对照 open-apex-drama + openhongguo SDK 修正两处 SERVER 侧解密偏差——① 播放地址解码对齐 SDK playbackURL()：明文直返 / 普通 base64 解码即 URL（旧版只解 0xa8 信封，普通 base64 地址抛错被吞导致"地址格式无效"）；② spade_a 内容密钥提取对齐 SDK spade.go：按 buf[0] 的 versionLen 动态切分 key=buf[1:len-versionLen]，旧版固定 subarray(1,33) 在非 32hex 版本上截错字节导致 CENC 解密失败。v2.2.1 修复榜单分类偶发"执行异常: 执行成功"：无 filters 与显式 rank_type=hot-drama 会落到同一 /rank/hot-drama，宿主极短时间内重复请求同一 URL 曾触发响应解析竞争；按 URL 加 5 分钟分类页短缓存（仅缓存非空列表），命中即返回，规避竞争并减少上游压力。v2.2.0 修复"加载不出视频"：按 openhongguo SDK 与 open-apex-drama 对齐——播放模型空体时自动更换匿名设备重试（服务端自 2026-10-29 每台设备只放行一次播放模型，旧版复用同一设备 6 小时导致第二集起 200 空体）；补齐 spade_a 的 app_v2/web_v2 解密分支；shortplay fallback device_level 3→1 避免 bytevc2；拉流 UA 改为官方 com.phoenix.newsclient/7.9.3。v2.1.0 按 openhongguo 真实抓包逐项对齐播放请求构造（设备参数 23127PN0CC/Xiaomi/Android14/1200*2670/460/channel=xiaomi_8662_64；query 固定顺序作为签名输入；header 去 sdk-version/passport-sdk-version、补 x-reading-request/lc/cookie 含 ttreq；body device_level=1 + disable_video_relate_book=false，gzip 后发送）；v2.0.0 修复设备注册失败（device_id=0）：匿名设备注册改用完整 T-table 纯 JS ttEncrypt（与 TT().encrypt 逐字节一致）+ 73932/7.3.9.32 注册参数与签名头；保留 video_tab fallback + v5 签名（X-Khronos/X-Helios/X-Medusa）+ 内置 CENC Range 解密流服务；官网 SSR 分类/搜索/详情 + App 私有播放模型 + 流服务，默认 0.0.0.0:10008。跨机播放可配 HG_PROXY_BASE。
+// @version 2.2.5
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -2118,6 +2118,12 @@ const V5_PROCESS = {
   nonce: crypto.randomBytes(18).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
   started: Date.now(),
 };
+// hongguoTV PR#122：f5/f16 设备令牌 = 24 字符 base64url nonce 前置 'A' 凑成 25 位。
+const V5_DEVICE_TOKEN = (() => {
+  const n = V5_PROCESS.nonce + 'AAAAAAAAAAAAAAAAAAAAAAAA';
+  const core = n.slice(0, 24);
+  return core.length === 25 && core.startsWith('A') ? core : `A${core}`;
+})();
 
 const v5U32 = (x) => x >>> 0;
 const v5Rol = (x, n) => v5U32((x << (n & 31)) | (x >>> (32 - (n & 31))));
@@ -2303,8 +2309,13 @@ function v5Proto(fields) {
     a.push(Number(n));
     return Buffer.from(a);
   };
-  for (const [tag, value] of fields) {
-    if (typeof value === 'number') {
+  for (const field of fields) {
+    const [tag, value, type] = field;
+    if (type === 'float') {
+      // wire type 5：固定 4 字节小端 float（对齐 hongguoTV f(tag,val,"float")）
+      const b = Buffer.alloc(4); b.writeFloatLE(Number(value) || 0, 0);
+      parts.push(varint((BigInt(tag) << 3n) | 5n), b);
+    } else if (typeof value === 'number') {
       parts.push(varint(BigInt(tag) << 3n), varint(BigInt(value < 0 ? -value * 2 - 1 : value * 2)));
     } else {
       const bytes = typeof value === 'string' ? Buffer.from(value, 'utf8') : value;
@@ -2381,22 +2392,35 @@ function v5Helios(ts) {
 
 /** v5 medusa */
 function v5Medusa(queryHash, f13, ts, who) {
-  const flags = Buffer.alloc(8);
+  // 【2026-11-25 对齐 N3urda/hongguoTV PR#122 (0.16.15)】
+  // 旧版只发 14 个 env.device 字段、字段21=377、flags 全零、counter=[1,1,1,1]，
+  // 服务端静默返回 200 空体。实测补齐到 v04.10.03 的 36 字段设备信封 + 字段21=312
+  // + flags=4480000000000000 + counter=[305,4,694367,1621072674] 后恢复播放模型。
+  const flags = Buffer.from('4480000000000000', 'hex');
+  const brand = who.device_brand || 'HONOR';
+  const type = who.device_type;
+  const envLaunch = 100 + Math.floor(Math.random() * 21);
+  const envPid = 10001 + Math.floor(Math.random() * 2000);
   const deviceInfo = v5Proto([
-    [1, 1], [2, 2], [3, '8662'], [4, who.device_id], [5, V5_PROCESS.nonce],
-    [6, '!noperm!'], [12, 'Asia/Shanghai,8'], [13, 'zh_CN'], [22, who.os_version],
-    [25, V5_PROCESS.started], [30, who.device_type], [31, who.device_brand],
-    [32, who.device_type], [34, who.device_brand],
+    [1, 1], [2, 2], [3, '8662'], [4, who.device_id], [5, V5_DEVICE_TOKEN], [6, '!noperm!'],
+    [7, -888888], [8, -888888], [9, 3], [10, -888888],
+    [11, '!notset!'], [12, 'Asia/Shanghai,8'], [13, 'zh_CN'], [14, 4],
+    [16, 0, 'float'], [17, 0, 'float'], [18, 0, 'float'], [19, 0, 'float'], [20, 0, 'float'], [21, 0, 'float'],
+    [22, who.os_version], [23, 41], [24, 36],
+    [25, V5_PROCESS.started], [26, V5_PROCESS.started], [27, V5_PROCESS.started], [28, Date.now()],
+    [29, -1], [30, type], [31, brand], [32, type], [33, type], [34, brand], [35, brand], [36, brand], [38, 31],
   ]);
   const env = v5Proto([
-    [6, 'v04.10.03.04-bugfix'], [8, who.channel], [12, deviceInfo], [14, who.version_name],
+    [1, envLaunch], [2, 247235599], [3, 247235596], [5, 7], [6, 'v04.10.03.04-bugfix'],
+    [7, envPid], [8, who.channel], [12, deviceInfo],
+    [13, v5Proto([[1, ts], [2, -2], [4, 200]])], [14, who.version_name],
   ]);
   const message = v5Proto([
     [1, V5_MAGIC], [2, 5], [3, crypto.randomBytes(4).readUInt32LE(0)], [4, '8662'],
     [5, who.device_id], [6, V5_LICENSE], [7, who.version_name], [8, 'v04.10.03-ml-android'],
     [9, 0x040a0300], [10, flags], [12, ts], [13, f13], [14, queryHash.subarray(0, 6)],
-    [15, v5Proto([[1, 1], [2, 1], [3, 1], [5, 1]])], [17, ts], [20, 'none'],
-    [21, 377], [23, env],
+    [15, v5Proto([[1, 305], [2, 4], [3, 694367], [5, 1621072674]])], [16, V5_DEVICE_TOKEN],
+    [17, ts], [20, 'none'], [21, 312], [23, env],
     [24, '{"cmr":16777216,"cmr2":16777216,"un_h":11,"vpn":0,"kd":0,"dyn":"","do":1,"tk":true}'],
   ]);
   const nonce = crypto.randomBytes(4).readUInt32LE(0);
