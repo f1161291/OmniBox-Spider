@@ -1,6 +1,6 @@
 /**
  * @name 网飞猫
- * @version 1.1.6
+ * @version 1.1.7
  * @author omnibox-spider
  * @description 网飞猫（ncat22.com / ncat1.app）OmniBox Spider：cdndefend 850 JS 挑战动态解算 + 封面改用 RDUL 资源域名（主站 /vod1 图片 403）+ 前台 /channel /show /detail /play /search 全链路 + 实时搜索 t token + live 筛选 href + playSource 直链解析 + 三段式播放兜底 + 页面级缓存
 
@@ -965,6 +965,24 @@ function buildHeaders(target) {
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
   };
 }
+// 播放源常先用 302 把 IP:端口踢到备用节点（如 21302 -> 11302），
+// 部分播放器不跟随 302 或跟随时丢 header 导致加载失败。这里主动跟随一次，
+// 把最终可用的 URL 返回给宿主，避免依赖播放器的重定向处理。
+async function resolveFinalMediaUrl(url) {
+  if (!/^https?:\/\//i.test(String(url || ''))) return url;
+  try {
+    const r = await httpRequestRaw(url, {
+      method: 'GET',
+      headers: { Range: 'bytes=0-0', Accept: '*/*' },
+      timeout: 8000,
+    });
+    if (r && r.finalUrl && /^https?:\/\//i.test(r.finalUrl)) {
+      if (r.finalUrl !== url) logI(`[play] 媒体 302 跟随: ${String(url).slice(0, 80)} -> ${String(r.finalUrl).slice(0, 80)}`);
+      return r.finalUrl;
+    }
+  } catch (_) {}
+  return url;
+}
 async function sniffVideo(url, header) {
   if (typeof OmniBox.sniffVideo !== 'function') return '';
   try {
@@ -1135,8 +1153,9 @@ async function play(params, context) {
     const header = buildHeaders(SITE_API);
     // 1) 已经是明确媒体直链
     if (isDirectMedia(raw) && !/\/play\//i.test(raw)) {
-      logI(`[play] 直链直通: ${raw.slice(0, 160)}`);
-      return { urls: [{ name: meta?.e || '播放', url: raw }], flag, header, parse: 0 };
+      const finalRaw = await resolveFinalMediaUrl(raw);
+      logI(`[play] 直链直通: ${finalRaw.slice(0, 160)}`);
+      return { urls: [{ name: meta?.e || '播放', url: finalRaw }], flag, header, parse: 0 };
     }
     // 2) 播放页 / 短 playId -> 拼详情页 URL 并解析 playSource
     let pageUrl = '';
@@ -1152,8 +1171,10 @@ async function play(params, context) {
 
     // 3) 明确媒体直链 -> parse=0
     if (resolved.media && PLAY_MODE !== 'sniff' && PLAY_MODE !== 'parse') {
-      logI(`[play] playSource 直链返回 parse=0: ${resolved.media.slice(0, 160)}`);
-      return { urls: [{ name: meta?.e || '播放', url: resolved.media }], flag, header: finalHeader, parse: 0 };
+      const finalMedia = await resolveFinalMediaUrl(resolved.media);
+      const finalHeader2 = buildHeaders(finalMedia);
+      logI(`[play] playSource 直链返回 parse=0: ${finalMedia.slice(0, 160)}`);
+      return { urls: [{ name: meta?.e || '播放', url: finalMedia }], flag, header: finalHeader2, parse: 0 };
     }
     // 4) 网页型 -> SDK 嗅探
     if (PLAY_MODE !== 'parse' && isWebPage(target)) {
