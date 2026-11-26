@@ -4,7 +4,7 @@
 // @name 红果短剧
 // @author OmniBox
 // @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.2.6 精简：移除无调用的 v3 遗留死代码（coreSixgod/encryptGorgon/encryptHelios/genMedusaSafe），压缩头注释。v2.2.5 播放主路径 V5 签名对齐 hongguoTV 0.16.15（Medusa 36 字段完整设备信封/field21=312，carrier+sbox 经官方向量验证）。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
-// @version 2.2.8
+// @version 2.2.9
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
 // 签名算法移植自 zfdang/hongguo-open-player (PR #92, AGPL/GPL-3.0)，用于修复 2026-11-10 起 App 播放接口 200 空体。
@@ -2808,9 +2808,31 @@ function genMedusa(url,params,devices,data,khronos,dataType='application/json; c
 }
 
 const KEY = 'hongguo';
-// 主域 hongguoduanju.com 的 DNS 只返回 IPv6（240e:...），无 IPv6 出口的环境会直接连不上；
-// www.hongguoduanju.com 有 IPv4（183.36.42.107）且会 301 回主域，跟随后可正常取到 _ROUTER_DATA。
-const SITE = 'https://www.hongguoduanju.com';
+// 站点域名池：这些域名的 DNS 会在 IPv4/IPv6 间轮换（有时某域只解析出 IPv6，
+// 无 IPv6 出口的环境即连不上），且相互 301 跳转。故按池顺序探测，命中即记忆优先。
+// 可用环境变量 DUANJU_SITE / DUANJU_SITES 覆盖。
+const SITE_POOL = (() => {
+  const env = String(process.env.DUANJU_SITES || process.env.DUANJU_SITE || '')
+    .split(/[,;]/).map((x) => x.trim().replace(/\/+$/, '')).filter(Boolean)
+    .map((x) => (/^https?:\/\//i.test(x) ? x : 'https://' + x));
+  const builtin = [
+    'https://hongguoduanju.com',
+    'https://www.hongguoduanju.com',
+    'https://novelquickapp.com',
+    'https://www.novelquickapp.com',
+  ];
+  return Array.from(new Set(env.length ? env : builtin));
+})();
+let SITE_INDEX = 0;
+// SITE 用 getter 暴露当前生效基址，保持原有 `${siteBase()}/...` 用法不变。
+const SITE = (() => {
+  const proxy = {};
+  Object.defineProperty(proxy, 'toString', { value: () => SITE_POOL[SITE_INDEX] || SITE_POOL[0] });
+  Object.defineProperty(proxy, 'valueOf', { value: () => SITE_POOL[SITE_INDEX] || SITE_POOL[0] });
+  Object.defineProperty(proxy, Symbol.toPrimitive, { value: () => SITE_POOL[SITE_INDEX] || SITE_POOL[0] });
+  return proxy;
+})();
+function siteBase() { return SITE_POOL[SITE_INDEX] || SITE_POOL[0]; }
 const VIDEO_URL = 'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/';
 const EPISODE_PREFIX = 'hg-episode-v1:';
 const SERIES_EPISODE_PREFIX = 'hg-series-episode-v1:';
@@ -2924,9 +2946,32 @@ function responsePayload(response) {
   return response;
 }
 
+// 把 URL 里的域名换到指定池索引（用于域名容灾重试）
+function withSiteIndex(url, idx) {
+  const target = SITE_POOL[idx];
+  if (!target) return url;
+  try {
+    const base = new URL(target);
+    const u = new URL(url);
+    u.protocol = base.protocol;
+    u.host = base.host;
+    return u.toString();
+  } catch (_) { return url; }
+}
 async function getPageRaw(url, attempts = PAGE_ATTEMPTS) {
   let lastError;
-  for (let attempt = 0; attempt < Math.max(1, attempts); attempt++) {
+  // 域名容灾：当前域名失败时依次换池内其它域名（每次尝试前切换，最多覆盖整池一轮）
+  const poolTries = Math.max(1, SITE_POOL.length);
+  let total = Math.max(1, attempts) * poolTries;
+  for (let attempt = 0; attempt < total; attempt++) {
+    if (attempt > 0 && attempt % Math.max(1, attempts) === 0) {
+      const prev = SITE_INDEX;
+      SITE_INDEX = (SITE_INDEX + 1) % poolTries;
+      if (SITE_INDEX !== prev) {
+        url = withSiteIndex(url, SITE_INDEX);
+        await log('info', `[hg][site] 切换到域名 ${siteBase()}`);
+      }
+    }
     try {
       const response = await httpRequest(url, {
         method: 'GET',
@@ -2946,7 +2991,7 @@ async function getPageRaw(url, attempts = PAGE_ATTEMPTS) {
       return html;
     } catch (error) {
       lastError = error;
-      if (attempt + 1 < attempts) await sleep(600 * (attempt + 1));
+      if (attempt + 1 < total) await sleep(400);
     }
   }
   throw new Error(`红果页面请求失败: ${lastError?.message || lastError || url}`);
@@ -2982,7 +3027,7 @@ async function searchLoader(keyword) {
   let last = {};
   for (let attempt = 0; attempt < PAGE_ATTEMPTS; attempt++) {
     try {
-      const raw = await getPageRaw(`${SITE}/search/${encodeURIComponent(keyword)}`);
+      const raw = await getPageRaw(`${siteBase()}/search/${encodeURIComponent(keyword)}`);
       const html = typeof raw === 'string' ? raw : JSON.stringify(raw);
       let data = raw && typeof raw === 'object' && !Buffer.isBuffer(raw) ? pageObject(raw) : {};
       if (!Object.keys(data).length) {
@@ -3261,7 +3306,7 @@ function routeOf(id, page, extend = {}) {
     const routeRank = raw.startsWith('rank/') ? raw.slice(5) : '';
     const rank = routeRank || text(extend.rank_type, 'hot-drama');
     const allowed = ['hot-drama', 'hot-comic-drama', 'hot-ai-drama'];
-    return `${SITE}/rank/${encodeURIComponent(allowed.includes(rank) ? rank : 'hot-drama')}`;
+    return `${siteBase()}/rank/${encodeURIComponent(allowed.includes(rank) ? rank : 'hot-drama')}`;
   }
   let category = raw.startsWith('category/') ? raw.slice(9).split('/')[0] : raw.split('/')[0];
   category = aliases[category] || category;
@@ -3269,7 +3314,7 @@ function routeOf(id, page, extend = {}) {
   let genre = text(extend.genre);
   const parts = raw.split('/');
   if (!genre && parts.length > 1) genre = text(parts[parts.length - 1]);
-  const path = `${SITE}/category/${encodeURIComponent(category)}${genre ? `/${encodeURIComponent(genre)}` : ''}`;
+  const path = `${siteBase()}/category/${encodeURIComponent(category)}${genre ? `/${encodeURIComponent(genre)}` : ''}`;
   return `${path}?page=${page}`;
 }
 
@@ -3411,7 +3456,7 @@ async function resolveSeriesEpisode(seriesId, episode) {
     const cachedId = text(videos[episode - 1]?.vid || videos[episode - 1]?.video_id || videos[episode - 1]?.id || videos[episode - 1]);
     if (/^\d+$/.test(cachedId)) return cachedId;
   }
-  const data = await pageData(`${SITE}/detail?series_id=${encodeURIComponent(seriesId)}`);
+  const data = await pageData(`${siteBase()}/detail?series_id=${encodeURIComponent(seriesId)}`);
   series = seriesFromDetailPage(detailPageFrom(data));
   videos = safeArray(series.vid_list || series.episodeVids || series.episode_vids);
   cacheSeriesDetail(seriesId, series);
@@ -3466,7 +3511,7 @@ async function detail(params, context) {
   const list = [];
   for (const id of ids) {
     try {
-      const data = await pageData(`${SITE}/detail?series_id=${encodeURIComponent(id)}`);
+      const data = await pageData(`${siteBase()}/detail?series_id=${encodeURIComponent(id)}`);
       const fetched = seriesFromDetailPage(detailPageFrom(data));
       if (!fetched || typeof fetched !== 'object') throw new Error('红果剧集详情为空');
       cacheSeriesDetail(id, fetched);
@@ -4533,12 +4578,12 @@ async function play(params, context) {
 async function searchLoaderApi(keyword, page) {
   const query = text(keyword);
   if (!query) return { searchList: [], totalCount: 0, totalPages: 1 };
-  const headers = { 'User-Agent': UA, Accept: 'application/json, text/plain, */*', Referer: `${SITE}/` };
+  const headers = { 'User-Agent': UA, Accept: 'application/json, text/plain, */*', Referer: `${siteBase()}/` };
   // 官网同款前置请求：先取 ttwid（首访）与 suggestion keyword
-  try { await httpRequest(SITE + '/', { headers, timeout: 10000 }); } catch (_) { /* 忽略 */ }
+  try { await httpRequest(siteBase() + '/', { headers, timeout: 10000 }); } catch (_) { /* 忽略 */ }
   let sug = '';
   try {
-    const r = await httpRequest(`${SITE}/api/search/suggestion/?aid=8662&query=${encodeURIComponent(query)}`, { headers, timeout: 10000 });
+    const r = await httpRequest(`${siteBase()}/api/search/suggestion/?aid=8662&query=${encodeURIComponent(query)}`, { headers, timeout: 10000 });
     if (Number(r.status) === 200) {
       const rows = (objectOf(r.data).suggestionList) || [];
       if (rows.length && rows[0] && rows[0].keyword) sug = text(rows[0].keyword);
@@ -4548,7 +4593,7 @@ async function searchLoaderApi(keyword, page) {
   if (sug) qs.set('keyword', sug);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const r = await httpRequest(`${SITE}/api/search/result?${qs.toString()}`, { headers, timeout: 20000 });
+      const r = await httpRequest(`${siteBase()}/api/search/result?${qs.toString()}`, { headers, timeout: 20000 });
       if (Number(r.status) === 200) {
         const data = objectOf(r.data);
         const rows = Array.isArray(data.searchList) ? data.searchList : [];
