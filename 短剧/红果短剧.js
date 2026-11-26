@@ -4,7 +4,7 @@
 // @name 红果短剧
 // @author OmniBox
 // @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.2.6 精简：移除无调用的 v3 遗留死代码（coreSixgod/encryptGorgon/encryptHelios/genMedusaSafe），压缩头注释。v2.2.5 播放主路径 V5 签名对齐 hongguoTV 0.16.15（Medusa 36 字段完整设备信封/field21=312，carrier+sbox 经官方向量验证）。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
-// @version 2.2.10
+// @version 2.2.11
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
 // 签名算法移植自 zfdang/hongguo-open-player (PR #92, AGPL/GPL-3.0)，用于修复 2026-11-10 起 App 播放接口 200 空体。
@@ -3016,6 +3016,75 @@ function routerData(html) {
   return parsed;
 }
 
+/**
+ * 【Web 播放路径】绕过 App 播放模型接口，直接从官网页取明文 MP4。
+ * 依据 zfdang/hongguo-open-player（src/server/native/hongguo.js fetchPlayUrlFromWeb）：
+ *   GET {SITE}/player/{sid}/{vid}  ->  _ROUTER_DATA['player_(series_id)/(vid)/page']
+ *   -> 页面 JSON-LD 的 VideoObject.contentUrl 是与当前分集绑定的【明文 MP4，无 CENC 加密】，
+ *      因此不需要 spade_a 解密，也不受"匿名设备不再下发播放模型"影响。
+ * 校验要点（照抄参考实现，避免拿到推荐位/预览的错源）：
+ *   data.vid === vid、series_id 一致、publicVideoSeo.available === true 且 itemId/seriesId 匹配、
+ *   protectedPlayback !== true（受保护页只给 SEO 预览）。
+ */
+function extractWebPlayUrl(html, vid, sid) {
+  let data;
+  try {
+    const router = routerData(html);
+    const ld = router.loaderData || {};
+    data = ld['player_(series_id)/(vid)/page'] || ld['player_(series_id)/page'] || ld.detail_page;
+  } catch (_) { return null; }
+  if (!data || data.isSuccess === false) return null;
+  const actualSid = text(data.series_id || data.seriesDetail?.series_id);
+  const seo = data.publicVideoSeo || {};
+  if (String(data.vid) !== String(vid)) return null;
+  if (sid && actualSid && String(actualSid) !== String(sid)) return null;
+  if (data.protectedPlayback === true) return null;
+  if (seo.available !== true) return null;
+  if (seo.itemId != null && String(seo.itemId) !== String(vid)) return null;
+  if (seo.seriesId != null && actualSid && String(seo.seriesId) !== String(actualSid)) return null;
+  const scripts = String(html).matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi);
+  for (const sc of scripts) {
+    if (!/\btype\s*=\s*["']application\/ld\+json["']/i.test(sc[1])) continue;
+    let obj;
+    try { obj = JSON.parse(sc[2]); } catch (_) { continue; }
+    const list = Array.isArray(obj) ? obj : [obj];
+    for (const v of list) {
+      if (!v || v['@type'] !== 'VideoObject') continue;
+      const cu = text(v.contentUrl);
+      if (!cu || !/^https?:\/\//i.test(cu)) continue;
+      // 只认媒体文件，排除页面/广告
+      if (!/\.(mp4|m3u8)(\?|$)/i.test(cu)) continue;
+      return { url: cu, sid: actualSid || sid || '', vid: String(vid) };
+    }
+  }
+  return null;
+}
+
+/** 按 sid+vid 请求官网页拿明文 MP4；失败返回 null（调用方再回退 App 模型路径）。 */
+async function fetchWebPlayUrl(vid, sid) {
+  const pool = SITE_POOL.slice();
+  const bases = [];
+  const cur = siteBase();
+  if (cur) bases.push(cur);
+  for (const b of pool) if (!bases.includes(b)) bases.push(b);
+  for (const base of bases) {
+    const paths = [];
+    if (sid) paths.push(`${base}/player/${encodeURIComponent(sid)}/${encodeURIComponent(vid)}`);
+    paths.push(`${base}/player/_/${encodeURIComponent(vid)}`);
+    for (const url of paths) {
+      try {
+        const html = await getPageRaw(url, 1);
+        const hit = extractWebPlayUrl(html, vid, sid);
+        if (hit && hit.url) {
+          await log('info', `[hg][web] 拿到明文 MP4 vid=${vid} sid=${hit.sid} url=${hit.url.slice(0, 110)}`);
+          return hit;
+        }
+      } catch (_) { /* 换下一个候选 */ }
+    }
+  }
+  return null;
+}
+
 async function pageData(url) {
   const raw = await getPageRaw(url);
   const direct = pageObject(raw);
@@ -3251,6 +3320,17 @@ function cacheSeriesDetail(id, raw) {
   seriesDetailCache.delete(id);
   seriesDetailCache.set(id, { series, expiresAt: Date.now() + SERIES_DETAIL_CACHE_TTL });
   while (seriesDetailCache.size > SERIES_DETAIL_CACHE_LIMIT) seriesDetailCache.delete(seriesDetailCache.keys().next().value);
+}
+
+/** 从已缓存的剧集详情里反查某个 vid 所属的 series_id（Web 播放路径需要 sid）。 */
+function seriesIdOfVideo(vid) {
+  const target = text(vid);
+  if (!target) return '';
+  for (const [sid, entry] of seriesDetailCache) {
+    const list = entry?.series?.vid_list || [];
+    if (list.includes(target)) return sid;
+  }
+  return '';
 }
 
 function cachedSeriesDetail(id) {
@@ -4556,6 +4636,34 @@ async function play(params, context) {
     if (token.kind === 'series-episode' && (!/^\d+$/.test(token.seriesId) || token.episode < 1)) throw new Error('无效的红果剧集参数');
     const tokenQuality = QUALITY_ORDER.includes(token.quality) ? token.quality : '1080';
     const requestedQuality = tokenQuality === '1080' && text(body.flag) ? qualityFromFlag(body.flag, tokenQuality) : tokenQuality;
+    // 【优先 Web 路径】官网页 /player/{sid}/{vid} 的 JSON-LD contentUrl 是明文 MP4（无 CENC），
+    // 不依赖 App 播放模型接口，可绕开「匿名设备不再下发模型」的限制。
+    try {
+      let webSid = '';
+      let webVid = '';
+      if (token.kind === 'series-episode') {
+        webSid = token.seriesId;
+        webVid = await resolveSeriesEpisode(token.seriesId, token.episode).catch(() => '');
+      } else {
+        webVid = token.videoId;
+        // 纯数字 vid 时，尝试从已缓存的剧集详情反查所属 sid
+        webSid = seriesIdOfVideo(webVid) || '';
+      }
+      if (webVid) {
+        const hit = await fetchWebPlayUrl(webVid, webSid);
+        if (hit && hit.url) {
+          return {
+            urls: [{ name: flag, url: hit.url }],
+            flag,
+            header: { 'User-Agent': MEDIA_UA, Referer: `${siteBase()}/` },
+            parse: 0,
+          };
+        }
+        await log('info', `[hg][web] 未取到明文 MP4（vid=${webVid} sid=${webSid || '-'}），回退 App 模型路径`);
+      }
+    } catch (e) {
+      await log('warn', `[hg][web] 异常: ${e.message?.slice(0, 80)}，回退 App 模型路径`);
+    }
     const mediaParams = token.kind === 'series-episode'
       ? { sid: token.seriesId, ep: String(token.episode), q: requestedQuality, hg: 'cenc' }
       : { vid: token.videoId, q: requestedQuality, hg: 'cenc' };
