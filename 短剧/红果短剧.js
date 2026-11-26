@@ -4,7 +4,7 @@
 // @name 红果短剧
 // @author OmniBox
 // @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.2.6 精简：移除无调用的 v3 遗留死代码（coreSixgod/encryptGorgon/encryptHelios/genMedusaSafe），压缩头注释。v2.2.5 播放主路径 V5 签名对齐 hongguoTV 0.16.15（Medusa 36 字段完整设备信封/field21=312，carrier+sbox 经官方向量验证）。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
-// @version 2.2.7
+// @version 2.2.8
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
 // 签名算法移植自 zfdang/hongguo-open-player (PR #92, AGPL/GPL-3.0)，用于修复 2026-11-10 起 App 播放接口 200 空体。
@@ -2808,7 +2808,9 @@ function genMedusa(url,params,devices,data,khronos,dataType='application/json; c
 }
 
 const KEY = 'hongguo';
-const SITE = 'https://hongguoduanju.com';
+// 主域 hongguoduanju.com 的 DNS 只返回 IPv6（240e:...），无 IPv6 出口的环境会直接连不上；
+// www.hongguoduanju.com 有 IPv4（183.36.42.107）且会 301 回主域，跟随后可正常取到 _ROUTER_DATA。
+const SITE = 'https://www.hongguoduanju.com';
 const VIDEO_URL = 'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/';
 const EPISODE_PREFIX = 'hg-episode-v1:';
 const SERIES_EPISODE_PREFIX = 'hg-series-episode-v1:';
@@ -4494,7 +4496,9 @@ async function play(params, context) {
       return { urls: [{ name: flag, url: rawId }], flag, header: { 'User-Agent': MEDIA_UA }, parse: 0 };
     }
     const token = parseEpisodeToken(rawId);
-    if (token.kind === 'video' && !/^\d+$/.test(token.videoId)) throw new Error('无效的红果播放参数');
+    // 详情页 vid_list 现返回 v1_xxx 形式的加密视频 ID（不再是纯数字）；
+    // 实测服务端接受该形式（code:0），故放宽校验：纯数字或 v1_ 前缀均可。
+    if (token.kind === 'video' && !/^(\d+|v1_[A-Za-z0-9_-]+)$/.test(token.videoId)) throw new Error('无效的红果播放参数');
     if (token.kind === 'series-episode' && (!/^\d+$/.test(token.seriesId) || token.episode < 1)) throw new Error('无效的红果剧集参数');
     const tokenQuality = QUALITY_ORDER.includes(token.quality) ? token.quality : '1080';
     const requestedQuality = tokenQuality === '1080' && text(body.flag) ? qualityFromFlag(body.flag, tokenQuality) : tokenQuality;
