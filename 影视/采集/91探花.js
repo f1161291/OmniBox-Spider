@@ -1,9 +1,10 @@
 // @name 91探花
 // @author OmniBox
 // @description 91探花（911tanhua.com）：JSON-LD 结构化数据取列表（分类/最新/热门/搜索），详情页 data-video_id + POST /videos/{id}/playback 取 m3u8 直链（parse=0）。多分类、分页、异步播放解析。
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/91探花.js
 // @dependencies axios
+// TANHUA_COVER_INLINE 封面内联开关，默认 1（抓图转 data URI 兼容 OK影视；设 0 关闭回退原 URL）
 /**
  * ============ 91探花（911tanhua.com）OmniBox 采集源 ============
  * 【站点事实（2026-11-26 实测）】
@@ -31,6 +32,19 @@ const OmniBox = require('omnibox_sdk');
 const runner = require('spider_runner');
 
 const PREFIX = '[91探花]';
+// 封面图床 expose.eisees.com 的图片 URL 带短期 auth 签名，OK影视 对带查询串的图处理异常
+// （显示标题首字占位）。按 51吃瓜/黑料网 的做法：抓图转 data:image base64 内联，两端都能显示。
+// 抓图失败/图片无效时回退原 URL（不阻塞主链路，UZN 仍可用原 URL）。
+const COVER_INLINE = process.env.TANHUA_COVER_INLINE !== '0';
+const COVER_CONCURRENCY = 4;
+function sniffImageType(buf) {
+  if (!buf || buf.length < 12) return '';
+  if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.slice(0, 3).toString('ascii') === 'GIF') return 'image/gif';
+  if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return '';
+}
 const UA = String(process.env.TANHUA_UA || '').trim()
   || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const BASE = String(process.env.TANHUA_HOST || 'https://911tanhua.com').replace(/\/+$/, '');
@@ -81,6 +95,49 @@ function memGet(k, ttl) { const v = mem.get(k); if (v && Date.now() - v.t < ttl)
 function memSet(k, d) { mem.set(k, { t: Date.now(), d }); }
 async function cacheGet(k) { try { const v = await OmniBox.getCache(`${PREFIX}:${k}`); return typeof v === 'string' ? JSON.parse(v) : v; } catch (_) { return null; } }
 async function cacheSet(k, d, ttl) { try { await OmniBox.setCache(`${PREFIX}:${k}`, JSON.stringify(d), ttl); } catch (_) {} }
+
+// 封面内联：抓图 -> data URI（图床 auth 签名 OK影视 不认，UZN 认；内联后两端一致）
+const coverCache = new Map();
+async function resolveCover(url) {
+  if (!url || !COVER_INLINE || !/^https?:/i.test(url)) return url || '';
+  if (coverCache.has(url)) return coverCache.get(url);
+  try {
+    const res = await axios.get(url, {
+      timeout: 8000, responseType: 'arraybuffer', validateStatus: () => true,
+      headers: { 'User-Agent': UA, Referer: BASE + '/' },
+    });
+    let buf = res.data;
+    if (res.status === 200 && buf) {
+      // 兼容宿主把 arraybuffer 包成 Uint8Array
+      if (!Buffer.isBuffer(buf)) {
+        if (buf.buffer && typeof buf.byteLength === 'number') buf = Buffer.from(buf.buffer, buf.byteOffset || 0, buf.byteLength);
+        else if (Array.isArray(buf)) buf = Buffer.from(buf);
+        else buf = Buffer.from(String(buf));
+      }
+      const mime = sniffImageType(buf);
+      if (mime && buf.length > 100) {
+        const dataUri = `data:${mime};base64,${buf.toString('base64')}`;
+        coverCache.set(url, dataUri);
+        return dataUri;
+      }
+    }
+  } catch (_) { /* 抓图失败回退原 URL */ }
+  coverCache.set(url, url);
+  return url;
+}
+async function resolveCovers(list) {
+  if (!COVER_INLINE || !Array.isArray(list) || !list.length) return list;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < list.length) {
+      const i = cursor++;
+      const item = list[i];
+      if (item && item.vod_pic) { try { item.vod_pic = await resolveCover(item.vod_pic); } catch (_) {} }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(COVER_CONCURRENCY, list.length) }, () => worker()));
+  return list;
+}
 
 // 从页面 JSON-LD 提取 VideoObject 列表
 function parseJsonLd(html) {
@@ -149,6 +206,7 @@ async function home(params, context) {
       list = await loadList('/sort/renew/');
       if (list.length) { memSet('home:list', list); await cacheSet('home', list, CACHE_TTL); }
     }
+    await resolveCovers(list);
     log('info', `home 返回 class=${TOP_CLASSES.length} list=${list.length}`);
     return { class: TOP_CLASSES, list, filters: {} };
   } catch (e) { log('error', `home 失败: ${e.message}`); return { class: [], list: [] }; }
@@ -165,6 +223,7 @@ async function category(params, context) {
     else if (id.startsWith('cat:')) { const slug = id.slice(4); path = page <= 1 ? `/category/${slug}/` : `/category/${slug}/${page}/`; }
     else path = page <= 1 ? `/category/${id}/` : `/category/${id}/${page}/`;
     const list = await loadList(path);
+    await resolveCovers(list);
     log('info', `category 返回 id=${id} page=${page} list=${list.length}`);
     return { page, pagecount: list.length >= 24 ? page + 1 : page, total: page * 24 + (list.length >= 24 ? 1 : 0), list };
   } catch (e) { log('error', `category 失败: ${e.message}`); return { page, pagecount: 0, total: 0, list: [] }; }
@@ -178,6 +237,7 @@ async function search(params, context) {
   try {
     const path = page <= 1 ? `/search/${encodeURIComponent(kw)}/` : `/search/${encodeURIComponent(kw)}/${page}/`;
     const list = await loadList(path);
+    await resolveCovers(list);
     log('info', `search 返回 kw=${kw} list=${list.length}`);
     return { page, pagecount: list.length >= 24 ? page + 1 : page, total: page * 24 + (list.length >= 24 ? 1 : 0), list };
   } catch (e) { log('error', `search 失败: ${e.message}`); return { page: 1, pagecount: 0, total: 0, list: [] }; }
@@ -216,10 +276,12 @@ async function detail(params, context) {
     const typeName = text(attr('type_name'));
     // playId 透传：videoId（数字）|标题（用于播放记录/日志）
     const playId = `${videoId}|${title}`;
+    let finalPic = pic;
+    if (pic) { try { finalPic = await resolveCover(pic); } catch (_) {} }
     const item = {
       vod_id: vid,
       vod_name: title,
-      vod_pic: pic,
+      vod_pic: finalPic,
       vod_content: desc,
       type_name: typeName,
       vod_play_sources: videoId ? [{ name: '默认线路', episodes: [{ name: '正片', playId }] }] : undefined,
