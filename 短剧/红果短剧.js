@@ -6,6 +6,7 @@
 // @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.2.6 精简：移除无调用的 v3 遗留死代码（coreSixgod/encryptGorgon/encryptHelios/genMedusaSafe），压缩头注释。v2.2.5 播放主路径 V5 签名对齐 hongguoTV 0.16.15（Medusa 36 字段完整设备信封/field21=312，carrier+sbox 经官方向量验证）。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
 // @version 2.2.6
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
+// @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
 // 签名算法移植自 zfdang/hongguo-open-player (PR #92, AGPL/GPL-3.0)，用于修复 2026-11-10 起 App 播放接口 200 空体。
 const crypto = require('crypto');
@@ -2808,24 +2809,7 @@ function genMedusa(url,params,devices,data,khronos,dataType='application/json; c
 }
 
 const KEY = 'hongguo';
-// 站点域名池：这些域名 DNS 在 IPv4/IPv6 间轮换（某域可能只解析出 IPv6，无 IPv6 出口即不可达），
-// 且相互 301 跳转。按池顺序探测，失败自动切换。可用 DUANJU_SITES / DUANJU_SITE 覆盖。
-const SITE_POOL = (() => {
-  const env = String(process.env.DUANJU_SITES || process.env.DUANJU_SITE || '')
-    .split(/[,;]/).map((x) => x.trim().replace(/\/+$/, '')).filter(Boolean)
-    .map((x) => (/^https?:\/\//i.test(x) ? x : 'https://' + x));
-  const builtin = [
-    'https://hongguoduanju.com',
-    'https://www.hongguoduanju.com',
-    'https://novelquickapp.com',
-    'https://www.novelquickapp.com',
-  ];
-  return Array.from(new Set(env.length ? env : builtin));
-})();
-let SITE_INDEX = 0;
-function siteBase() { return SITE_POOL[SITE_INDEX] || SITE_POOL[0]; }
-// 保留 SITE 常量语义（指向当前生效基址）
-const SITE = siteBase();
+const SITE = 'https://hongguoduanju.com';
 const VIDEO_URL = 'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/';
 const EPISODE_PREFIX = 'hg-episode-v1:';
 const SERIES_EPISODE_PREFIX = 'hg-series-episode-v1:';
@@ -2939,25 +2923,9 @@ function responsePayload(response) {
   return response;
 }
 
-function withSiteIndex(url, idx) {
-  const target = SITE_POOL[idx];
-  if (!target) return url;
-  try {
-    const base = new URL(target), u = new URL(url);
-    u.protocol = base.protocol; u.host = base.host;
-    return u.toString();
-  } catch (_) { return url; }
-}
 async function getPageRaw(url, attempts = PAGE_ATTEMPTS) {
   let lastError;
-  const poolTries = Math.max(1, SITE_POOL.length);
-  const total = Math.max(1, attempts) * poolTries;
-  for (let attempt = 0; attempt < total; attempt++) {
-    if (attempt > 0 && attempt % Math.max(1, attempts) === 0) {
-      SITE_INDEX = (SITE_INDEX + 1) % poolTries;
-      url = withSiteIndex(url, SITE_INDEX);
-      await log('info', `[hg][site] 切换到域名 ${siteBase()}`);
-    }
+  for (let attempt = 0; attempt < Math.max(1, attempts); attempt++) {
     try {
       const response = await httpRequest(url, {
         method: 'GET',
@@ -2977,7 +2945,7 @@ async function getPageRaw(url, attempts = PAGE_ATTEMPTS) {
       return html;
     } catch (error) {
       lastError = error;
-      if (attempt + 1 < total) await sleep(400);
+      if (attempt + 1 < attempts) await sleep(600 * (attempt + 1));
     }
   }
   throw new Error(`红果页面请求失败: ${lastError?.message || lastError || url}`);
@@ -3002,62 +2970,6 @@ function routerData(html) {
   return parsed;
 }
 
-/**
- * 【Web 播放路径】绕过 App 播放模型接口，直接从官网页取明文 MP4。
- * 依据 zfdang/hongguo-open-player（hongguo.js fetchPlayUrlFromWeb）+ 实测 2026-11-27：
- *   GET {SITE}/player/{sid}/{vid}
- *   -> 页面 JSON-LD VideoObject.contentUrl = https://{站点}/video/public/{vid}/360p.mp4
- *   实测该地址裸请求即 HTTP 206 + video/mp4（ftypisom），标准 MP4、无 CENC 加密、不需要 Cookie/Referer，
- *   因此完全绕开"匿名设备不再下发播放模型"的限制。
- *   注意：站点只提供 360p 一档（1080p/720p/480p 均 404）。
- */
-function extractWebPlayUrl(html, vid, sid) {
-  const src = String(html || '');
-  const target = String(vid || '');
-  if (!src || !target) return '';
-  const scripts = src.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi);
-  for (const sc of scripts) {
-    if (!/\btype\s*=\s*["']application\/ld\+json["']/i.test(sc[1])) continue;
-    let obj;
-    try { obj = JSON.parse(sc[2]); } catch (_) { continue; }
-    const items = Array.isArray(obj) ? obj : [obj];
-    for (const it of items) {
-      if (!it || it['@type'] !== 'VideoObject') continue;
-      const cu = text(it.contentUrl);
-      if (!cu || !/^https?:\/\//i.test(cu)) continue;
-      if (!/\.(mp4|m3u8)(\?|$)/i.test(cu)) continue;
-      // 只接受与本 vid 绑定的地址，防止拿到推荐位/其它分集
-      if (!cu.includes(encodeURIComponent(target)) && !cu.includes(target)) continue;
-      return cu;
-    }
-  }
-  return '';
-}
-
-/** 按 sid+vid 请求官网页拿明文 MP4；失败返回空串（调用方回退 App 模型路径）。 */
-async function fetchWebPlayUrl(vid, sid) {
-  const bases = [];
-  const cur = siteBase();
-  if (cur) bases.push(cur);
-  for (const b of (typeof SITE_POOL !== 'undefined' ? SITE_POOL : [])) if (!bases.includes(b)) bases.push(b);
-  const paths = [];
-  for (const base of bases) {
-    if (sid) paths.push(`${base}/player/${encodeURIComponent(sid)}/${encodeURIComponent(vid)}`);
-    paths.push(`${base}/player/_/${encodeURIComponent(vid)}`);
-  }
-  for (const url of paths) {
-    try {
-      const html = await getPageRaw(url, 1);
-      const hit = extractWebPlayUrl(html, vid, sid);
-      if (hit) {
-        await log('info', `[hg][web] 拿到明文MP4 vid=${vid} sid=${sid || '-'} url=${hit.slice(0, 110)}`);
-        return hit;
-      }
-    } catch (_) { /* 试下一个 */ }
-  }
-  return '';
-}
-
 async function pageData(url) {
   const raw = await getPageRaw(url);
   const direct = pageObject(raw);
@@ -3069,7 +2981,7 @@ async function searchLoader(keyword) {
   let last = {};
   for (let attempt = 0; attempt < PAGE_ATTEMPTS; attempt++) {
     try {
-      const raw = await getPageRaw(`${siteBase()}/search/${encodeURIComponent(keyword)}`);
+      const raw = await getPageRaw(`${SITE}/search/${encodeURIComponent(keyword)}`);
       const html = typeof raw === 'string' ? raw : JSON.stringify(raw);
       let data = raw && typeof raw === 'object' && !Buffer.isBuffer(raw) ? pageObject(raw) : {};
       if (!Object.keys(data).length) {
@@ -3295,16 +3207,6 @@ function cacheSeriesDetail(id, raw) {
   while (seriesDetailCache.size > SERIES_DETAIL_CACHE_LIMIT) seriesDetailCache.delete(seriesDetailCache.keys().next().value);
 }
 
-/** 从已缓存的剧集详情反查 vid 所属 series_id（Web 路径需要 sid）。 */
-function seriesIdOfVideo(vid) {
-  const t = text(vid);
-  if (!t) return '';
-  for (const [sid, entry] of seriesDetailCache) {
-    if ((entry?.series?.vid_list || []).includes(t)) return sid;
-  }
-  return '';
-}
-
 function cachedSeriesDetail(id) {
   const cached = seriesDetailCache.get(id);
   if (!cached) return null;
@@ -3358,7 +3260,7 @@ function routeOf(id, page, extend = {}) {
     const routeRank = raw.startsWith('rank/') ? raw.slice(5) : '';
     const rank = routeRank || text(extend.rank_type, 'hot-drama');
     const allowed = ['hot-drama', 'hot-comic-drama', 'hot-ai-drama'];
-    return `${siteBase()}/rank/${encodeURIComponent(allowed.includes(rank) ? rank : 'hot-drama')}`;
+    return `${SITE}/rank/${encodeURIComponent(allowed.includes(rank) ? rank : 'hot-drama')}`;
   }
   let category = raw.startsWith('category/') ? raw.slice(9).split('/')[0] : raw.split('/')[0];
   category = aliases[category] || category;
@@ -3366,7 +3268,7 @@ function routeOf(id, page, extend = {}) {
   let genre = text(extend.genre);
   const parts = raw.split('/');
   if (!genre && parts.length > 1) genre = text(parts[parts.length - 1]);
-  const path = `${siteBase()}/category/${encodeURIComponent(category)}${genre ? `/${encodeURIComponent(genre)}` : ''}`;
+  const path = `${SITE}/category/${encodeURIComponent(category)}${genre ? `/${encodeURIComponent(genre)}` : ''}`;
   return `${path}?page=${page}`;
 }
 
@@ -3508,7 +3410,7 @@ async function resolveSeriesEpisode(seriesId, episode) {
     const cachedId = text(videos[episode - 1]?.vid || videos[episode - 1]?.video_id || videos[episode - 1]?.id || videos[episode - 1]);
     if (/^\d+$/.test(cachedId)) return cachedId;
   }
-  const data = await pageData(`${siteBase()}/detail?series_id=${encodeURIComponent(seriesId)}`);
+  const data = await pageData(`${SITE}/detail?series_id=${encodeURIComponent(seriesId)}`);
   series = seriesFromDetailPage(detailPageFrom(data));
   videos = safeArray(series.vid_list || series.episodeVids || series.episode_vids);
   cacheSeriesDetail(seriesId, series);
@@ -3563,7 +3465,7 @@ async function detail(params, context) {
   const list = [];
   for (const id of ids) {
     try {
-      const data = await pageData(`${siteBase()}/detail?series_id=${encodeURIComponent(id)}`);
+      const data = await pageData(`${SITE}/detail?series_id=${encodeURIComponent(id)}`);
       const fetched = seriesFromDetailPage(detailPageFrom(data));
       if (!fetched || typeof fetched !== 'object') throw new Error('红果剧集详情为空');
       cacheSeriesDetail(id, fetched);
@@ -4593,37 +4495,10 @@ async function play(params, context) {
       return { urls: [{ name: flag, url: rawId }], flag, header: { 'User-Agent': MEDIA_UA }, parse: 0 };
     }
     const token = parseEpisodeToken(rawId);
-    if (token.kind === 'video' && !/^(\d+|v1_[A-Za-z0-9_-]+)$/.test(token.videoId)) throw new Error('无效的红果播放参数');
+    if (token.kind === 'video' && !/^\d+$/.test(token.videoId)) throw new Error('无效的红果播放参数');
     if (token.kind === 'series-episode' && (!/^\d+$/.test(token.seriesId) || token.episode < 1)) throw new Error('无效的红果剧集参数');
     const tokenQuality = QUALITY_ORDER.includes(token.quality) ? token.quality : '1080';
     const requestedQuality = tokenQuality === '1080' && text(body.flag) ? qualityFromFlag(body.flag, tokenQuality) : tokenQuality;
-    // 【优先 Web 路径】官网页 JSON-LD 的 contentUrl 是明文 MP4（video/public/{vid}/360p.mp4），
-    // 实测 HTTP 206 + video/mp4，无 CENC、不需 Cookie，可绕开 App 播放模型不下发的限制。
-    try {
-      let webSid = '';
-      let webVid = '';
-      if (token.kind === 'series-episode') {
-        webSid = token.seriesId;
-        webVid = await resolveSeriesEpisode(token.seriesId, token.episode).catch(() => '');
-      } else {
-        webVid = token.videoId;
-        webSid = seriesIdOfVideo(webVid) || '';
-      }
-      if (webVid) {
-        const webUrl = await fetchWebPlayUrl(webVid, webSid);
-        if (webUrl) {
-          return {
-            urls: [{ name: flag, url: webUrl }],
-            flag,
-            header: { 'User-Agent': MEDIA_UA, Referer: `${siteBase()}/` },
-            parse: 0,
-          };
-        }
-        await log('info', `[hg][web] 未取到明文MP4（vid=${webVid} sid=${webSid || '-'}），回退 App 模型路径`);
-      }
-    } catch (e) {
-      await log('warn', `[hg][web] 异常: ${e.message?.slice(0, 80)}，回退 App 模型路径`);
-    }
     const mediaParams = token.kind === 'series-episode'
       ? { sid: token.seriesId, ep: String(token.episode), q: requestedQuality, hg: 'cenc' }
       : { vid: token.videoId, q: requestedQuality, hg: 'cenc' };
@@ -4655,12 +4530,12 @@ async function play(params, context) {
 async function searchLoaderApi(keyword, page) {
   const query = text(keyword);
   if (!query) return { searchList: [], totalCount: 0, totalPages: 1 };
-  const headers = { 'User-Agent': UA, Accept: 'application/json, text/plain, */*', Referer: `${siteBase()}/` };
+  const headers = { 'User-Agent': UA, Accept: 'application/json, text/plain, */*', Referer: `${SITE}/` };
   // 官网同款前置请求：先取 ttwid（首访）与 suggestion keyword
-  try { await httpRequest(siteBase() + '/', { headers, timeout: 10000 }); } catch (_) { /* 忽略 */ }
+  try { await httpRequest(SITE + '/', { headers, timeout: 10000 }); } catch (_) { /* 忽略 */ }
   let sug = '';
   try {
-    const r = await httpRequest(`${siteBase()}/api/search/suggestion/?aid=8662&query=${encodeURIComponent(query)}`, { headers, timeout: 10000 });
+    const r = await httpRequest(`${SITE}/api/search/suggestion/?aid=8662&query=${encodeURIComponent(query)}`, { headers, timeout: 10000 });
     if (Number(r.status) === 200) {
       const rows = (objectOf(r.data).suggestionList) || [];
       if (rows.length && rows[0] && rows[0].keyword) sug = text(rows[0].keyword);
@@ -4670,7 +4545,7 @@ async function searchLoaderApi(keyword, page) {
   if (sug) qs.set('keyword', sug);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const r = await httpRequest(`${siteBase()}/api/search/result?${qs.toString()}`, { headers, timeout: 20000 });
+      const r = await httpRequest(`${SITE}/api/search/result?${qs.toString()}`, { headers, timeout: 20000 });
       if (Number(r.status) === 200) {
         const data = objectOf(r.data);
         const rows = Array.isArray(data.searchList) ? data.searchList : [];
