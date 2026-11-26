@@ -1,7 +1,7 @@
 // @name 色花堂
 // @author OmniBox
 // @description 色花堂（18sht.com）：MacCMS 风格前台，HTML 卡片取列表，详情 div#mse[data-url] 取 m3u8 直链（parse=0）。封面 new2.qnlycc.cn AES 加密图内联 data URI（兼容 OK影视）。分类/搜索/分页/详情全通。
-// @version 1.0.1
+// @version 1.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/色花堂.js
 // @dependencies axios, crypto
 /**
@@ -147,51 +147,42 @@ function parseList(html) {
   return out;
 }
 
-// 官网导航分类（顶层大类，与首页一致）
+// 分类严格对齐首页栏目（2026-11-26 实测首页 h2 区块 + 各区块"更多"链接）
+// 每项 route 即站点真实路径，category() 直接请求该路径。
 const CLASSES = [
-  { type_id: 'video', type_name: '全部视频' },
-  { type_id: 'heiliao-chigua', type_name: '黑料吃瓜' },
-  { type_id: 'av', type_name: '日本AV' },
-  { type_id: 'duanju', type_name: 'AI短剧' },
+  { type_id: 'heiliao-chigua', type_name: '黑料吃瓜爆料' },
+  { type_id: 'video/now-month-hot', type_name: '推荐给您' },
+  { type_id: 'video', type_name: '正在观看' },
+  { type_id: 'video/new-update', type_name: '最近更新' },
+  { type_id: 'tag/萝莉', type_name: '萝莉' },
+  { type_id: 'tag/乱伦', type_name: '乱伦' },
+  { type_id: 'tag/人妻', type_name: '人妻' },
+  { type_id: 'tag/破处', type_name: '破处' },
+  { type_id: 'tag/动漫', type_name: '动漫' },
+  { type_id: 'tag/调教', type_name: '调教' },
+  { type_id: 'tag/黑料', type_name: '吃瓜黑料' },
+  { type_id: 'tag/内射', type_name: '内射' },
+  { type_id: 'tag/巨乳', type_name: '巨乳' },
+  { type_id: 'video/hd', type_name: '高清精选' },
+  { type_id: 'video/original', type_name: '原创自拍' },
+  { type_id: 'video/month-hot', type_name: '本月热门' },
   { type_id: 'moviesets', type_name: '精选合集' },
-  { type_id: 'tag', type_name: '热门标签' },
-  { type_id: 'novels', type_name: '成人小说' },
+  { type_id: 'duanju/chengren-duanju', type_name: 'AI短剧' },
+  { type_id: 'av', type_name: '日本AV' },
 ];
 
-// 二级子分类（官网可见项完整补齐，value 为相对站点根的路径）
+// 子分类筛选（仅对带多种排序/子栏目的大类提供；其余直接走 route）
 const SUBCATEGORIES = {
-  video: [
-    ['全部', ''], ['热门排行榜', 'video/now-month-hot'], ['最近更新', 'video/new-update'],
+  'video': [
+    ['正在观看', 'video'], ['推荐给您', 'video/now-month-hot'], ['最近更新', 'video/new-update'],
     ['当前热门', 'video/now-hot'], ['高清精选', 'video/hd'], ['原创自拍', 'video/original'],
-    ['本月收藏', 'video/now-month-collect'], ['本月评论', 'video/now-month-comment'],
-    ['本月热门', 'video/month-hot'], ['十分钟', 'video/ten_minutes'], ['二十分钟', 'video/twenty_minutes'],
-    ['最大合集', 'video/max-collect'],
+    ['本月热门', 'video/month-hot'], ['本月收藏', 'video/now-month-collect'], ['本月评论', 'video/now-month-comment'],
   ],
   'heiliao-chigua': [
-    ['全部', ''], ['今日吃瓜', 'heiliao-chigua/jinrichigua'], ['学生校园', 'heiliao-chigua/xueshengxiaoyuan'],
-    ['明星黑料', 'heiliao-chigua/mingxingheiliao'], ['网红黑料', 'heiliao-chigua/wanghongheiliao'],
-    ['吃瓜新闻', 'heiliao-chigua/chiguaxinwen'], ['伦理道德', 'heiliao-chigua/伦理道德'],
+    ['全部', 'heiliao-chigua'], ['今日吃瓜', 'heiliao-chigua/jinrichigua'],
+    ['学生校园', 'heiliao-chigua/xueshengxiaoyuan'], ['明星黑料', 'heiliao-chigua/mingxingheiliao'],
+    ['网红黑料', 'heiliao-chigua/wanghongheiliao'], ['吃瓜新闻', 'heiliao-chigua/chiguaxinwen'],
     ['每日大赛', 'heiliao-chigua/meiridasai'],
-  ],
-  av: [
-    ['全部', 'av'], ['角色扮演', 'av/theme/2'], ['中文字幕', 'av/theme/5'], ['制服诱惑', 'av/theme/6'],
-    ['主奴调教', 'av/theme/7'], ['凌辱强暴', 'av/theme/8'], ['无码高清', 'av/theme/12'],
-  ],
-  duanju: [
-    ['全部', 'duanju'], ['成人短剧', 'duanju/chengren-duanju'],
-  ],
-  moviesets: [['全部', 'moviesets']],
-  tag: [
-    ['全部', ''], ['自拍', 'tag/自拍'], ['约炮', 'tag/约炮'], ['内射中出', 'tag/内射'],
-    ['童颜巨乳', 'tag/巨乳'], ['人妻熟女', 'tag/人妻'], ['家庭乱伦', 'tag/家庭乱伦'],
-    ['萝莉少女', 'tag/萝莉'], ['SM调教', 'tag/调教'], ['丝袜美腿', 'tag/丝袜'],
-    ['黑料', 'tag/黑料'], ['学生妹', 'tag/学生妹'], ['直播', 'tag/直播'], ['清纯', 'tag/清纯'],
-    ['KiKi', 'tag/JK'], ['原创', 'tag/原创'],
-  ],
-  novels: [
-    ['都市激情', 'novels/dushi-jiqing/new'], ['校园之恋', 'novels/xiaoyuan-zhilian/new'],
-    ['人妻熟女', 'novels/renqi-shunv/new'], ['家庭乱伦', 'novels/jiating-luanlun/new'],
-    ['经验故事', 'novels/jingyan-gushi/new'], ['真实体验', 'novels/zhenshi-tiyan/new'],
   ],
 };
 function buildCategoryFilters() {
@@ -237,7 +228,8 @@ async function home(params, context) {
 function parseArticleList(html, slug) {
   const out = [];
   const seen = new Set();
-  const re = new RegExp(`<a[^>]*href="/${slug}/(\\d+)/"[^>]*>([\\s\\S]{0,600}?)</a>`, 'gi');
+  // 支持两类详情路径：/{slug}/{数字}/（黑料、小说）与 /{slug}/drama-{数字}/（AI短剧）
+  const re = new RegExp(`<a[^>]*href="/${slug}/(?:drama-)?(\\d+)/"[^>]*>([\\s\\S]{0,600}?)</a>`, 'gi');
   let m;
   while ((m = re.exec(html))) {
     const id = m[1];
@@ -259,14 +251,8 @@ async function category(params, context) {
   log('info', `category 入口 id=${rawId} sub=${sub} page=${page}`);
   if (!rawId) return { page: 1, pagecount: 0, total: 0, list: [] };
   try {
-    // 解析目标路径：优先用 filters.sub（子分类路径），否则用 id 本身
-    let route = sub || rawId;
-    // id 是顶层大类且 sub 为空时，取该大类的第一个有内容的默认路径
-    if (!sub && SUBCATEGORIES[rawId]) {
-      const first = SUBCATEGORIES[rawId].find(([, v]) => v);
-      route = first ? first[1] : rawId;
-    }
-    if (route === 'video') route = 'video';
+    // 目标路径：优先 filters.sub，否则直接用 categoryId（CLASSES 的 type_id 本身就是站点真实路径）
+    const route = sub || rawId;
     const path = page <= 1 ? `/${route}/` : `/${route}/page/${page}/`;
     const html = await fetchHtml(path);
     let list = parseList(html);
@@ -308,6 +294,36 @@ async function detail(params, context) {
   log('info', `detail 入口 vid=${vid}`);
   if (!vid) return { list: [] };
   try {
+    // 短剧：vod_id 形如 duanju:163 -> /duanju/drama-163/，播放地址在分集页 JSON-LD contentUrl
+    if (vid.startsWith('duanju:')) {
+      const num = vid.slice(7);
+      const seriesHtml = await fetchHtml(`/duanju/drama-${num}/`);
+      const ld = (seriesHtml.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/i) || [])[1] || '';
+      let meta = {};
+      try { meta = JSON.parse(ld); } catch (_) {}
+      const title = clean(meta.name || '');
+      const pic = text(meta.image || '');
+      const desc = clean(meta.description || '');
+      // 分集链接
+      const eps = [...new Set((seriesHtml.match(new RegExp(`/duanju/drama-${num}/(\\d+)/`, 'g')) || []))];
+      const episodes = [];
+      for (const p of eps.slice(0, 60)) {
+        const m = p.match(new RegExp(`/duanju/drama-${num}/(\\d+)/`));
+        if (!m) continue;
+        const epNum = m[1];
+        try {
+          const epHtml = await fetchHtml(`/duanju/drama-${num}/${epNum}/`);
+          const epLd = (epHtml.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/i) || [])[1] || '';
+          const epMeta = JSON.parse(epLd);
+          if (epMeta.contentUrl) episodes.push({ name: `第${epNum}集`, playId: text(epMeta.contentUrl) });
+        } catch (_) {}
+      }
+      let finalPic = pic;
+      if (pic) { try { finalPic = await resolveCover(pic); } catch (_) {} }
+      const sources = episodes.length ? [{ name: '默认线路', episodes }] : [];
+      log('info', `detail(短剧) 返回 vid=${vid} eps=${episodes.length}`);
+      return { list: [{ vod_id: vid, vod_name: title, vod_pic: finalPic, vod_content: desc, type_name: 'AI短剧', vod_play_sources: sources.length ? sources : undefined }] };
+    }
     const html = await fetchHtml(`/video/${vid}/`);
     // 播放器 div#mse 属性
     const mse = html.match(/<div[^>]*id="mse"[^>]*>/i) || [];
