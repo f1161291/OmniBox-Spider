@@ -1,5 +1,5 @@
 // @name 一区
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
 // @description 一区（618041.xyz）OmniBox 采集源：MacCMS 魔改路由，XOR128 标题混淆；列表播放参数含 v=（直连 master m3u8）/ m=（reqplay API），按 RESOLUTION 高度降序取最高清晰度；封面明文直出，无本地代理
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/一区.js
@@ -38,7 +38,7 @@
  *      统一 try/catch，异常返回空结构不崩溃。
  *
  * 【环境变量】
- *   SITE_HOST                 站点地址，默认 https://618041.xyz
+ *   YIQU_HOST                 站点地址，默认 https://618041.xyz
  *   Z1_UA             自定义 User-Agent
  *   Z1_REQUEST_TIMEOUT 普通请求超时毫秒，默认 25000
  *   Z1_COVER_TIMEOUT    manifest 探测超时毫秒，默认 12000
@@ -91,7 +91,7 @@ function normalizeHost(value, fallback) {
   catch (_) { return fallback; }
 }
 
-const HOST = normalizeHost(process.env.SITE_HOST || '', 'https://618041.xyz');
+const HOST = normalizeHost(process.env.YIQU_HOST || '', 'https://618041.xyz');
 const UA = process.env[`${ENV}_UA`]
   || 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
 const REQUEST_TIMEOUT = numEnv(`${ENV}_REQUEST_TIMEOUT`, 25000, 3000, 120000);

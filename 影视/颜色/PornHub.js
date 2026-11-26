@@ -1,5 +1,5 @@
 // @name PornHub
-// @version 1.0.5
+// @version 1.0.6
 // @author omnibox-spider
 // @description cn.pornhub.com 采集源：首页推荐 + 19 个分类（巨乳/巨屌/内射/女同等）+ 排序 + 搜索分页；列表取 pcVideoListItem 卡片（带 viewkey、封面、时长、观看数、评分），详情页从 flashvars_{id} 解析 mediaDefinitions 的 HLS 直链（仅保留 1080P/720P，1080P 优先）
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/PornHub.js
@@ -41,7 +41,7 @@
  * 6) 列表/详情/搜索走短 TTL 缓存（PORNHUB_CACHE_TTL，默认 600）；play 不缓存（签名链接随会话刷新）。
  *
  * 【环境变量】（优先复用仓库既有命名）
- *  SITE_HOST          站点基址，默认 https://cn.pornhub.com；主域轮换（如 pornhub.com）改这里
+ *  PORNHUB_HOST       站点基址，默认 https://cn.pornhub.com；主域轮换（如 pornhub.com）改这里
  *  SITE_COOKIE        可选，站点登录态 Cookie（影响是否出现 Premium / 会员片，普通片不需要）
  *  PORNHUB_CACHE_TTL  页面缓存秒数，默认 600（新增，避免与别的站点 TTL 串用）
  *  PORNHUB_PROXY_URL  可选，能访问 Pornhub 视频 CDN 的出口（仅提示用场，由宿主 OmniBox.request 注入）
@@ -84,7 +84,7 @@ function normalizeHost(value) {
   }
 }
 
-const HOST = normalizeHost(process.env.SITE_HOST || "https://cn.pornhub.com");
+const HOST = normalizeHost(process.env.PORNHUB_HOST || "https://cn.pornhub.com");
 const SITE_COOKIE = String(process.env.SITE_COOKIE || "").trim();
 // 视/听首页分类：简体中文镜像实测的 19 个分类（id 来自 /video?c=NNN；c=1 亚洲 / c=111 日本人）
 const CLASS_LIST = [

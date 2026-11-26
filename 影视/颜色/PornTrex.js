@@ -1,5 +1,5 @@
 // @name PornTrex
-// @version 1.0.1
+// @version 1.0.2
 // @author omnibox-spider
 // @description porntrex.com 采集源：首页/分类/最新/搜索分页；详情页内联 flashvars 解析 480p/720p/1080p/2160p(4K) 多档 mp4 直链，按真实分辨率数值严格降序，最高档恒为 vod_play_sources[0] 与 play().urls[0]；【1.0.1】按要求删除 720 以下线路，仅保留 2160P/1080P/720P
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/PornTrex.js
@@ -41,7 +41,7 @@
  *    play 不缓存（get_file 签名随时变）。
  *
  * 【环境变量】
- *  SITE_HOST            站点基址，默认 https://www.porntrex.com
+ *  PORNTREX_HOST        站点基址，默认 https://www.porntrex.com
  *  PORNTREX_CACHE_TTL   列表页缓存秒数，默认 300
  *
  * 【stdout 纪律】宿主通过 stdout 读 handler 返回的 JSON，脚本绝不向 stdout 写日志；
@@ -70,7 +70,7 @@ function normalizeHost(value) {
   catch (_) { return "https://www.porntrex.com"; }
 }
 
-const HOST = normalizeHost(process.env.SITE_HOST || "https://www.porntrex.com");
+const HOST = normalizeHost(process.env.PORNTREX_HOST || "https://www.porntrex.com");
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const BASE_TTL = Math.max(0, Number(process.env.PORNTREX_CACHE_TTL || 300) || 300);
 const HOME_TTL = BASE_TTL;

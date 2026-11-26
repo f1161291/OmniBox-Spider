@@ -1,5 +1,5 @@
 // @name 69吃瓜网
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
 // @description 69吃瓜网（d39cgxtrya69tg.cloudfront.net / 69cgua.com）OmniBox 采集源：WordPress Mirages 主题，分类/搜索/详情/播放全链路；图床前 100 字节 XOR 混淆，脚本内还原为 data:image；play 时重新访问详情签发新 ticket 并直出 m3u8（无需本地代理）
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/69吃瓜网.js
@@ -39,7 +39,7 @@
  *      （宿主用 stdout 读 handler 返回的 JSON）。
  *
  * 【环境变量】
- *   SITE_HOST                 站点地址，默认 https://d39cgxtrya69tg.cloudfront.net
+ *   CG69_HOST                 站点地址，默认 https://d39cgxtrya69tg.cloudfront.net
  *   CG69_UA                   自定义 User-Agent
  *   CG69_REQUEST_TIMEOUT      普通请求超时毫秒，默认 25000
  *   CG69_COVER_DISABLE        设 1 关闭封面解密（回退原始 URL，仅排障用）
@@ -96,7 +96,7 @@ function normalizeHost(value) {
   catch (_) { return 'https://d39cgxtrya69tg.cloudfront.net'; }
 }
 
-const HOST = normalizeHost(process.env.SITE_HOST || '');
+const HOST = normalizeHost(process.env.CG69_HOST || '');
 const UA = process.env.CG69_UA || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const REQUEST_TIMEOUT = numEnv('CG69_REQUEST_TIMEOUT', 25000, 3000, 120000);
 const COVER_DISABLE = /^(1|true|yes)$/i.test(process.env.CG69_COVER_DISABLE || '');

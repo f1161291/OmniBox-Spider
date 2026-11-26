@@ -1,5 +1,5 @@
 // @name AVJiali
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
 // @description avjiali.com（AV Jiali 国产 AV / WordPress）采集源：首页推荐 + 29 个分类 + 全部视频分页 + 关键词搜索分页；详情页 JSON-LD 取标题/时长/演员/简介，公开层只有 77 秒 HD 预告片直链（明确标注），正片在 members.avjiali.com 会员墙后；列表广告过滤、短 TTL 缓存、直链→sniff→parse=1 三段式兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/AVJiali.js
@@ -46,7 +46,7 @@
  * 7) data 里的 & 需 decodeHTML（&amp;）；带 query 的 mp4/m3u8 一律 parse=0。
  *
  * 【环境变量】（优先复用仓库既有命名）
- *  SITE_HOST          站点基址，默认 https://avjiali.com
+ *  AVJIALI_HOST       站点基址，默认 https://avjiali.com
  *  SITE_COOKIE        可选，members.avjiali.com 会员登录态；带上后若页面下发正片会自动切
  *  JIALI_CACHE_TTL    列表页缓存秒数，默认 600（本源独有问题，避免与其它站 TTL 串用）
  *
@@ -75,7 +75,7 @@ function normalizeHost(value) {
   catch (_) { return "https://avjiali.com"; }
 }
 
-const HOST = normalizeHost(process.env.SITE_HOST || "https://avjiali.com");
+const HOST = normalizeHost(process.env.AVJIALI_HOST || "https://avjiali.com");
 const SITE_COOKIE = String(process.env.SITE_COOKIE || "").trim();
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const BASE_TTL = Math.max(0, Number(process.env.JIALI_CACHE_TTL || 600) || 600);

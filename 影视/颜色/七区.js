@@ -1,5 +1,5 @@
 // @name 七区
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
 // @description 七区 / 沉浸式短剧剧场（618603.xyz）OmniBox 采集源：MacCMS art 路由，站点封面 AES-128-CBC 加密，脚本内解密为 data:image；详情 episodes 数组提取 m3u8，按 RESOLUTION 高度降序取最高清晰度；无本地代理
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/七区.js
@@ -34,7 +34,7 @@
  *      统一 try/catch，异常返回空结构不崩溃。
  *
  * 【环境变量】
- *   SITE_HOST                 站点地址，默认 https://618603.xyz
+ *   QIQU_HOST                 站点地址，默认 https://618603.xyz
  *   Z7_UA                     自定义 User-Agent
  *   Z7_REQUEST_TIMEOUT        普通请求超时毫秒，默认 25000
  *   Z7_COVER_DISABLE          设 1 关闭封面解密（回退原 URL，仅排障用）
@@ -90,7 +90,7 @@ function normalizeHost(value) {
   catch (_) { return 'https://618603.xyz'; }
 }
 
-const HOST = normalizeHost(process.env.SITE_HOST || '');
+const HOST = normalizeHost(process.env.QIQU_HOST || '');
 const UA = process.env[`${ENV}_UA`]
   || 'Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
 const REQUEST_TIMEOUT = numEnv(`${ENV}_REQUEST_TIMEOUT`, 25000, 3000, 120000);

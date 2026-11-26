@@ -1,5 +1,5 @@
 // @name 二区
-// @version 1.0.0
+// @version 1.0.1
 // @author omnibox-spider
 // @description 二区 OmniBox 采集源（原二区 618303.xyz + 原五区 618406.xyz 同源合并，域名轮换）：MacCMS 魔改路由，XOR128 标题混淆；列表 kd= 直连、id= cloudfront 截 /m3u8/ 换备用域、v= 直连、m= reqplay API；含 qrtuv.com 时切 61800XX.xyz 备用域名池；封面明文直出，无本地代理
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/二区.js
@@ -40,7 +40,7 @@
  *      统一 try/catch，异常返回空结构不崩溃。
  *
  * 【环境变量】
- *   SITE_HOST                 强制指定单域名（关闭轮换），缺省时在 618303/618406 间轮换
+ *   ERQU_HOST                 强制指定单域名（关闭轮换），缺省时在 618303/618406 间轮换
  *   Z2_UA             自定义 User-Agent
  *   Z2_REQUEST_TIMEOUT 普通请求超时毫秒，默认 25000
  *   Z2_COVER_TIMEOUT    manifest 探测超时毫秒，默认 12000
@@ -94,10 +94,10 @@ function normalizeHost(value, fallback) {
 }
 
 // 原二区(618303) 与原五区(618406) 实测内容字节级一致，合并为同源域名池轮换。
-// SITE_HOST 显式指定时退化为单域名（关闭轮换）；否则每次 handler 调用轮换一个域名，
+// ERQU_HOST 显式指定时退化为单域名（关闭轮换）；否则每次 handler 调用轮换一个域名，
 // 单域名失效时下一次调用自动落到另一个，且让 vod_id 中的封面/播放链接随之更新。
-const SITE_HOST = normalizeHost(process.env.SITE_HOST || '', '');
-const HOST_POOL = SITE_HOST ? [SITE_HOST] : ['https://618303.xyz', 'https://618406.xyz'];
+const ERQU_HOST = normalizeHost(process.env.ERQU_HOST || '', '');
+const HOST_POOL = ERQU_HOST ? [ERQU_HOST] : ['https://618303.xyz', 'https://618406.xyz'];
 let hostCursor = Math.floor(Math.random() * HOST_POOL.length);
 let HOST = HOST_POOL[hostCursor];
 

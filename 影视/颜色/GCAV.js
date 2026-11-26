@@ -1,5 +1,5 @@
 // @name GCAV
-// @version 1.3.1
+// @version 1.3.2
 // @author omnibox-spider
 // @description gcav.me 采集源：只用主域 + 内置域名池轮换，不再从发布页拉取新域名；修复主域名不可达时请求挂死（加硬超时 + 失败日志不再静默）；修复宿主缺 cheerio 时列表返回 0 条导致封面全空（新增正则兜底解析 + Node 直连兜底）；六大频道 + 排序筛选 + 搜索分页；列表 a.cover-group 取标题/封面/时长/热度；详情页 const source 解析 cloudfront / bunny 双线路预览直链，免费或带登录态时补 /v/{id}/manifest 完整 m3u8；播放直链→sniff→parse=1 三段式兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/GCAV.js
@@ -46,7 +46,7 @@
  * 10) 播放页缓存保守：home/category/search/detail 走短 TTL 缓存，play 不缓存（签名链接随时可能换）。
  *
  * 【环境变量】（优先复用仓库既有命名）
- *  SITE_HOST        站点基址，默认 https://gcav.me；主域轮换时改这里即可
+ *  GCAV_HOST        站点基址，默认 https://gcav.me；主域轮换时改这里即可
  *  SITE_COOKIE      可选，站点登录态 Cookie（含 gcav_session）；带上后 /v/{id}/manifest
  *                   对 VIP 片有机会返回完整正片 —— 这是拿到完整片的唯一途径
  *  GCAV_FREE_FIRST  是否把免费片排在前面，默认 1（开启）；设 0 关闭
@@ -98,7 +98,7 @@ function normalizeHost(value) {
 }
 
 /* ---------------- 域名池（主域 + 内置备用域，不再拉发布页） ----------------
- * 只用主域 SITE_HOST（默认 gcav.me）+ SITE_HOSTS 追加域 + BUILTIN_HOSTS 轮换；
+ * 只用主域 GCAV_HOST（默认 gcav.me）+ GCAV_HOSTS 追加域 + BUILTIN_HOSTS 轮换；
  * 不再从 itaolu.com 发布页拉取新域名（用户要求，浪费时间）。
  * 成功域置顶、连续失败 2 次判死并软隔离，全部失败时仅在池内重试。
  * =============================================================== */
@@ -108,7 +108,7 @@ const HOSTS_CACHE_TTL = 30 * 24 * 3600;
 /**
  * 内置备用域名（早期从发布页抄录，现已固化进脚本）。
  * 作用：主域不可达时仍有一批已知域名可轮换。
- * SITE_HOSTS 可追加，GCAV_NO_BUILTIN=1 关闭内置列表。
+ * GCAV_HOSTS 可追加，GCAV_NO_BUILTIN=1 关闭内置列表。
  */
 const BUILTIN_HOSTS = String(process.env.GCAV_NO_BUILTIN || "") === "1" ? [] : [
   "https://gcav.me",
@@ -127,8 +127,8 @@ const BUILTIN_HOSTS = String(process.env.GCAV_NO_BUILTIN || "") === "1" ? [] : [
 ];
 
 const HOST_POOL = (() => {
-  const primary = normalizeHost(process.env.SITE_HOST || "https://gcav.me");
-  const extra = String(process.env.SITE_HOSTS || "")
+  const primary = normalizeHost(process.env.GCAV_HOST || "https://gcav.me");
+  const extra = String(process.env.GCAV_HOSTS || "")
     .split(",").map((x) => x.trim()).filter(Boolean).map(normalizeHost);
   return Array.from(new Set([primary, ...extra, ...BUILTIN_HOSTS.map(normalizeHost)]));
 })();

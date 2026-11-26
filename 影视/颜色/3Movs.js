@@ -1,5 +1,5 @@
 // @name 3Movs
-// @version 1.0.1
+// @version 1.0.2
 // @author omnibox-spider
 // @description 3Movs（KVS/PHP）采集源：首页/分类/最新/搜索五方法；分类翻页严格 ?from=N，搜索翻页走 mode=async；详情内联 flashvars 解析 video_url(720P High Quality)/video_alt_url(360P Low Quality)，按 height 数值降序，最高档恒为 vod_play_sources[0] 与 urls[0]；【1.0.1】按要求删除 720 以下线路，仅保留 720P High Quality
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/3Movs.js
@@ -36,7 +36,7 @@
  *    cheerio 缺失时用正则兜底解析卡片，不崩；flashvars/元数据一律正则，不依赖 cheerio。
  *
  * 【环境变量】（优先复用仓库既有命名）
- *  SITE_HOST        可选，站点基址，默认 https://www.3movs.com
+ *  3MOVS_HOST       可选，站点基址，默认 https://www.3movs.com
  *  3MOVS_CACHE_TTL  可选，页面缓存基准秒数，默认 300；0 关闭缓存
  */
 
@@ -72,7 +72,7 @@ function normalizeHost(value) {
   }
 }
 
-const HOST = normalizeHost(process.env.SITE_HOST || "https://www.3movs.com");
+const HOST = normalizeHost(process.env["3MOVS_HOST"] || "https://www.3movs.com");
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const DEFAULT_LIMIT = 24;
 const BASE_TTL = Math.max(0, Number(process.env["3MOVS_CACHE_TTL"] || 300) || 0);

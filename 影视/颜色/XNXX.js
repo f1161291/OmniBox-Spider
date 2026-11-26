@@ -1,5 +1,5 @@
 // @name XNXX
-// @version 1.0.2
+// @version 1.0.3
 // @author omnibox-spider
 // @description xnxx.com 采集源：/hits 推荐 + /tags 常见标签分类 + /search/{kw} 搜索分页；详情页解析 html5player.setVideoHLS/High/Low，并二次请求 HLS master 解出真实 1080P/720P/480P 单档，按真实分辨率数值降序，最高档恒为 vod_play_sources[0] 与 play().urls[0]；【1.0.2】按要求删除 720 以下线路，仅保留 >=720P 档与 HLS 自适应
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/XNXX.js
@@ -45,7 +45,7 @@
  *    本地调试兜底给 log(){} / run(){} 假对象；日志一律 OmniBox.log(level,msg) + Promise.catch 兜住。
  *
  * 【环境变量】（复用仓库既有命名）
- *  SITE_HOST         站点基址，默认 https://www.xnxx.com
+ *  XNXX_HOST         站点基址，默认 https://www.xnxx.com
  *  SITE_COOKIE       可选站点 Cookie
  *  XNXX_CACHE_TTL    页面缓存秒数，默认 600（新增，避免与别的站点 TTL 串用；play 强制 0）
  */
@@ -91,7 +91,7 @@ function normalizeHost(value) {
   }
 }
 
-const HOST = normalizeHost(process.env.SITE_HOST || "https://www.xnxx.com");
+const HOST = normalizeHost(process.env.XNXX_HOST || "https://www.xnxx.com");
 const SITE_COOKIE = String(process.env.SITE_COOKIE || "").trim();
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const BASE_TTL = Math.max(0, Number(process.env.XNXX_CACHE_TTL || 600) || 600);

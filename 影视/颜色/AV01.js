@@ -1,5 +1,5 @@
 // @name AV01
-// @version 1.0.1
+// @version 1.0.2
 // @author omnibox-spider
 // @description av01.media（React SPA，HTML 仅 4948B 空壳）直连 /api/v1 JSON：最新/热门/标签榜单 + POST body query 搜索 + 单片详情；播放解析 HLS master 的 RESOLUTION，按高度数值降序，1080p 恒为 vod_play_sources[0] / urls[0]，免 token 直出 m3u8；【1.0.1】按要求删除 720 以下线路，仅保留 1080P/720P
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/AV01.js
@@ -41,7 +41,7 @@
  *    短 TTL 缓存走 OmniBox.getCache/setCache，任何缓存异常都安全降级。
  *
  * 【环境变量】（优先复用仓库既有命名）
- *  SITE_HOST        可选，站点基址，默认 https://www.av01.media
+ *  AV01_HOST        可选，站点基址，默认 https://www.av01.media
  *  AV01_CACHE_TTL   可选，列表/详情缓存基准秒数，默认 300；0 关闭缓存
  */
 
@@ -70,7 +70,7 @@ function normalizeHost(value) {
   catch (_) { return "https://www.av01.media"; }
 }
 
-const HOST = normalizeHost(process.env.SITE_HOST || "https://www.av01.media");
+const HOST = normalizeHost(process.env.AV01_HOST || "https://www.av01.media");
 const STATIC_HOST = "https://static2.av01.tv";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const DEFAULT_LIMIT = 24;
