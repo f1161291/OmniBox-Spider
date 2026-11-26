@@ -1,7 +1,7 @@
 // @name 91探花
 // @author OmniBox
 // @description 91探花（911tanhua.com）：JSON-LD 结构化数据取列表（分类/最新/热门/搜索），详情页 data-video_id + POST /videos/{id}/playback 取 m3u8 直链（parse=0）。多分类、分页、异步播放解析。
-// @version 1.0.2
+// @version 1.0.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/91探花.js
 // @dependencies axios, crypto
 // TANHUA_COVER_INLINE 封面内联开关，默认 1（抓图转 data URI 兼容 OK影视；设 0 关闭回退原 URL）
@@ -51,15 +51,21 @@ function sniffImageType(buf) {
   if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
   return '';
 }
-// expose 图片 -> new2 稳定图（路径一致，加 .webp，去掉 auth 查询串）。
+// expose 图片 -> new2 稳定图（路径一致，去掉 auth 查询串）。
 // 路径可能是 /upload_01/...（列表）或 /upload/xiao/...（详情），统一取 expose 域名后的 path。
+// 注意：不要加 .webp —— new2 的 .webp 是压缩版（约 19.9KB），原图 JPEG 约 29.6KB，画质明显更好，
+// 两者同为 320x180；用原图可避免封面发糊/发虚。若原图 404 再回退 .webp。
 function exposeToNew2(url) {
   const m = String(url || '').match(/expose\.eisees\.com(\/[^?]+)/i);
   if (!m) return '';
-  let p = m[1].replace(/\/+$/, '');
-  // 已经是 webp 则不重复加
-  if (/\.webp$/i.test(p)) return NEW2_HOST + p;
-  return NEW2_HOST + p + '.webp';
+  const p = m[1].replace(/\/+$/, '');
+  return NEW2_HOST + p;
+}
+// 备选：原图不可用时尝试的压缩版（体积更小、画质略差）
+function exposeToNew2Webp(url) {
+  const base = exposeToNew2(url);
+  if (!base || /\.webp$/i.test(base)) return '';
+  return base + '.webp';
 }
 // AES 解密加密图，返回 {mime, body} 或 null
 function decryptCoverBytes(buf) {
@@ -129,15 +135,23 @@ const coverCache = new Map();
 async function resolveCover(url) {
   if (!url || !COVER_INLINE || !/^https?:/i.test(url)) return url || '';
   if (coverCache.has(url)) return coverCache.get(url);
-  // 优先 new2 稳定图源（expose URL 转 new2）；非 expose URL 保持原样抓
-  const fetchUrl = exposeToNew2(url) || url;
-  try {
-    const res = await axios.get(fetchUrl, {
-      timeout: 8000, responseType: 'arraybuffer', validateStatus: () => true,
-      headers: { 'User-Agent': UA, Referer: BASE + '/' },
-    });
-    let buf = res.data;
-    if (res.status === 200 && buf) {
+  // 优先原图（画质最好），失败再退压缩 webp，最后才回退原 URL
+  const candidates = [];
+  const primary = exposeToNew2(url);
+  if (primary) {
+    candidates.push(primary);
+    const webp = exposeToNew2Webp(url);
+    if (webp && webp !== primary) candidates.push(webp);
+  }
+  candidates.push(url);
+  for (const fetchUrl of candidates) {
+    try {
+      const res = await axios.get(fetchUrl, {
+        timeout: 8000, responseType: 'arraybuffer', validateStatus: () => true,
+        headers: { 'User-Agent': UA, Referer: BASE + '/' },
+      });
+      let buf = res.data;
+      if (res.status !== 200 || !buf) continue;
       if (!Buffer.isBuffer(buf)) {
         if (buf.buffer && typeof buf.byteLength === 'number') buf = Buffer.from(buf.buffer, buf.byteOffset || 0, buf.byteLength);
         else if (Array.isArray(buf)) buf = Buffer.from(buf);
@@ -147,10 +161,11 @@ async function resolveCover(url) {
       if (decoded && decoded.body.length > 100) {
         const dataUri = `data:${decoded.mime};base64,${decoded.body.toString('base64')}`;
         coverCache.set(url, dataUri);
+        log('info', `[cover] 命中 ${decoded.mime} ${decoded.body.length}B <- ${fetchUrl.slice(0, 80)}`);
         return dataUri;
       }
-    }
-  } catch (_) { /* 抓图/解密失败回退原 URL */ }
+    } catch (_) { /* 试下一个候选 */ }
+  }
   coverCache.set(url, url);
   return url;
 }
