@@ -1,6 +1,6 @@
 /**
  * @name 可可影视
- * @version 1.0.6
+ * @version 1.0.7
  * @author omnibox-spider
  * @description 可可影视（kkys14.com / kekedy.tv）OmniBox Spider：cdndefend 850 JS 挑战动态解算 + 封面走 RDUL 资源域名（主站 /vod1 图片 850）+ 前台 /channel /show /detail /play /search 全链路 + 实时搜索 t token 二次取词 + live 筛选 href + playSource(xgplayer) 直链解析 + 三段式播放兜底 + 页面级缓存 + 刮削/弹幕/播放记录增强链路
 
@@ -473,6 +473,16 @@ async function initImgHost() {
   try {
     const cached = await cacheGetJson('img_host', 'rdul');
     if (cached && cached.host) {
+      // 旧缓存可能存的是 IP:端口 形式（宿主对 HTTPS+裸IP 加载不稳定），
+      // 若候选里存在域名形式则改用域名，避免封面继续异常。
+      const isIpHost = (h) => { try { return /^\d{1,3}(\.\d{1,3}){3}$/.test(new URL(h).hostname); } catch (_) { return false; } };
+      const cachedIsIp = isIpHost(cached.host);
+      const domCandidate = (cached.hosts || []).find((h) => h && !isIpHost(h));
+      if (cachedIsIp && domCandidate) {
+        ACTIVE_IMG_HOST = domCandidate;
+        logI(`[img] 缓存为IP图床，改选域名形式=${domCandidate}`);
+        return ACTIVE_IMG_HOST;
+      }
       ACTIVE_IMG_HOST = cached.host;
       logI(`[img] 命中缓存封面域名=${ACTIVE_IMG_HOST}`);
       return ACTIVE_IMG_HOST;
@@ -486,7 +496,16 @@ async function initImgHost() {
       const times = await Promise.all(hosts.map(headImgHost));
       const ranked = hosts.map((h, i) => ({ h, t: times[i] })).filter((x) => x.t > 0).sort((a, b) => a.t - b.t);
       logI(`[img] 测速结果=${JSON.stringify(hosts.map((h, i) => `${h}:${times[i] || 'fail'}`))}`);
-      if (ranked.length) hosts = [ranked[0].h, ...hosts.filter((h) => h !== ranked[0].h)];
+      // 优先域名形式（https://域名[端口]），IP:端口 仅作兜底：
+      // 多数宿主/播放器对「HTTPS + 裸 IP + 非标准端口」的图片加载不稳定（证书校验/SNI），
+      // 即使 IP 测速更快也容易封面失败。仅当没有任何可用域名时才用 IP。
+      const isDomain = (h) => { try { const u = new URL(h); return !/^\d{1,3}(\.\d{1,3}){3}$/.test(u.hostname); } catch (_) { return false; } };
+      if (ranked.length) {
+        const domainRanked = ranked.filter((x) => isDomain(x.h));
+        const pick = domainRanked.length ? domainRanked : ranked;
+        hosts = [pick[0].h, ...hosts.filter((h) => h !== pick[0].h)];
+        if (domainRanked.length) logI(`[img] 优先域名形式，选定=${pick[0].h}`);
+      }
     }
     ACTIVE_IMG_HOST = hosts[0] || DEFAULT_IMG_HOSTS[0];
     await cacheSetJson('img_host', 'rdul', { host: ACTIVE_IMG_HOST, hosts, ts: Date.now() }, CACHE_TTL);
