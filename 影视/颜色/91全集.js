@@ -1,5 +1,5 @@
 // @name 91全集
-// @version 1.1.2
+// @version 1.1.3
 // @author omnibox-spider
 // @description 91quanji.com（木瓜视频/KVS Paysite）采集源：只用主域 + 内置域名池轮换，不再从发布页拉取新域名；修复封面（图床 pics.uoepp.com 有 Referer 防盗链，脚本内带 Referer 抓取并转 data:image 内联）+ 补 Node 直连兜底（宿主缺 OmniBox.request 时不再整体失败）；10 个真实分类 + 首页推荐 + 搜索分页；卡片解析封面/标题；详情页反混淆 eval(I(...)) 直取签名 m3u8；tag 分类 token 分页链（进程内+SDK 缓存）、搜索 p=N、三段式播放兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91全集.js
@@ -32,7 +32,9 @@
  * 6) 搜索用 p=<n>，不用 token；搜索页无分页区，靠「有卡片/无卡片」判断还有没有下一页。
  *
  * 【环境变量】（沿用仓库既有命名优先）
- *  QUANJI_HOST / SITE_HOSTS   站点基址，默认 https://91quanji.com；SITE_HOSTS 逗号分隔可容灾
+ *  QUANJI_HOSTS / QUANJI_HOST 站点基址（推荐），默认 https://91quanji.com；逗号分隔可容灾
+ *  SITE_HOSTS                 通用兜底：仅当域名包含 91quanji/quanji/91qj 时才会采用，
+ *                             避免与 91Porn 等其它 91 系脚本共用该变量导致串站
  *  NINETYONE_UA               自定义 UA
  *  NINETYONE_COOKIE           可选手动 Cookie
  *  QUANJI_CACHE_TTL           页面缓存秒数，默认 300
@@ -185,8 +187,26 @@ async function resolveCovers(list, host) {
 
 // ==================== 配置区域 ====================
 const DEFAULT_HOST = 'https://91quanji.com';
+// 专属变量优先（QUANJI_HOSTS / QUANJI_HOST）。
+// 通用 SITE_HOSTS 只作兼容兜底，且会做站点归属校验——因为 91Porn 等其它 91 系脚本也读 SITE_HOSTS，
+// 若用户为 91Porn 配了 SITE_HOSTS=91porn 镜像，直接沿用会让本站全部请求打到错误站点。
+const QUANJI_HOST_HINTS = /91quanji|quanji|91qj/i;
 const HOSTS = (() => {
-  const raw = String(process.env.SITE_HOSTS || process.env.QUANJI_HOST || DEFAULT_HOST);
+  const own = String(process.env.QUANJI_HOSTS || process.env.QUANJI_HOST || '').trim();
+  let raw = own;
+  if (!raw) {
+    const shared = String(process.env.SITE_HOSTS || '').trim();
+    if (shared) {
+      // 只接受看起来属于本站的域名；否则忽略，避免与 91Porn 等共用变量互相污染
+      const parts = shared.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+      const mine = parts.filter(s => QUANJI_HOST_HINTS.test(s));
+      if (mine.length) raw = mine.join(',');
+      else if (typeof console !== 'undefined') {
+        console.log(`[91quanji] 检测到 SITE_HOSTS 不属于本站（${shared.slice(0, 60)}），已忽略，改用默认主域。请改用 QUANJI_HOSTS/QUANJI_HOST。`);
+      }
+    }
+  }
+  if (!raw) raw = DEFAULT_HOST;
   const list = raw.split(/[,;]/).map(s => s.trim().replace(/\/+$/, '')).filter(Boolean)
     .map(s => (/^https?:\/\//i.test(s) ? s : `https://${s}`));
   return Array.from(new Set(list.length ? list : [DEFAULT_HOST]));
