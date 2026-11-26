@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.2.6 精简：移除无调用的 v3 遗留死代码（coreSixgod/encryptGorgon/encryptHelios/genMedusaSafe），压缩头注释。v2.2.5 播放主路径 V5 签名对齐 hongguoTV 0.16.15（Medusa 36 字段完整设备信封/field21=312，carrier+sbox 经官方向量验证）。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
-// @version 2.2.6
+// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.3.0：REA 逆向 APK v7.4.5.32(code 74532)，签名基线/UA 从 74332 对齐到 APK 真实版本；放宽 vid 校验以接受 v1_ 加密 ID（APK GetVideoModelRequest.videoId 为 String）。逆向实证：播放端点 /novel/player/multi_video_model/{v1|player/v1}，请求体 snake_case 结构、Playback 签名头(x-khronos/helios/medusa)与枚举(VideoPlatformType.Mixed=1024、DeviceLevel=1/2/3)均已对齐；服务端对匿名身份仍返回空模型（需登录态），非脚本问题。v2.2.6 精简：移除 v3 遗留死代码，压缩头注释。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
+// @version 2.3.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -90,17 +90,20 @@ const SHORTPLAY_APIS = [
   'https://api5-normal-lq.fqnovel.com/novel/player/video_model/v1/',
   'https://reading.snssdk.com/novel/player/video_model/v1/',
 ];
-const PLAYBACK_UA = 'com.phoenix.read/74332 (Linux; U; Android 14; zh_CN; 23127PN0CC; Build/UKQ1.230804.001; Cronet/TTNetVersion:8d40f833 2026-03-03 QuicVersion:21ac1950 2025-11-18)';
+// v2.3.0（REA 逆向 APK v7.4.5.32 / code 74532 对齐）：
+// AndroidManifest.xml 实测 version_name=7.4.5.32、version_code=74532，
+// 旧基线 74332/7.4.3.32 与本 APK 不符。签名/UA 统一切到 APK 真实版本。
+const PLAYBACK_UA = 'com.phoenix.read/74532 (Linux; U; Android 14; zh_CN; 23127PN0CC; Build/UKQ1.230804.001; Cronet/TTNetVersion:8d40f833 2026-03-03 QuicVersion:21ac1950 2025-11-18)';
 const SHORTPLAY_UA = 'com.dragon.read';
 // v2.1.0：按 /tmp/hg_real_playback_capture.txt 的真实抓包对齐；query 顺序本身是签名输入，
 // 具体发送顺序由 PLAYBACK_QUERY_ORDER 固定（见 signPlaybackV5）。
 const PLAYBACK_DEVICE_74332 = {
   device_platform: 'android', os: 'android', ssmix: 'a', _rticket: '', cdid: '',
   channel: 'xiaomi_8662_64', aid: '8662', app_name: 'novelread',
-  version_code: '74332', version_name: '7.4.3.32', manifest_version_code: '74332', update_version_code: '74332',
+  version_code: '74532', version_name: '7.4.5.32', manifest_version_code: '74532', update_version_code: '74532',
   resolution: '1200*2670', dpi: '460', device_type: '23127PN0CC', device_brand: 'Xiaomi',
   language: 'zh', os_api: '34', os_version: '14', ac: 'wifi', host_abi: 'arm64-v8a',
-  dragon_device_type: 'phone', pv_player: '74332', compliance_status: '0', need_personal_recommend: '1',
+  dragon_device_type: 'phone', pv_player: '74532', compliance_status: '0', need_personal_recommend: '1',
   player_so_load: '1', is_android_pad_screen: '0', iid: '', device_id: '',
 };
 // 与抓包完全一致的 query 键顺序（签名与最终 URL 共用同一字符串，禁止 sort）。
@@ -3416,7 +3419,11 @@ async function resolveSeriesEpisode(seriesId, episode) {
   cacheSeriesDetail(seriesId, series);
   const video = videos[episode - 1];
   const videoId = text(video?.vid || video?.video_id || video?.id || video);
-  if (!/^\d+$/.test(videoId)) throw new Error(`红果第 ${episode} 集没有可播放视频 ID`);
+  // v2.3.0（REA 逆向）：GetVideoModelRequest.videoId 是 String，真实数据含 v1_ 加密 vid，
+  // 不再强制纯数字（旧版 /^\d+$/ 会把 v1_xxx 误判为无效）。
+  if (!videoId || (!/^\d+$/.test(videoId) && !/^v\d+_/.test(videoId))) {
+    throw new Error(`红果第 ${episode} 集没有可播放视频 ID`);
+  }
   return videoId;
 }
 
@@ -3497,7 +3504,7 @@ async function detail(params, context) {
         const warmVids = [];
         for (const ep of sources[0].episodes.slice(0, HG_PROXY_PREFETCH_N)) {
           const t = parseEpisodeToken(text(ep.playId));
-          if (t.kind === 'video' && /^\d+$/.test(t.videoId)) warmVids.push(t.videoId);
+          if (t.kind === 'video' && (/^\d+$/.test(t.videoId) || /^v\d+_/.test(t.videoId))) warmVids.push(t.videoId);
         }
         if (warmVids.length) {
           (async () => {
@@ -4434,14 +4441,16 @@ async function serveMediaHttp(req, res) {
   const seriesId = text(query.sid);
   const episode = toInt(query.ep);
   const quality = qualityOf(query.q || '1080');
-  if (!/^\d+$/.test(directVideoId) && (!/^\d+$/.test(seriesId) || episode < 1)) {
+  // v2.3.0：vid 允许 v1_ 加密格式（APK videoId=String），不再仅限纯数字。
+  const directOk = /^\d+$/.test(directVideoId) || /^v\d+_/.test(directVideoId);
+  if (!directOk && (!/^\d+$/.test(seriesId) || episode < 1)) {
     res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('missing video id or episode');
     return;
   }
   let session;
   try {
-    const videoId = /^\d+$/.test(directVideoId) ? directVideoId : await resolveSeriesEpisode(seriesId, episode);
+    const videoId = directOk ? directVideoId : await resolveSeriesEpisode(seriesId, episode);
     session = await mediaSession(videoId, quality, text(query.did, ''), text(query.iid, ''));
     if (text(query.warm) === '1') {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': '2' });
@@ -4495,7 +4504,8 @@ async function play(params, context) {
       return { urls: [{ name: flag, url: rawId }], flag, header: { 'User-Agent': MEDIA_UA }, parse: 0 };
     }
     const token = parseEpisodeToken(rawId);
-    if (token.kind === 'video' && !/^\d+$/.test(token.videoId)) throw new Error('无效的红果播放参数');
+    // v2.3.0：vid 允许纯数字或 v1_ 加密格式（APK videoId 字段为 String）。
+    if (token.kind === 'video' && !/^\d+$/.test(token.videoId) && !/^v\d+_/.test(token.videoId)) throw new Error('无效的红果播放参数');
     if (token.kind === 'series-episode' && (!/^\d+$/.test(token.seriesId) || token.episode < 1)) throw new Error('无效的红果剧集参数');
     const tokenQuality = QUALITY_ORDER.includes(token.quality) ? token.quality : '1080';
     const requestedQuality = tokenQuality === '1080' && text(body.flag) ? qualityFromFlag(body.flag, tokenQuality) : tokenQuality;
