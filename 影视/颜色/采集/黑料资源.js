@@ -1,5 +1,5 @@
 // @name 🔞黑料资源
-// @version 2.0.1
+// @version 2.0.2
 // @author omnibox-spider
 // @description 黑料资源（heiliaozyapi.com 采集站）OmniBox Spider：剔除 7 个恒 0 条小说分类、year 按实测可用性给筛选、videolist 全字段+gzip、播放链路超时诊断与快速失败（不再让播放器空等 12 秒）、header 补全 Referer/Origin/domianurl、SDK 弹幕 + 播放记录
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/黑料资源.js
@@ -68,7 +68,7 @@ function normalizeApi(s) {
   if (!/^https?:\/\//i.test(v)) v = "https://" + v;
   return v.replace(/\/+$/, "");
 }
-const SITE_API = normalizeApi(process.env.SITE_API || DEFAULT_API);
+const SITE_API = normalizeApi(process.env.SITE_API_70 || DEFAULT_API);
 
 // 实测恒为 0 条的图文/小说分类（id 20~26），必须剔除，否则宿主点进去全是空列表
 const DEAD_TYPE_IDS = new Set(["20", "21", "22", "23", "24", "25", "26"]);

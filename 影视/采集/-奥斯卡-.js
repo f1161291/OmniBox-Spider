@@ -1,5 +1,5 @@
 // @name 🔞-奥斯卡-
-// @version 3.8.4
+// @version 3.8.5
 // @author omnibox-spider
 // @description 奥斯卡采集站（aosikazy.com，MacCMS 标准 JSON 接口）：直连 ac=list/class/videolist/detail 接口，支持首页推荐、分类列表、关键词搜索、详情多线路分集解析与播放；弹幕可选（DANMU_API）
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/-奥斯卡-.js
@@ -44,7 +44,7 @@ const OmniBox = require("omnibox_sdk");
 // ==================== 配置区域 ====================
 // 采集站 API 地址（优先使用环境变量，如果没有则使用默认值）
 // 例如：https://example.com/api.php/provide/vod/
-const SITE_API = process.env.SITE_API || "https://aosikazy.com/api.php/provide/vod";
+const SITE_API = process.env.AOSIKAZY_COM_API || "https://aosikazy.com/api.php/provide/vod";
 
 // 弹幕 API 地址（优先使用环境变量，如果没有则使用默认值）
 // 例如：https://danmu.example.com

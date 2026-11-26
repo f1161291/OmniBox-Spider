@@ -1,7 +1,7 @@
 // @name 17吃瓜
 // @author OmniBox
 // @description 17吃瓜（17cg.me / 17chigua.tv）：从 App 的 WordPress REST API 采文章+视频，4 域名自动轮换，session_id 签名；首页/分类/搜索/详情；详情 DPlayer config 直取 m3u8（parse=0）。多域名容错 + 封面内联。参考 51吃瓜/黑料网。
-// @version 1.0.1
+// @version 1.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/17吃瓜.js
 // @dependencies axios
 /**
@@ -50,7 +50,7 @@ const DEFAULT_HOSTS = [
   'https://rui6gn.zqt1xa.com',
 ];
 const HOSTS = (() => {
-  const fromSite = splitHosts(process.env.SITE_API);
+  const fromSite = splitHosts(process.env.SITE_API_06);
   const fromEnv = splitHosts(process.env.SEVENTEEN_HOSTS);
   const list = fromEnv.length ? fromEnv : (fromSite.length ? fromSite : DEFAULT_HOSTS);
   return Array.from(new Set(list));

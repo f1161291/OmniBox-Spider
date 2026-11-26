@@ -1,5 +1,5 @@
 // @name 🎬非凡资源
-// @version 2.1.0
+// @version 2.1.1
 // @author omnibox-spider
 // @description 非凡资源（ffzyapi.com 采集站）OmniBox Spider：ac=videolist 全字段直取、按电影/剧集/综艺/动漫大类分组（大类聚合入口+叶子子类，逗号拼接叶子id一次取回）、year/area/今日更新筛选、分享页 const url 解 m3u8、直链 parse=0 + 嗅探兜底、SDK 弹幕 + 播放记录、页面级缓存
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/非凡资源.js
@@ -52,7 +52,7 @@ function normalizeApi(s) {
   if (!/^https?:\/\//i.test(v)) v = "https://" + v;
   return v.replace(/\/+$/, "");
 }
-const SITE_API = normalizeApi(process.env.SITE_API || DEFAULT_API);
+const SITE_API = normalizeApi(process.env.SITE_API_47 || DEFAULT_API);
 
 // 父分类定义：父 type_id -> { 名称, 虚拟聚合 id }。
 // 实测父分类直接查 videolist 多为 total=0（仅"动漫片"t=4 有少量直挂影片），

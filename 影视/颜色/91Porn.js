@@ -1,6 +1,6 @@
 /**
  * @name 91porn
- * @version 1.5.6
+ * @version 1.5.7
  * @description 91porn.com 采集源（OmniBox Spider，多基址容灾：主站 + 91p618 镜像；列表封面/标题反混淆真值回填）
 
  */
@@ -35,7 +35,7 @@ const NINETYONE_PLAY_MODE = String(process.env.NINETYONE_PLAY_MODE || 'auto').tr
 
 // 站点基址容灾：主站 + 镜像兜底（91p618.com）。
 // SITE_API 仍可单独覆盖主站；SITE_HOSTS 可用逗号自定义多个基址（会追加镜像为兜底）。
-const PRIMARY_API = (process.env.SITE_API || 'https://91porn.com').replace(/\/+$/, '');
+const PRIMARY_API = (process.env['91PORN_COM_API'] || 'https://91porn.com').replace(/\/+$/, '');
 const MIRROR_API = 'https://91p618.com';
 const HOSTS = (() => {
   const fromEnv = String(process.env.SITE_HOSTS || PRIMARY_API)

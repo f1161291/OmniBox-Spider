@@ -1,6 +1,6 @@
 /**
  * @name 可可影视
- * @version 1.0.4
+ * @version 1.0.5
  * @author omnibox-spider
  * @description 可可影视（kkys14.com / kekedy.tv）OmniBox Spider：cdndefend 850 JS 挑战动态解算 + 封面走 RDUL 资源域名（主站 /vod1 图片 850）+ 前台 /channel /show /detail /play /search 全链路 + 实时搜索 t token 二次取词 + live 筛选 href + playSource(xgplayer) 直链解析 + 三段式播放兜底 + 页面级缓存 + 刮削/弹幕/播放记录增强链路
 
@@ -77,7 +77,7 @@ function normalizeHost(s) {
   if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
   return v;
 }
-const SITE_API = normalizeHost(process.env.SITE_API || DEFAULT_HOST);
+const SITE_API = normalizeHost(process.env.SITE_API_20 || DEFAULT_HOST);
 const HOSTS = Array.from(new Set([
   SITE_API,
   ...String(process.env.KKYS_HOSTS || '').split(',').map(normalizeHost).filter(Boolean),

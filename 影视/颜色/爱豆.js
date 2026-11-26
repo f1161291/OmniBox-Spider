@@ -1,6 +1,6 @@
 /**
  * @name 爱豆 (aida5)
- * @version 1.6.4
+ * @version 1.6.5
  * @description 爱豆 (w18.aida5.buzz)：AES-CBC+md5 签名接口逆向；修复封面（vodPic 为整段字节反转的 JPEG，脚本内反转并转 data:image/jpeg）与播放（失效的 vodPlayServer 改回主站 /api/m3u8/ 真实 m3u8）；/awsapi 的 POST 走原生 node https；跟随重定向、自动解压 gzip/br、镜像容灾；修复分类/搜索返回 page、limit 为字符串导致宿主 Go 结构体解析失败（改为数值）
 
  *
@@ -40,7 +40,7 @@ const zlib = require('zlib');
 module.exports = { home, category, detail, search, play };
 runner.run(module.exports);
 
-const SITE_API = (process.env.SITE_API || 'https://w18.aida5.buzz').replace(/\/+$/, '');
+const SITE_API = (process.env.W18_AIDA5_BUZZ_API || 'https://w18.aida5.buzz').replace(/\/+$/, '');
 const DEFAULT_TIMEOUT = Number(process.env.AIDOU_TIMEOUT || 15000);
 // 封面链路专属参数：站点封面是「字节反转的 JPEG」，需单独走二进制抓取 + 反转，
 // 与 API 请求（AIDOU_TIMEOUT）不是同一条链路，故独立配置，且默认并发受限避免拖慢首屏。

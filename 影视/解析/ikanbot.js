@@ -1,5 +1,5 @@
 // @name 爱看机器人
-// @version 1.0.6
+// @version 1.0.7
 // @description 爱看机器人 ikanbot.com 采集源（OmniBox Spider）：首页/分类/榜单/搜索 + /api/getResN 线路接口 + get_tks 令牌还原 + 电影/剧集分集 + 页面级缓存 + 多基址容灾
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/解析/ikanbot.js
 //
@@ -54,7 +54,7 @@ const IMG_TIMEOUT = Math.max(500, parseInt(process.env.SITE_IMG_TIMEOUT || '3000
 // 同仓库 网飞猫.js 的既有约定：宿主自带图片代理时，封面 URL = 前缀 + 原始图片 URL。
 const IMG_PROXY = String(process.env.IKANBOT_IMG_PROXY || '').trim().replace(/\/+$/, '');
 
-const PRIMARY_API = (process.env.SITE_API || 'https://www1.ikanbot.com').replace(/\/+$/, '');
+const PRIMARY_API = (process.env.WWW1_IKANBOT_COM_API || 'https://www1.ikanbot.com').replace(/\/+$/, '');
 const HOSTS = (() => {
   const fromEnv = String(process.env.IKANBOT_HOSTS || '')
     .split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);

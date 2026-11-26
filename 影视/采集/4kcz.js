@@ -1,7 +1,7 @@
 // @name 厂长资源
 // @author 宝宝巴士
 // @description 厂长资源（4kcz.com / czzy）：WordPress mibt 主题；分类/搜索/详情/播放；播放页 /v_play/{base64} 经 SDK 嗅探 + parse=1 兜底
-// @version 1.0.1
+// @version 1.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/4kcz.js
 /**
  * ============================================================================
@@ -61,7 +61,7 @@ const UA = process.env.CZ_UA
   || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 /* ---------------- 域名池 ---------------- */
-const PRIMARY = (process.env.SITE_API || 'https://www.4kcz.com').replace(/\/+$/, '');
+const PRIMARY = (process.env['4KCZ_COM_API'] || 'https://www.4kcz.com').replace(/\/+$/, '');
 
 /**
  * 备用入口：这些域名实测是**导航公告页**（不是同构站），

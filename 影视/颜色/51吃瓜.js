@@ -1,6 +1,6 @@
 /**
  * @name 吃瓜
- * @version 1.7.3
+ * @version 1.7.4
  * @description 吃瓜 (51cg1.com)：二级分类（6 分组 26 子分类，与官网 sidebar 一致）+ 首页/分类/搜索/详情/播放；封面 CDN 为 AES-128-CBC 密文，脚本内解密；只用主域，不再走发布页
 
  *
@@ -57,7 +57,7 @@ const http = require('http');
 const zlib = require('zlib');
 const crypto = require('crypto');
 
-const SITE_API = (process.env.SITE_API || 'https://chigua.com').replace(/\/+$/, '');
+const SITE_API = (process.env.CHIGUA_COM_API || 'https://chigua.com').replace(/\/+$/, '');
 const USER_AGENT =
   process.env.CHIGUA_UA ||
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';

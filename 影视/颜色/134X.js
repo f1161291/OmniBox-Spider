@@ -1,6 +1,6 @@
 /**
  * @name 134X
- * @version 1.2.3
+ * @version 1.2.4
  * @description 134x.com 采集源（OmniBox Spider，X/Twitter 长视频聚合）
  // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/134X.js
  */
@@ -15,7 +15,7 @@ catch (_) { runner = { run() {} }; }
 const https = require('https');
 const http = require('http');
 
-const SITE_API = (process.env.SITE_API || 'https://134x.com').replace(/\/+$/, '');
+const SITE_API = (process.env['134X_COM_API'] || 'https://134x.com').replace(/\/+$/, '');
 const USER_AGENT = process.env.NINETYONE_UA || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const PREFIX = '[134X]';
 const PAGE_SIZE = 20;

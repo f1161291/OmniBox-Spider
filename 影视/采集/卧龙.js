@@ -1,7 +1,7 @@
 // @name 卧龙
 // @author lampon
 // @description 
-// @version 1.0.2
+// @version 1.0.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/卧龙.js
 
 /**
@@ -45,7 +45,7 @@ const OmniBox = require("omnibox_sdk");
 // 采集站 API 地址（优先使用环境变量，如果没有则使用默认值）
 // 例如：https://example.com/api.php/provide/vod/
 const SITE_API =
-  process.env.SITE_API || "https://collect.wolongzyw.com/api.php/provide/vod/";
+  process.env.COLLECT_WOLONGZYW_COM_API || "https://collect.wolongzyw.com/api.php/provide/vod/";
 
 // 弹幕 API 地址（优先使用环境变量，如果没有则使用默认值）
 // 例如：https://danmu.example.com

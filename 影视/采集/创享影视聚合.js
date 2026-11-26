@@ -1,7 +1,7 @@
 // @name 创享影视聚合
 // @author 宝宝巴士
 // @description 由 TVBox 订阅 https://ys.cxkjg.cn/api/provide/vod 转换的 OmniBox 源：订阅里的 12 个站点自动成为分站分类，聚合检索漏片时自动补扫分站，多线路播放带失效线路自动回退
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/创享影视聚合.js
 
 const OmniBox = require("omnibox_sdk");
@@ -20,7 +20,7 @@ const SUBSCRIPTION_URL = String(
 ).trim();
 
 // 采集站 API 基址。默认从订阅第一条站点推导，也可用 SITE_API 直接写死。
-const SITE_API = String(process.env.SITE_API || "").trim();
+const SITE_API = String(process.env.SITE_API_17 || "").trim();
 
 // 聚合检索结果偏少时，是否补扫分站（默认开，宿主侧感知为"搜得更全"，代价是首屏多几个请求）
 const SUB_SEARCH_ENABLED = String(process.env.CXKJG_SUB_SEARCH || "1") !== "0";
