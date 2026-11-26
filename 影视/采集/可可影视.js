@@ -1,6 +1,6 @@
 /**
  * @name 可可影视
- * @version 1.0.1
+ * @version 1.0.2
  * @author omnibox-spider
  * @description 可可影视（kkys14.com / kekedy.tv）OmniBox Spider：cdndefend 850 JS 挑战动态解算 + 封面走 RDUL 资源域名（主站 /vod1 图片 850）+ 前台 /channel /show /detail /play /search 全链路 + 实时搜索 t token 二次取词 + live 筛选 href + playSource(xgplayer) 直链解析 + 三段式播放兜底 + 页面级缓存 + 刮削/弹幕/播放记录增强链路
  * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/可可影视.js
@@ -8,7 +8,7 @@
 
 // 【环境变量】
 //  SITE_API              主站基址，默认 https://www.kkys14.com（复用通用采集站变量；站点常换域名，换壳时只改这里）
-//  SITE_HOSTS            逗号分隔备用基址（沿用仓库既有容灾变量）
+//  KKYS_HOSTS          逗号分隔备用基址
 //  SITE_UA               自定义 User-Agent（可选）
 //  SITE_COOKIE           站点额外 Cookie（可选，勿与 JS 挑战 cookie 混用）
 //  SITE_TIMEOUT          单请求超时毫秒，默认 15000
@@ -17,9 +17,9 @@
 //  SITE_SEARCH_TOKEN_TTL 搜索 t token 缓存秒数，默认 300
 //  SITE_PLAY_MODE        auto | direct | sniff | parse，默认 auto
 //  SITE_DANMAKU_WAIT_MS  弹幕匹配最长等待毫秒，默认 1200（超时不阻塞启播）
-//  SITE_IMG_HOST         封面资源域名，默认从站点 rdul.js 动态读取并自动测速选活（可手动覆盖）
-//  SITE_IMG_HOSTS        逗号分隔的封面资源域名候选（优先于自动发现）
-//  SITE_IMG_PROXY        可选：封面代理前缀，最终 URL = 前缀 + 原始图片 URL（兜底用）
+//  KKYS_IMG_HOST       封面资源域名，默认从站点 rdul.js 动态读取并自动测速选活（可手动覆盖）
+//  KKYS_IMG_HOSTS      逗号分隔的封面资源域名候选（优先于自动发现）
+//  KKYS_IMG_PROXY      可选：封面代理前缀，最终 URL = 前缀 + 原始图片 URL（兜底用）
 //  FLARESOLVERR_URL / SITE_FLARESOLVERR_URL  可选：850 挑战解算失败时的 FlareSolverr 兜底（有值才启用）
 //  SITE_FLARE_TTL        FlareSolverr 页面缓存秒数，默认 3600
 
@@ -63,9 +63,9 @@ const PLACEHOLDER_RE = /logo_placeholder|noneCoverImg|wkcyvs\.cn\/vod_pc_static_
 // 主站 www.kkys14.com 对 /vod1/... 图片请求直接返回 850 挑战页（即便带 cdndefend cookie 也是挑战页，图片端不走 cookie 校验）。
 // 真实封面挂站点 rdul.js 的 window.RDUL 资源域名（vres.wkcyvs.cn 等），裸请求即 200。
 const DEFAULT_IMG_HOSTS = ['https://vres.wkcyvs.cn', 'https://103.39.111.180:51050'];
-const IMG_HOST_OVERRIDE = normalizeHost(process.env.SITE_IMG_HOST || '');
-const IMG_HOSTS_OVERRIDE = String(process.env.SITE_IMG_HOSTS || '').split(',').map(normalizeHost).filter(Boolean);
-const IMG_PROXY = String(process.env.SITE_IMG_PROXY || '').trim().replace(/\/+$/, '');
+const IMG_HOST_OVERRIDE = normalizeHost(process.env.KKYS_IMG_HOST || '');
+const IMG_HOSTS_OVERRIDE = String(process.env.KKYS_IMG_HOSTS || '').split(',').map(normalizeHost).filter(Boolean);
+const IMG_PROXY = String(process.env.KKYS_IMG_PROXY || '').trim().replace(/\/+$/, '');
 // 同步默认值保证首屏立刻可用；后台再从 rdul.js 探测并更新为最快可用域名。
 let ACTIVE_IMG_HOST = IMG_HOST_OVERRIDE || IMG_HOSTS_OVERRIDE[0] || DEFAULT_IMG_HOSTS[0];
 let IMG_HOST_INITED = false;
@@ -79,7 +79,7 @@ function normalizeHost(s) {
 const SITE_API = normalizeHost(process.env.SITE_API || DEFAULT_HOST);
 const HOSTS = Array.from(new Set([
   SITE_API,
-  ...String(process.env.SITE_HOSTS || '').split(',').map(normalizeHost).filter(Boolean),
+  ...String(process.env.KKYS_HOSTS || '').split(',').map(normalizeHost).filter(Boolean),
 ])).filter(Boolean);
 const CONFIG_HOSTS = HOSTS.slice();
 let PREFERRED = 0;

@@ -1,11 +1,11 @@
 // @name 爱看机器人
-// @version 1.0.5
+// @version 1.0.6
 // @description 爱看机器人 ikanbot.com 采集源（OmniBox Spider）：首页/分类/榜单/搜索 + /api/getResN 线路接口 + get_tks 令牌还原 + 电影/剧集分集 + 页面级缓存 + 多基址容灾
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/解析/ikanbot.js
 //
 // 【环境变量】
 //  SITE_API        主站基址，默认 https://www1.ikanbot.com（复用通用采集站变量）
-//  SITE_HOSTS      逗号分隔备用基址（沿用仓库既有容灾变量）
+//  IKANBOT_HOSTS   逗号分隔备用基址
 //  SITE_UA         自定义 User-Agent（沿用仓库既有变量）
 //  SITE_COOKIE     站点 Cookie（沿用仓库既有变量）
 //  SITE_TIMEOUT    单请求超时毫秒，默认 15000（沿用仓库既有变量）
@@ -18,7 +18,7 @@
 //                  raw   ：完全不改，返回站点原始 URL（等同 1.0.0 行为）
 //  SITE_IMG_CONCURRENCY  inline 模式图片并发数，默认 12
 //  SITE_IMG_TIMEOUT      inline 模式单图超时毫秒，默认 3000
-//  SITE_IMG_PROXY        可选：封面代理前缀，最终 URL = 前缀 + 原始图片 URL
+//  IKANBOT_IMG_PROXY  可选：封面代理前缀，最终 URL = 前缀 + 原始图片 URL
 //                        （同仓库 网飞猫.js 约定；宿主自带图片代理时用，覆盖 inline 输出）
 //  说明：除 SITE_IMG_* 外全部复用仓库既有 SITE_* 命名；inline 只抓豆瓣图，不会碰
 //        pic.youkupic.com 这类会整批 ECONNRESET 的采集图床。
@@ -52,11 +52,11 @@ const IMG_MODE = ['inline', 'url', 'proxy', 'raw'].includes(String(process.env.S
 const IMG_CONCURRENCY = Math.max(1, Math.min(24, parseInt(process.env.SITE_IMG_CONCURRENCY || '12', 10) || 12));
 const IMG_TIMEOUT = Math.max(500, parseInt(process.env.SITE_IMG_TIMEOUT || '3000', 10) || 3000);
 // 同仓库 网飞猫.js 的既有约定：宿主自带图片代理时，封面 URL = 前缀 + 原始图片 URL。
-const IMG_PROXY = String(process.env.SITE_IMG_PROXY || '').trim().replace(/\/+$/, '');
+const IMG_PROXY = String(process.env.IKANBOT_IMG_PROXY || '').trim().replace(/\/+$/, '');
 
 const PRIMARY_API = (process.env.SITE_API || 'https://www1.ikanbot.com').replace(/\/+$/, '');
 const HOSTS = (() => {
-  const fromEnv = String(process.env.SITE_HOSTS || '')
+  const fromEnv = String(process.env.IKANBOT_HOSTS || '')
     .split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
   return Array.from(new Set([PRIMARY_API, ...fromEnv, 'https://ikanbot.com', 'https://www.ikanbot.com']));
 })();
@@ -191,7 +191,7 @@ async function inlineDoubanImage(pic, ttl) {
 }
 
 // 批量内联：限并发 IMG_CONCURRENCY（默认 12），实测首页 24 张约 0.3s。
-// 若配置了 SITE_IMG_PROXY（宿主自带图片代理），统一改为「前缀 + 原始 URL」，
+// 若配置了 IKANBOT_IMG_PROXY（宿主自带图片代理），统一改为「前缀 + 原始 URL」，
 // 与仓库 网飞猫.js 保持一致，且零额外网络请求。
 async function attachImages(list, ttl) {
   if (!Array.isArray(list) || !list.length) return list;

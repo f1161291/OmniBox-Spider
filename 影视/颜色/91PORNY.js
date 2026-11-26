@@ -1,5 +1,5 @@
 // @name 91PORNY
-// @version 1.1.1
+// @version 1.1.2
 // @author omnibox-spider
 // @description 91porny.com（九色/91PORNY）采集源：自拍 /video、蝌蚪 /videos、精选 /vod 三频道 + 14 个自拍分类 + 蝌蚪分类 + 搜索分页；详情页 video[data-src] 直取签名 m3u8/mp4（viewhd 自动规范化为 view 避开 VIP 预告片）；列表广告卡过滤、分页页码/总数解析、短 TTL 缓存、直链→sniff→parse=1 三段式播放兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91PORNY.js
@@ -23,7 +23,7 @@
  * 6) data-src 里的 & 被写成 &amp;，必须 decodeHTML 后再返回；带 query 的 m3u8/mp4 一律 parse=0。
  *
  * 【环境变量】（沿用仓库既有命名优先）
- *  PORNY_HOST / SITE_HOSTS   站点基址，默认 https://91porny.com；SITE_HOSTS 逗号分隔可容灾
+ *  PORNY_HOSTS / PORNY_HOST  站点基址，默认 https://91porny.com；PORNY_HOSTS 逗号分隔可容灾
  *  NINETYONE_UA              自定义 UA（与同目录 91Porn.js 共用）
  *  NINETYONE_COOKIE          手动指定 Cookie（可选，脚本也会自动收 JSESSIONID）
  *  PORNY_CACHE_TTL           列表页缓存秒数，默认 300
@@ -69,7 +69,7 @@ function logE(m) { safeLog('error', m); }
 // ==================== 配置区域 ====================
 const DEFAULT_HOST = 'https://91porny.com';
 const HOSTS = (() => {
-  const raw = String(process.env.SITE_HOSTS || process.env.PORNY_HOST || DEFAULT_HOST);
+  const raw = String(process.env.PORNY_HOSTS || process.env.PORNY_HOST || DEFAULT_HOST);
   const list = raw.split(/[,;]/).map(s => s.trim().replace(/\/+$/, '')).filter(Boolean)
     .map(s => (/^https?:\/\//i.test(s) ? s : `https://${s}`));
   return Array.from(new Set(list.length ? list : [DEFAULT_HOST]));
