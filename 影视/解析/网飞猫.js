@@ -1,13 +1,13 @@
 /**
  * @name 网飞猫
- * @version 1.1.4
+ * @version 1.1.5
  * @author omnibox-spider
  * @description 网飞猫（ncat22.com / ncat1.app）OmniBox Spider：cdndefend 850 JS 挑战动态解算 + 封面改用 RDUL 资源域名（主站 /vod1 图片 403）+ 前台 /channel /show /detail /play /search 全链路 + 实时搜索 t token + live 筛选 href + playSource 直链解析 + 三段式播放兜底 + 页面级缓存
  * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/解析/网飞猫.js
  */
 
 // 【环境变量】
-//  SITE_API            主站基址，默认 https://www.ncat22.com（复用通用采集站变量）
+//  WFM_API             主站基址，默认 https://www.ncat22.com（本站专属；不再读通用 SITE_API）
 //  WFM_HOSTS           逗号分隔备用基址
 //  SITE_UA             自定义 User-Agent（可选）
 //  SITE_COOKIE         站点额外 Cookie（可选，勿与 JS 挑战 cookie 混用）
@@ -75,7 +75,8 @@ function normalizeHost(s) {
   if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
   return v;
 }
-const SITE_API = normalizeHost(process.env.SITE_API || DEFAULT_HOST);
+// 只用专属变量 WFM_API：通用 SITE_API 被 73 个采集站共用，给本站配置时会同时污染其它源
+const SITE_API = normalizeHost(process.env.WFM_API || DEFAULT_HOST);
 const HOSTS = Array.from(new Set([
   SITE_API,
   ...String(process.env.WFM_HOSTS || '').split(',').map(normalizeHost).filter(Boolean),
