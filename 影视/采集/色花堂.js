@@ -1,7 +1,7 @@
 // @name 色花堂
 // @author OmniBox
 // @description 色花堂（18sht.com）：MacCMS 风格前台，HTML 卡片取列表，详情 div#mse[data-url] 取 m3u8 直链（parse=0）。封面 new2.qnlycc.cn AES 加密图内联 data URI（兼容 OK影视）。分类/搜索/分页/详情全通。
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/色花堂.js
 // @dependencies axios, crypto
 /**
@@ -147,19 +147,67 @@ function parseList(html) {
   return out;
 }
 
-// 官网导航分类（固定，与首页一致）
+// 官网导航分类（顶层大类，与首页一致）
 const CLASSES = [
-  { type_id: 'video', type_name: '视频推荐' },
-  { type_id: 'video/hd', type_name: '高清精选' },
-  { type_id: 'video/original', type_name: '原创自拍' },
-  { type_id: 'video/now-hot', type_name: '当前热门' },
-  { type_id: 'video/month-hot', type_name: '本月热门' },
-  { type_id: 'video/new-update', type_name: '最新更新' },
-  { type_id: 'moviesets', type_name: '精选合集' },
+  { type_id: 'video', type_name: '全部视频' },
+  { type_id: 'heiliao-chigua', type_name: '黑料吃瓜' },
   { type_id: 'av', type_name: '日本AV' },
   { type_id: 'duanju', type_name: 'AI短剧' },
-  { type_id: 'heiliao-chigua', type_name: '黑料吃瓜' },
+  { type_id: 'moviesets', type_name: '精选合集' },
+  { type_id: 'tag', type_name: '热门标签' },
+  { type_id: 'novels', type_name: '成人小说' },
 ];
+
+// 二级子分类（官网可见项完整补齐，value 为相对站点根的路径）
+const SUBCATEGORIES = {
+  video: [
+    ['全部', ''], ['热门排行榜', 'video/now-month-hot'], ['最近更新', 'video/new-update'],
+    ['当前热门', 'video/now-hot'], ['高清精选', 'video/hd'], ['原创自拍', 'video/original'],
+    ['本月收藏', 'video/now-month-collect'], ['本月评论', 'video/now-month-comment'],
+    ['本月热门', 'video/month-hot'], ['十分钟', 'video/ten_minutes'], ['二十分钟', 'video/twenty_minutes'],
+    ['最大合集', 'video/max-collect'],
+  ],
+  'heiliao-chigua': [
+    ['全部', ''], ['今日吃瓜', 'heiliao-chigua/jinrichigua'], ['学生校园', 'heiliao-chigua/xueshengxiaoyuan'],
+    ['明星黑料', 'heiliao-chigua/mingxingheiliao'], ['网红黑料', 'heiliao-chigua/wanghongheiliao'],
+    ['吃瓜新闻', 'heiliao-chigua/chiguaxinwen'], ['伦理道德', 'heiliao-chigua/伦理道德'],
+    ['每日大赛', 'heiliao-chigua/meiridasai'],
+  ],
+  av: [
+    ['全部', 'av'], ['角色扮演', 'av/theme/2'], ['中文字幕', 'av/theme/5'], ['制服诱惑', 'av/theme/6'],
+    ['主奴调教', 'av/theme/7'], ['凌辱强暴', 'av/theme/8'], ['无码高清', 'av/theme/12'],
+  ],
+  duanju: [
+    ['全部', 'duanju'], ['成人短剧', 'duanju/chengren-duanju'],
+  ],
+  moviesets: [['全部', 'moviesets']],
+  tag: [
+    ['全部', ''], ['自拍', 'tag/自拍'], ['约炮', 'tag/约炮'], ['内射中出', 'tag/内射'],
+    ['童颜巨乳', 'tag/巨乳'], ['人妻熟女', 'tag/人妻'], ['家庭乱伦', 'tag/家庭乱伦'],
+    ['萝莉少女', 'tag/萝莉'], ['SM调教', 'tag/调教'], ['丝袜美腿', 'tag/丝袜'],
+    ['黑料', 'tag/黑料'], ['学生妹', 'tag/学生妹'], ['直播', 'tag/直播'], ['清纯', 'tag/清纯'],
+    ['KiKi', 'tag/JK'], ['原创', 'tag/原创'],
+  ],
+  novels: [
+    ['都市激情', 'novels/dushi-jiqing/new'], ['校园之恋', 'novels/xiaoyuan-zhilian/new'],
+    ['人妻熟女', 'novels/renqi-shunv/new'], ['家庭乱伦', 'novels/jiating-luanlun/new'],
+    ['经验故事', 'novels/jingyan-gushi/new'], ['真实体验', 'novels/zhenshi-tiyan/new'],
+  ],
+};
+function buildCategoryFilters() {
+  const f = {};
+  for (const [id, subs] of Object.entries(SUBCATEGORIES)) {
+    f[id] = [{ key: 'sub', name: '子分类', init: '', value: subs.map(([name, value]) => ({ name, value })) }];
+  }
+  return f;
+}
+function pickSub(params, categoryId) {
+  const src = (params && (params.filters || params.extend || params.ext || params.filter)) || {};
+  let v = src.sub ?? src['子分类'] ?? '';
+  if (Array.isArray(v)) v = v[0];
+  if (v && typeof v === 'object') v = v.value ?? v.v ?? '';
+  return String(v || '').trim();
+}
 
 // 进程内缓存
 const mem = new Map();
@@ -179,25 +227,63 @@ async function home(params, context) {
       if (list.length) { memSet('home:list', list); await cacheSet('home', list, CACHE_TTL); }
     }
     await resolveCovers(list);
-    log('info', `home 返回 class=${CLASSES.length} list=${list.length}`);
-    return { class: CLASSES, list, filters: {} };
+    const filters = buildCategoryFilters();
+    log('info', `home 返回 class=${CLASSES.length} list=${list.length} filters=${Object.keys(filters).length}`);
+    return { class: CLASSES, list, filters };
   } catch (e) { log('error', `home 失败: ${e.message}`); return { class: [], list: [] }; }
 }
 
+// 通用文章卡片解析（黑料/短剧/小说等图文分类：a[href=/{slug}/{数字}/] + 文本/图片）
+function parseArticleList(html, slug) {
+  const out = [];
+  const seen = new Set();
+  const re = new RegExp(`<a[^>]*href="/${slug}/(\\d+)/"[^>]*>([\\s\\S]{0,600}?)</a>`, 'gi');
+  let m;
+  while ((m = re.exec(html))) {
+    const id = m[1];
+    if (seen.has(id)) continue;
+    const block = m[2];
+    const name = clean(block);
+    if (!name || name.length < 3) continue;
+    const pic = decodeHtml((block.match(/(?:data-src|data-original|src)="([^"]+)"/i) || [])[1] || '');
+    seen.add(id);
+    out.push({ vod_id: `${slug}:${id}`, vod_name: name.slice(0, 80), vod_pic: pic ? absUrl(pic) : '', vod_remarks: '' });
+  }
+  return out;
+}
+
 async function category(params, context) {
-  const id = String((params && (params.categoryId ?? params.t ?? params.id ?? params.type_id)) || '').replace(/^\/+|\/+$/g, '');
+  const rawId = String((params && (params.categoryId ?? params.t ?? params.id ?? params.type_id)) || '').replace(/^\/+|\/+$/g, '');
   const page = Math.max(1, Number((params && (params.page ?? params.pg)) || 1) || 1);
-  log('info', `category 入口 id=${id} page=${page}`);
-  if (!id) return { page: 1, pagecount: 0, total: 0, list: [] };
+  const sub = pickSub(params, rawId);
+  log('info', `category 入口 id=${rawId} sub=${sub} page=${page}`);
+  if (!rawId) return { page: 1, pagecount: 0, total: 0, list: [] };
   try {
-    const path = page <= 1 ? `/${id}/` : `/${id}/page/${page}/`;
+    // 解析目标路径：优先用 filters.sub（子分类路径），否则用 id 本身
+    let route = sub || rawId;
+    // id 是顶层大类且 sub 为空时，取该大类的第一个有内容的默认路径
+    if (!sub && SUBCATEGORIES[rawId]) {
+      const first = SUBCATEGORIES[rawId].find(([, v]) => v);
+      route = first ? first[1] : rawId;
+    }
+    if (route === 'video') route = 'video';
+    const path = page <= 1 ? `/${route}/` : `/${route}/page/${page}/`;
     const html = await fetchHtml(path);
-    const list = parseList(html);
+    let list = parseList(html);
+    // 视频卡片为空时，尝试图文文章卡片（黑料/短剧/小说）
+    if (!list.length) {
+      const seg = route.split('/')[0];
+      list = parseArticleList(html, seg);
+    }
+    // AV 等纯导航页无任何内容卡片：回退视频推荐列表，避免空页
+    if (!list.length && (route.startsWith('av/') || route === 'av')) {
+      list = parseList(await fetchHtml('/video/'));
+      log('info', `[category] ${route} 无内容卡片，回退视频推荐 ${list.length} 条`);
+    }
     await resolveCovers(list);
-    // 末页判断：只认真实下一页链接
     const hasNext = /href="\/[^"]*\/page\/\d+\/"/i.test(html);
-    log('info', `category 返回 id=${id} page=${page} list=${list.length} hasNext=${hasNext}`);
-    return { page, pagecount: hasNext ? page + 1 : page, total: list.length, list };
+    log('info', `category 返回 id=${rawId} route=${route} page=${page} list=${list.length} hasNext=${hasNext}`);
+    return { page, pagecount: hasNext ? page + 1 : page, total: list.length, list, filters: { [rawId]: buildCategoryFilters()[rawId] || [] } };
   } catch (e) { log('error', `category 失败: ${e.message}`); return { page, pagecount: 0, total: 0, list: [] }; }
 }
 
