@@ -1,7 +1,7 @@
 // @name 17c
 // @author OmniBox
 // @description 17c（17c.com 最新落地站）：多域名池 + AES-128-CBC 加密接口。首页/分类/搜索/详情/播放全通；分类树与所有接口响应均 AES 解密，播放取 m3u8 直链（parse=0，需站点 Referer）。
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/17c.js
 // @dependencies axios, crypto
 /**
@@ -185,6 +185,64 @@ function posterUrl(poster) {
   return base.replace(/\/+$/, '') + (p.startsWith('/') ? p : '/' + p);
 }
 
+// ===== 封面内联：post.js 是 AES 加密图（与 API 同 KEY/IV），解密转 data URI（兼容 OK影视）=====
+function sniffImage(buf) {
+  if (!buf || buf.length < 12) return '';
+  if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.slice(0, 3).toString('ascii') === 'GIF') return 'image/gif';
+  if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return '';
+}
+const coverCache = new Map();
+async function resolveCover(url) {
+  if (!url || !/^https?:/i.test(url)) return url || '';
+  if (coverCache.has(url)) return coverCache.get(url);
+  try {
+    const res = await axios.get(url, {
+      timeout: 8000, responseType: 'arraybuffer', validateStatus: () => true,
+      headers: { 'User-Agent': UA, Referer: HOSTS[preferred] + '/' },
+    });
+    let buf = res.data;
+    if (res.status === 200 && buf) {
+      if (!Buffer.isBuffer(buf)) {
+        if (buf.buffer && typeof buf.byteLength === 'number') buf = Buffer.from(buf.buffer, buf.byteOffset || 0, buf.byteLength);
+        else if (Array.isArray(buf)) buf = Buffer.from(buf);
+        else buf = Buffer.from(String(buf));
+      }
+      // 明文图直接内联；密文用 API 同 KEY/IV 解密
+      let out = buf, mime = sniffImage(buf);
+      if (!mime) {
+        try {
+          const d = crypto.createDecipheriv('aes-128-cbc', Buffer.from(AES_KEY, 'utf8'), Buffer.from(AES_IV, 'utf8'));
+          out = Buffer.concat([d.update(buf), d.final()]);
+          mime = sniffImage(out);
+        } catch (_) {}
+      }
+      if (mime && out.length > 100) {
+        const uri = `data:${mime};base64,${out.toString('base64')}`;
+        coverCache.set(url, uri);
+        return uri;
+      }
+    }
+  } catch (_) {}
+  coverCache.set(url, url);
+  return url;
+}
+async function resolveCovers(list) {
+  if (!Array.isArray(list) || !list.length) return list;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < list.length) {
+      const i = cursor++;
+      const it = list[i];
+      if (it && it.vod_pic) { try { it.vod_pic = await resolveCover(it.vod_pic); } catch (_) {} }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, list.length) }, () => worker()));
+  return list;
+}
+
 function mapRecord(r) {
   if (!r || !r.viewKey) return null;
   return {
@@ -213,6 +271,7 @@ async function home(params, context) {
       if (list.length) { memSet('home:list', list); await cacheSet('home', list, CACHE_TTL); }
     }
     log('info', `home 返回 class=${classes.length} list=${list.length}`);
+    await resolveCovers(list);
     return { class: classes, list, filters: {} };
   } catch (e) { log('error', `home 失败: ${e.message}`); return { class: [], list: [] }; }
 }
@@ -228,6 +287,7 @@ async function category(params, context) {
     const records = (data && (data.records || (data.data && data.data.records))) || [];
     const list = records.map(mapRecord).filter(Boolean);
     const pageCount = Number((data && (data.pageCount ?? (data.data && data.data.pageCount))) || 0);
+    await resolveCovers(list);
     log('info', `category 返回 cid=${cid} page=${page} list=${list.length} pageCount=${pageCount}`);
     return { page, pagecount: pageCount || (list.length ? page + 1 : page), total: pageCount ? pageCount * (Number(data.pageSize) || 18) : list.length, list };
   } catch (e) { log('error', `category 失败: ${e.message}`); return { page, pagecount: 0, total: 0, list: [] }; }
@@ -244,6 +304,7 @@ async function search(params, context) {
     const records = (data && (data.records || (data.data && data.data.records))) || [];
     const list = records.map(mapRecord).filter(Boolean);
     const pageCount = Number((data && (data.pageCount ?? (data.data && data.data.pageCount))) || 0);
+    await resolveCovers(list);
     log('info', `search 返回 kw=${kw} list=${list.length}`);
     return { page, pagecount: pageCount || (list.length ? page + 1 : page), total: list.length, list };
   } catch (e) { log('error', `search 失败: ${e.message}`); return { page: 1, pagecount: 0, total: 0, list: [] }; }
@@ -283,6 +344,7 @@ async function detail(params, context) {
       type_name: '',
       vod_play_sources: sources.length ? sources : undefined,
     };
+    if (item.vod_pic) { try { item.vod_pic = await resolveCover(item.vod_pic); } catch (_) {} }
     log('info', `detail 返回 vid=${vid} title=${clean(d.title).slice(0, 20)} sources=${sources.length}`);
     return { list: [item] };
   } catch (e) { log('error', `detail 失败: ${e.message}`); return { list: [] }; }
