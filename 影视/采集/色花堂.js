@@ -1,7 +1,7 @@
 // @name 色花堂
 // @author OmniBox
 // @description 色花堂（18sht.com）：MacCMS 风格前台，HTML 卡片取列表，详情 div#mse[data-url] 取 m3u8 直链（parse=0）。封面 new2.qnlycc.cn AES 加密图内联 data URI（兼容 OK影视）。分类/搜索/分页/详情全通。
-// @version 1.0.2
+// @version 1.0.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/色花堂.js
 // @dependencies axios, crypto
 /**
@@ -185,6 +185,20 @@ const SUBCATEGORIES = {
     ['每日大赛', 'heiliao-chigua/meiridasai'],
   ],
 };
+// 解析页面分页信息：兼容相对/绝对 URL。
+// 注意：本站分页栏多为 JS 渲染，HTML 里通常只有 page/2 一个链接，无法据此得出总页数；
+// 因此策略是「本页有数据 => 还有下一页」，并给一个足够大的上限，让宿主可以持续翻页。
+const MAX_PAGES = 9999;
+function parsePagination(html, currentPage, hasData) {
+  let maxLink = 0;
+  const re = /href="(?:https?:\/\/[^"]*)?\/[^"]*?\/page\/(\d+)\//gi;
+  let m;
+  while ((m = re.exec(html))) { const n = Number(m[1]); if (n > maxLink) maxLink = n; }
+  if (!hasData) return { pagecount: currentPage, maxLink };
+  const pagecount = Math.max(maxLink > currentPage ? maxLink : currentPage + 1, currentPage + 1);
+  return { pagecount: Math.min(pagecount, MAX_PAGES), maxLink };
+}
+
 function buildCategoryFilters() {
   const f = {};
   for (const [id, subs] of Object.entries(SUBCATEGORIES)) {
@@ -267,9 +281,9 @@ async function category(params, context) {
       log('info', `[category] ${route} 无内容卡片，回退视频推荐 ${list.length} 条`);
     }
     await resolveCovers(list);
-    const hasNext = /href="\/[^"]*\/page\/\d+\/"/i.test(html);
-    log('info', `category 返回 id=${rawId} route=${route} page=${page} list=${list.length} hasNext=${hasNext}`);
-    return { page, pagecount: hasNext ? page + 1 : page, total: list.length, list, filters: { [rawId]: buildCategoryFilters()[rawId] || [] } };
+    const pg = parsePagination(html, page, list.length > 0);
+    log('info', `category 返回 id=${rawId} route=${route} page=${page} list=${list.length} pagecount=${pg.pagecount}`);
+    return { page, pagecount: pg.pagecount, total: list.length, list, filters: { [rawId]: buildCategoryFilters()[rawId] || [] } };
   } catch (e) { log('error', `category 失败: ${e.message}`); return { page, pagecount: 0, total: 0, list: [] }; }
 }
 
@@ -283,9 +297,9 @@ async function search(params, context) {
     const html = await fetchHtml(path);
     const list = parseList(html);
     await resolveCovers(list);
-    const hasNext = /href="\/video\/search\/[^"]*\/page\/\d+\/"/i.test(html);
-    log('info', `search 返回 kw=${kw} list=${list.length}`);
-    return { page, pagecount: hasNext ? page + 1 : page, total: list.length, list };
+    const pg = parsePagination(html, page, list.length > 0);
+    log('info', `search 返回 kw=${kw} list=${list.length} pagecount=${pg.pagecount}`);
+    return { page, pagecount: pg.pagecount, total: list.length, list };
   } catch (e) { log('error', `search 失败: ${e.message}`); return { page: 1, pagecount: 0, total: 0, list: [] }; }
 }
 
