@@ -1,6 +1,6 @@
 /**
  * @name 网飞猫
- * @version 1.1.7
+ * @version 1.1.8
  * @author omnibox-spider
  * @description 网飞猫（ncat22.com / ncat1.app）OmniBox Spider：cdndefend 850 JS 挑战动态解算 + 封面改用 RDUL 资源域名（主站 /vod1 图片 403）+ 前台 /channel /show /detail /play /search 全链路 + 实时搜索 t token + live 筛选 href + playSource 直链解析 + 三段式播放兜底 + 页面级缓存
 
@@ -62,7 +62,7 @@ const FLARE_TTL = Number(process.env.SITE_FLARE_TTL || 3600);
 const PLACEHOLDER_RE = /logo_placeholder|noneCoverImg|vkcyvs\.cn\/vod_pc_static_ncat\/images\/p\//i;
 // 主站 www.ncat22.com 对 /vod1/... 图片请求直接 403（带 850 挑战 cookie 也一样）。
 // 真实封面挂站点 rdul.js 的 window.RDUL 资源域名（vres.wkcyvs.cn 等），裸请求即 200。
-const DEFAULT_IMG_HOSTS = ['https://vres.wkcyvs.cn', 'https://103.39.111.180:51050', 'https://103.39.111.184:51050'];
+const DEFAULT_IMG_HOSTS = ['https://vres.jzxjlj.com', 'https://vres.wkcyvs.cn', 'https://103.39.111.180:51050'];
 const IMG_HOST_OVERRIDE = normalizeHost(process.env.WFM_IMG_HOST || '');
 const IMG_HOSTS_OVERRIDE = String(process.env.WFM_IMG_HOSTS || '').split(',').map(normalizeHost).filter(Boolean);
 const IMG_PROXY = String(process.env.WFM_IMG_PROXY || '').trim().replace(/\/+$/, '');
@@ -444,7 +444,7 @@ async function initImgHost() {
       return ACTIVE_IMG_HOST;
     }
     // rdul.js 在静态域名上，无需 850 cookie
-    const res = await httpRequestRaw('https://vf.wkcyvs.cn/vod_pc_static_ncat/js/rdul.js?ver=123456666', { timeout: 6000 });
+    const res = await httpRequestRaw('https://vf.jzxjlj.com/vod_pc_static_ncat/js/rdul.js?ver=aabdssds', { timeout: 6000 });
     const found = parseRdulHosts(res.body);
     let hosts = found.length ? found : DEFAULT_IMG_HOSTS.slice();
     logI(`[img] rdul.js 解析资源域名=${JSON.stringify(hosts)} status=${res.statusCode}`);

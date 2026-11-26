@@ -1,6 +1,6 @@
 /**
  * @name 可可影视
- * @version 1.0.5
+ * @version 1.0.6
  * @author omnibox-spider
  * @description 可可影视（kkys14.com / kekedy.tv）OmniBox Spider：cdndefend 850 JS 挑战动态解算 + 封面走 RDUL 资源域名（主站 /vod1 图片 850）+ 前台 /channel /show /detail /play /search 全链路 + 实时搜索 t token 二次取词 + live 筛选 href + playSource(xgplayer) 直链解析 + 三段式播放兜底 + 页面级缓存 + 刮削/弹幕/播放记录增强链路
 
@@ -63,7 +63,7 @@ const FLARE_TTL = Number(process.env.SITE_FLARE_TTL || 3600);
 const PLACEHOLDER_RE = /logo_placeholder|noneCoverImg|wkcyvs\.cn\/vod_pc_static_kkdy\/images\/p\//i;
 // 主站 www.kkys14.com 对 /vod1/... 图片请求直接返回 850 挑战页（即便带 cdndefend cookie 也是挑战页，图片端不走 cookie 校验）。
 // 真实封面挂站点 rdul.js 的 window.RDUL 资源域名（vres.wkcyvs.cn 等），裸请求即 200。
-const DEFAULT_IMG_HOSTS = ['https://vres.wkcyvs.cn', 'https://103.39.111.180:51050'];
+const DEFAULT_IMG_HOSTS = ['https://vres.jzxjlj.com', 'https://vres.wkcyvs.cn', 'https://103.39.111.180:51050'];
 const IMG_HOST_OVERRIDE = normalizeHost(process.env.KKYS_IMG_HOST || '');
 const IMG_HOSTS_OVERRIDE = String(process.env.KKYS_IMG_HOSTS || '').split(',').map(normalizeHost).filter(Boolean);
 const IMG_PROXY = String(process.env.KKYS_IMG_PROXY || '').trim().replace(/\/+$/, '');
@@ -478,7 +478,7 @@ async function initImgHost() {
       return ACTIVE_IMG_HOST;
     }
     // rdul.js 在静态域名上，无需 850 cookie
-    const res = await httpRequestRaw('https://vf.wkcyvs.cn/vod_pc_static_kkdy/js/rdul.js?ver=123456666', { timeout: 6000 });
+    const res = await httpRequestRaw('https://vf.jzxjlj.com/vod_pc_static_kkdy/js/rdul.js?ver=aabdssds', { timeout: 6000 });
     const found = parseRdulHosts(res.body);
     let hosts = found.length ? found : DEFAULT_IMG_HOSTS.slice();
     logI(`[img] rdul.js 解析资源域名=${JSON.stringify(hosts)} status=${res.statusCode}`);
