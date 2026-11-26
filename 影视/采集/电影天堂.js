@@ -8,7 +8,7 @@ const OmniBox = require("omnibox_sdk");
 // ==================== 配置区域 ====================
 // 采集站 API 地址（优先使用环境变量，如果没有则使用默认值）
 // 例如：https://example.com/api.php/provide/vod/
-const SITE_API = process.env.CAIJI_DYTTZYAPI_COM_API || "https://caiji.dyttzyapi.com/api.php/provide/vod";
+const SITE_API = process.env.SITE_API || "https://caiji.dyttzyapi.com/api.php/provide/vod";
 // 弹幕 API 地址（优先使用环境变量，如果没有则使用默认值）
 // 例如：https://danmu.example.com
 // 如果为空，则不启用弹幕功能
