@@ -1,9 +1,10 @@
 /**
  * @name 91porn
- * @version 1.5.5
+ * @version 1.5.6
  * @description 91porn.com 采集源（OmniBox Spider，多基址容灾：主站 + 91p618 镜像；列表封面/标题反混淆真值回填）
- * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91Porn.js
+
  */
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91Porn.js
 
 let OmniBox;
 try { OmniBox = require('omnibox_sdk'); }

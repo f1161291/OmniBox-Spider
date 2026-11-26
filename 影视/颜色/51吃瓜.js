@@ -1,8 +1,8 @@
 /**
  * @name 吃瓜
- * @version 1.7.2
+ * @version 1.7.3
  * @description 吃瓜 (51cg1.com)：二级分类（6 分组 26 子分类，与官网 sidebar 一致）+ 首页/分类/搜索/详情/播放；封面 CDN 为 AES-128-CBC 密文，脚本内解密；只用主域，不再走发布页
- * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/51吃瓜.js
+
  *
  * 【环境变量】
  *  SITE_API                  主站点基础地址，默认 https://chigua.com
@@ -26,6 +26,7 @@
  *   5) 刷新时间戳与域名池写入 SDK 持久缓存 chigua:hosts:v1（TTL 30 天），
  *      跨进程/重启不丢；新进程先恢复缓存时间戳再判断间隔，不会重复刷新。
  */
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/51吃瓜.js
 
 let OmniBox;
 try {

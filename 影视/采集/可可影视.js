@@ -1,10 +1,11 @@
 /**
  * @name 可可影视
- * @version 1.0.2
+ * @version 1.0.3
  * @author omnibox-spider
  * @description 可可影视（kkys14.com / kekedy.tv）OmniBox Spider：cdndefend 850 JS 挑战动态解算 + 封面走 RDUL 资源域名（主站 /vod1 图片 850）+ 前台 /channel /show /detail /play /search 全链路 + 实时搜索 t token 二次取词 + live 筛选 href + playSource(xgplayer) 直链解析 + 三段式播放兜底 + 页面级缓存 + 刮削/弹幕/播放记录增强链路
- * @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/可可影视.js
+
  */
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/可可影视.js
 
 // 【环境变量】
 //  SITE_API              主站基址，默认 https://www.kkys14.com（复用通用采集站变量；站点常换域名，换壳时只改这里）
