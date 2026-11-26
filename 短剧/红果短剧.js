@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.3.0：REA 逆向 APK v7.4.5.32(code 74532)，签名基线/UA 从 74332 对齐到 APK 真实版本；放宽 vid 校验以接受 v1_ 加密 ID（APK GetVideoModelRequest.videoId 为 String）。逆向实证：播放端点 /novel/player/multi_video_model/{v1|player/v1}，请求体 snake_case 结构、Playback 签名头(x-khronos/helios/medusa)与枚举(VideoPlatformType.Mixed=1024、DeviceLevel=1/2/3)均已对齐；服务端对匿名身份仍返回空模型（需登录态），非脚本问题。v2.2.6 精简：移除 v3 遗留死代码，压缩头注释。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
-// @version 2.3.0
+// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.4.0：REA 逆向 App video_detail 接口（/novel/player/video_detail/v1），detail 优先用它取完整分集（SSR 仅 3 集付费墙，App 接口实测 586 集全拿到且数字 vid 全部可播），失败回退 SSR。v2.3.0：REA 逆向 APK v7.4.5.32(code 74532)，签名基线/UA 从 74332 对齐到 APK 真实版本；放宽 vid 校验以接受 v1_ 加密 ID（APK GetVideoModelRequest.videoId 为 String）。逆向实证：播放端点 /novel/player/multi_video_model/{v1|player/v1}，请求体 snake_case 结构、Playback 签名头(x-khronos/helios/medusa)与枚举(VideoPlatformType.Mixed=1024、DeviceLevel=1/2/3)均已对齐；服务端对匿名身份仍返回空模型（需登录态），非脚本问题。v2.2.6 精简：移除 v3 遗留死代码，压缩头注释。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
+// @version 2.4.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -2533,6 +2533,67 @@ function playbackRequest(payload, device, apiBase = VIDEO_API) {
   if (cookie) headers.cookie = cookie;
   return { url: signed.url, body, headers, v5: true, ticketOffset: signed.offset };
 }
+
+// v2.4.0（REA 逆向 seriessdk novel/player/video_detail/v1/）：
+// 官网 SSR 详情页对匿名/普通登录只下发前 3 集 vid_list（付费墙），但 App 私有
+// video_detail 接口返回完整 video_list（每条含数字 vid/vid_index/cover/duration），
+// 实测 586 集的整部剧全部拿到，且这些数字 vid 走 playback 模型全部 code:0 非空。
+const APP_VIDEO_DETAIL_APIS = [
+  'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_detail/v1/',
+  'https://api5-normal-lq.fqnovel.com/novel/player/video_detail/v1/',
+  'https://is.snssdk.com/novel/player/video_detail/v1/',
+];
+const appVideoDetailCache = new Map();
+async function appVideoDetail(seriesId) {
+  const id = String(seriesId || '');
+  if (!/^\d+$/.test(id)) return null;
+  const hit = appVideoDetailCache.get(id);
+  if (hit && hit.expires > Date.now()) return hit.data;
+  const device = getDevice();
+  const nc = {
+    app_language: 'zh', app_region: 'CN', sys_language: 'zh-CN', sys_region: 'CN',
+    time_zone: 'Asia/Shanghai', device_dpi: 460, user_agent: PLAYBACK_UA,
+  };
+  const payload = JSON.stringify({
+    series_id: id,
+    video_content_type: 1,
+    biz_param: { device_level: 1, need_all_video_definition: true, video_platform: 1024, disable_video_relate_book: false },
+    novel_common_param: nc,
+  });
+  for (const apiBase of APP_VIDEO_DETAIL_APIS) {
+    try {
+      const signed = playbackRequest(payload, device, apiBase);
+      const res = await httpRequest(signed.url, { method: 'POST', body: signed.body, headers: signed.headers, timeout: 25000 });
+      const j = JSON.parse(res.data);
+      if (j && j.code === 0 && j.data && j.data.video_data) {
+        const vd = j.data.video_data;
+        const list = safeArray(vd.video_list || vd.videoList);
+        if (!list.length) continue;
+        const episodes = list.map((item, idx) => ({
+          vid: text(item.vid || item.video_id || item.id),
+          index: toInt(item.vid_index || item.episode) || idx + 1,
+          cover: text(item.episode_cover || item.cover),
+          duration: toInt(item.duration),
+        })).filter(x => x.vid);
+        const data = {
+          series_id: id,
+          series_name: text(vd.series_title || vd.series_name || vd.title),
+          series_cover: text(vd.series_cover || vd.cover),
+          series_intro: text(vd.series_intro || vd.description || vd.intro),
+          episode_cnt: toInt(vd.episode_cnt || vd.episode_total_cnt) || episodes.length,
+          vid_list: episodes.map(x => x.vid),
+          episodes,
+        };
+        appVideoDetailCache.set(id, { data, expires: Date.now() + SERIES_DETAIL_CACHE_TTL });
+        await log('info', `[hg][app-detail] sid=${id} 完整分集=${episodes.length}（App video_detail）`);
+        return data;
+      }
+    } catch (e) {
+      await log('warn', `[hg][app-detail] ${new URL(apiBase).host} 失败: ${e.message.slice(0, 80)}`);
+    }
+  }
+  return null;
+}
 /** 官方现行 video_tab GET 接口（2026-11 播放恢复路径）：签名 GET，参数在 query，返回 data.video_model_data */
 function videoTabRequest(videoId, device) {
   const base = 'https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/video_tab/multi_video_model/v1/';
@@ -3413,10 +3474,17 @@ async function resolveSeriesEpisode(seriesId, episode) {
     const cachedId = text(videos[episode - 1]?.vid || videos[episode - 1]?.video_id || videos[episode - 1]?.id || videos[episode - 1]);
     if (/^\d+$/.test(cachedId)) return cachedId;
   }
-  const data = await pageData(`${SITE}/detail?series_id=${encodeURIComponent(seriesId)}`);
-  series = seriesFromDetailPage(detailPageFrom(data));
-  videos = safeArray(series.vid_list || series.episodeVids || series.episode_vids);
-  cacheSeriesDetail(seriesId, series);
+  // v2.4.0：缓存无目标集时，先试 App video_detail 拿完整分集（SSR 仅 3 集）。
+  const appDetail = await appVideoDetail(seriesId);
+  if (appDetail && appDetail.vid_list && appDetail.vid_list.length > 3) {
+    cacheSeriesDetail(seriesId, appDetail);
+    videos = appDetail.vid_list;
+  } else {
+    const data = await pageData(`${SITE}/detail?series_id=${encodeURIComponent(seriesId)}`);
+    series = seriesFromDetailPage(detailPageFrom(data));
+    videos = safeArray(series.vid_list || series.episodeVids || series.episode_vids);
+    cacheSeriesDetail(seriesId, series);
+  }
   const video = videos[episode - 1];
   const videoId = text(video?.vid || video?.video_id || video?.id || video);
   // v2.3.0（REA 逆向）：GetVideoModelRequest.videoId 是 String，真实数据含 v1_ 加密 vid，
@@ -3472,11 +3540,19 @@ async function detail(params, context) {
   const list = [];
   for (const id of ids) {
     try {
-      const data = await pageData(`${SITE}/detail?series_id=${encodeURIComponent(id)}`);
-      const fetched = seriesFromDetailPage(detailPageFrom(data));
-      if (!fetched || typeof fetched !== 'object') throw new Error('红果剧集详情为空');
-      cacheSeriesDetail(id, fetched);
-      const series = { ...fetched, series_id: id };
+      // v2.4.0：优先用 App video_detail 接口拿完整分集（SSR 只给 3 集付费墙）。
+      const appDetail = await appVideoDetail(id);
+      let series;
+      if (appDetail && appDetail.vid_list && appDetail.vid_list.length > 3) {
+        series = { ...appDetail, series_id: id, celebrities: [] };
+        cacheSeriesDetail(id, appDetail);
+      } else {
+        const data = await pageData(`${SITE}/detail?series_id=${encodeURIComponent(id)}`);
+        const fetched = seriesFromDetailPage(detailPageFrom(data));
+        if (!fetched || typeof fetched !== 'object') throw new Error('红果剧集详情为空');
+        cacheSeriesDetail(id, fetched);
+        series = { ...fetched, series_id: id };
+      }
       const lines = detailLines(id, series);
       if (!lines.length) throw new Error('红果详情没有返回完整剧集列表');
       const actors = safeArray(series.celebrities).map((actor) => text(actor?.nickname)).filter(Boolean);
