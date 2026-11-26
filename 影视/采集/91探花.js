@@ -1,9 +1,9 @@
 // @name 91探花
 // @author OmniBox
 // @description 91探花（911tanhua.com）：JSON-LD 结构化数据取列表（分类/最新/热门/搜索），详情页 data-video_id + POST /videos/{id}/playback 取 m3u8 直链（parse=0）。多分类、分页、异步播放解析。
-// @version 1.0.1
+// @version 1.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/91探花.js
-// @dependencies axios
+// @dependencies axios, crypto
 // TANHUA_COVER_INLINE 封面内联开关，默认 1（抓图转 data URI 兼容 OK影视；设 0 关闭回退原 URL）
 /**
  * ============ 91探花（911tanhua.com）OmniBox 采集源 ============
@@ -28,15 +28,21 @@
  *  TANHUA_CACHE_TTL 缓存秒数，默认 300
  */
 const axios = require('axios');
+const crypto = require('crypto');
 const OmniBox = require('omnibox_sdk');
 const runner = require('spider_runner');
 
 const PREFIX = '[91探花]';
-// 封面图床 expose.eisees.com 的图片 URL 带短期 auth 签名，OK影视 对带查询串的图处理异常
-// （显示标题首字占位）。按 51吃瓜/黑料网 的做法：抓图转 data:image base64 内联，两端都能显示。
-// 抓图失败/图片无效时回退原 URL（不阻塞主链路，UZN 仍可用原 URL）。
+// 封面链路（与 51吃瓜/黑料网 同源图床）：
+//   JSON-LD 的 thumbnailUrl 是 expose.eisees.com + 短期 auth 签名（OK影视 对带查询串的图显示标题首字）。
+//   同图在 new2.qnlycc.cn 有 <原路径>.webp 版本，无签名但 AES-128-CBC 加密。
+//   处理：expose URL -> new2 URL -> 抓图 -> AES 解密 -> data:image base64 内联（OK影视/UZN 都能显示）。
+// 抓图/解密失败回退原 URL（不阻塞主链路）。可用 TANHUA_COVER_INLINE=0 关闭。
 const COVER_INLINE = process.env.TANHUA_COVER_INLINE !== '0';
 const COVER_CONCURRENCY = 4;
+const COVER_AES_KEY = Buffer.from(String(process.env.TANHUA_COVER_KEY || 'f5d965df75336270'), 'latin1');
+const COVER_AES_IV = Buffer.from(String(process.env.TANHUA_COVER_IV || '97b60394abc2fbe1'), 'latin1');
+const NEW2_HOST = String(process.env.TANHUA_COVER_HOST || 'https://new2.qnlycc.cn').replace(/\/+$/, '');
 function sniffImageType(buf) {
   if (!buf || buf.length < 12) return '';
   if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg';
@@ -44,6 +50,28 @@ function sniffImageType(buf) {
   if (buf.slice(0, 3).toString('ascii') === 'GIF') return 'image/gif';
   if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
   return '';
+}
+// expose 图片 -> new2 稳定图（路径一致，加 .webp，去掉 auth 查询串）。
+// 路径可能是 /upload_01/...（列表）或 /upload/xiao/...（详情），统一取 expose 域名后的 path。
+function exposeToNew2(url) {
+  const m = String(url || '').match(/expose\.eisees\.com(\/[^?]+)/i);
+  if (!m) return '';
+  let p = m[1].replace(/\/+$/, '');
+  // 已经是 webp 则不重复加
+  if (/\.webp$/i.test(p)) return NEW2_HOST + p;
+  return NEW2_HOST + p + '.webp';
+}
+// AES 解密加密图，返回 {mime, body} 或 null
+function decryptCoverBytes(buf) {
+  const plain = sniffImageType(buf);
+  if (plain) return { mime: plain, body: buf };
+  try {
+    const d = crypto.createDecipheriv('aes-128-cbc', COVER_AES_KEY, COVER_AES_IV);
+    const out = Buffer.concat([d.update(buf), d.final()]);
+    const mime = sniffImageType(out);
+    if (mime) return { mime, body: out };
+  } catch (_) {}
+  return null;
 }
 const UA = String(process.env.TANHUA_UA || '').trim()
   || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -96,32 +124,33 @@ function memSet(k, d) { mem.set(k, { t: Date.now(), d }); }
 async function cacheGet(k) { try { const v = await OmniBox.getCache(`${PREFIX}:${k}`); return typeof v === 'string' ? JSON.parse(v) : v; } catch (_) { return null; } }
 async function cacheSet(k, d, ttl) { try { await OmniBox.setCache(`${PREFIX}:${k}`, JSON.stringify(d), ttl); } catch (_) {} }
 
-// 封面内联：抓图 -> data URI（图床 auth 签名 OK影视 不认，UZN 认；内联后两端一致）
+// 封面内联：expose(auth签名) -> new2(稳定AES加密) -> 抓图 -> 解密 -> data URI
 const coverCache = new Map();
 async function resolveCover(url) {
   if (!url || !COVER_INLINE || !/^https?:/i.test(url)) return url || '';
   if (coverCache.has(url)) return coverCache.get(url);
+  // 优先 new2 稳定图源（expose URL 转 new2）；非 expose URL 保持原样抓
+  const fetchUrl = exposeToNew2(url) || url;
   try {
-    const res = await axios.get(url, {
+    const res = await axios.get(fetchUrl, {
       timeout: 8000, responseType: 'arraybuffer', validateStatus: () => true,
       headers: { 'User-Agent': UA, Referer: BASE + '/' },
     });
     let buf = res.data;
     if (res.status === 200 && buf) {
-      // 兼容宿主把 arraybuffer 包成 Uint8Array
       if (!Buffer.isBuffer(buf)) {
         if (buf.buffer && typeof buf.byteLength === 'number') buf = Buffer.from(buf.buffer, buf.byteOffset || 0, buf.byteLength);
         else if (Array.isArray(buf)) buf = Buffer.from(buf);
         else buf = Buffer.from(String(buf));
       }
-      const mime = sniffImageType(buf);
-      if (mime && buf.length > 100) {
-        const dataUri = `data:${mime};base64,${buf.toString('base64')}`;
+      const decoded = decryptCoverBytes(buf);
+      if (decoded && decoded.body.length > 100) {
+        const dataUri = `data:${decoded.mime};base64,${decoded.body.toString('base64')}`;
         coverCache.set(url, dataUri);
         return dataUri;
       }
     }
-  } catch (_) { /* 抓图失败回退原 URL */ }
+  } catch (_) { /* 抓图/解密失败回退原 URL */ }
   coverCache.set(url, url);
   return url;
 }
