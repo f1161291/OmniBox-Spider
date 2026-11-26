@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.4.0：REA 逆向 App video_detail 接口（/novel/player/video_detail/v1），detail 优先用它取完整分集（SSR 仅 3 集付费墙，App 接口实测 586 集全拿到且数字 vid 全部可播），失败回退 SSR。v2.3.0：REA 逆向 APK v7.4.5.32(code 74532)，签名基线/UA 从 74332 对齐到 APK 真实版本；放宽 vid 校验以接受 v1_ 加密 ID（APK GetVideoModelRequest.videoId 为 String）。逆向实证：播放端点 /novel/player/multi_video_model/{v1|player/v1}，请求体 snake_case 结构、Playback 签名头(x-khronos/helios/medusa)与枚举(VideoPlatformType.Mixed=1024、DeviceLevel=1/2/3)均已对齐；服务端对匿名身份仍返回空模型（需登录态），非脚本问题。v2.2.6 精简：移除 v3 遗留死代码，压缩头注释。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
-// @version 2.4.0
+// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.4.1：新增 SSR IPv4 直连兜底（hongguoduanju.com DNS 只返回 IPv6 时首页/分类/详情全部加载不出来的根因），缩短普通请求超时避免卡死。v2.4.0：REA 逆向 App video_detail 接口（/novel/player/video_detail/v1），detail 优先用它取完整分集（SSR 仅 3 集付费墙，App 接口实测 586 集全拿到且数字 vid 全部可播），失败回退 SSR。v2.3.0：REA 逆向 APK v7.4.5.32(code 74532)，签名基线/UA 从 74332 对齐到 APK 真实版本；放宽 vid 校验以接受 v1_ 加密 ID（APK GetVideoModelRequest.videoId 为 String）。逆向实证：播放端点 /novel/player/multi_video_model/{v1|player/v1}，请求体 snake_case 结构、Playback 签名头(x-khronos/helios/medusa)与枚举(VideoPlatformType.Mixed=1024、DeviceLevel=1/2/3)均已对齐；服务端对匿名身份仍返回空模型（需登录态），非脚本问题。v2.2.6 精简：移除 v3 遗留死代码，压缩头注释。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
+// @version 2.4.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -2009,6 +2009,8 @@ function httpRequest(url, options = {}) {
         headers['Content-Length'] = String(Buffer.isBuffer(body) ? body.length : Buffer.byteLength(String(body)));
       }
       const reqOptions = { method: options.method || 'GET', headers, timeout };
+      // v2.4.1：支持 IP 直连 + SNI（域名 DNS 失败时兜底）；headers.Host 需调用方一并指定。
+      if (options.servername) reqOptions.servername = options.servername;
       if (options.agent) reqOptions.agent = options.agent;
       const req = mod.request(u, reqOptions, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && hopsLeft > 0) {
@@ -2987,14 +2989,26 @@ function responsePayload(response) {
   return response;
 }
 
+// v2.4.1：hongguoduanju.com 的 DNS 常只返回 IPv6（无 IPv6 出口时全部 EAI_AGAIN），
+// 但这些 IPv4 前端 + SNI 直连实测可用（200 + _ROUTER_DATA）。
+const HG_DIRECT_IPV4 = (process.env.DUANJU_DIRECT_IPV4 || '59.36.102.123,183.36.42.107').split(',').map(s => s.trim()).filter(Boolean);
+function directIpUrl(url, ip) {
+  try {
+    const u = new URL(url);
+    if (!/hongguoduanju\.com$/i.test(u.hostname)) return null;
+    return { url: url.replace(u.hostname, ip), host: u.hostname, servername: u.hostname };
+  } catch { return null; }
+}
+
 async function getPageRaw(url, attempts = PAGE_ATTEMPTS) {
   let lastError;
+  // 先按正常域名请求（少次数、短超时），失败立即转 IP 直连，避免 DNS 卡满 90s。
   for (let attempt = 0; attempt < Math.max(1, attempts); attempt++) {
     try {
       const response = await httpRequest(url, {
         method: 'GET',
         headers: { 'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9', Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8', 'Cache-Control': 'no-cache' },
-        timeout: 30000,
+        timeout: 8000,
       });
       const status = Number(response?.status ?? response?.statusCode ?? 0);
       if (status >= 400) throw new Error(`HTTP ${status}`);
@@ -3009,7 +3023,34 @@ async function getPageRaw(url, attempts = PAGE_ATTEMPTS) {
       return html;
     } catch (error) {
       lastError = error;
-      if (attempt + 1 < attempts) await sleep(600 * (attempt + 1));
+      if (attempt + 1 < attempts) await sleep(300 * (attempt + 1));
+    }
+  }
+  // v2.4.1：域名请求全失败（多为 DNS 只返回 IPv6）→ IP 直连 + SNI 兜底。
+  for (const ip of HG_DIRECT_IPV4) {
+    const d = directIpUrl(url, ip);
+    if (!d) break;
+    try {
+      const response = await httpRequest(d.url, {
+        method: 'GET',
+        headers: {
+          'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9',
+          Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+          'Cache-Control': 'no-cache', Host: d.host,
+        },
+        servername: d.servername,
+        timeout: 15000,
+      });
+      const status = Number(response?.status ?? response?.statusCode ?? 0);
+      if (status >= 400) throw new Error(`HTTP ${status}`);
+      const raw = responsePayload(response);
+      const html = Buffer.isBuffer(raw) ? raw.toString('utf8') : (typeof raw === 'string' ? raw : JSON.stringify(raw));
+      if (html && html.length > 500) {
+        await log('info', `[hg][direct] IPv4 直连成功 ${ip} len=${html.length}`);
+        return html;
+      }
+    } catch (error) {
+      lastError = error;
     }
   }
   throw new Error(`红果页面请求失败: ${lastError?.message || lastError || url}`);
