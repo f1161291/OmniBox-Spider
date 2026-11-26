@@ -1,7 +1,7 @@
 // @name 爱交网
 // @author 宝宝巴士
 // @description 爱交网(aijiaox.com)：首页/分类/搜索/详情/播放；只用主域+内置域名池轮换(不再从发布页拉取)+软隔离；播放走 POST /videos/{数字ID}/playback 取签名 m3u8；分类名取链接文本(非父分组)，qnlycc.cn 图床(new2 .webp / pic .jpeg)封面 AES 解密内联(JPEG/PNG/WebP)
-// @version 1.1.0
+// @version 1.1.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/爱交网.js
 // @dependencies axios,cheerio,crypto
 /**
@@ -53,9 +53,9 @@ const REQ_TIMEOUT = Math.max(5000, Number(process.env.AJ_TIMEOUT || 15000) || 15
 const BUILTIN_HOSTS = String(process.env.AJ_NO_BUILTIN || '') === '1' ? [] : [
   'https://e576.kajiljnx.cc',
   'https://aijiaox.com',
-  'https://aijiaowang1.pages.dev',
-  'https://aijiaowang1.github.io',
   'https://aafd.shsivadqh.com',
+  // 注意：aijiaowang1.pages.dev / .github.io 是"最新地址"发布页（约 770B，无 video-card-item），
+  // 不是内容站。曾因它们能连上被 markAlive 置顶，导致首页/搜索恒 0 条，故从域名池移除。
 ];
 const SEED_HOST = String(process.env.AJ_HOST || '').trim();
 
@@ -264,9 +264,21 @@ async function requestHtml(path, options = {}) {
     for (const host of hosts) {
       try {
         const html = await fetchText(`${host}${path}`, { ...options, referer: `${host}/` });
-        if (html && html.length >= 200) { markAlive(host); return html; }
-        lastErr = new Error(`空响应(${html.length}B)`);
-        markDead(host, lastErr.message);
+        // 只判断长度>=200 会把「最新地址」发布页（约 770B，无内容）误判为成功并置顶，
+        // 导致后续一直请求发布页、首页/搜索恒 0 条。这里增加内容特征校验：
+        // 首页/分类/搜索返回的 HTML 应含 video-card-item 或 category 链接；否则视为无效域名。
+        const looksLikeLanding = html && html.length < 2000
+          && !/video-card-item|class="[^"]*category/i.test(html);
+        if (html && html.length >= 200 && !looksLikeLanding) { markAlive(host); return html; }
+        if (looksLikeLanding) {
+          // 发布页不是内容站，立即隔离（无需等 2 次），避免污染缓存和轮换
+          const h = health[host] || (health[host] = { fail: 0 });
+          h.fail = 2; markDead(host, 'landing-page');
+          log('info', `${host} 是发布页（无内容），已隔离`);
+        } else {
+          lastErr = new Error(`空响应(${html.length}B)`);
+          markDead(host, lastErr.message);
+        }
       } catch (e) {
         lastErr = e;
         log('info', `${host}${path} 失败: ${e.message.slice(0, 80)}`);
