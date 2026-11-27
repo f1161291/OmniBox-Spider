@@ -1,7 +1,7 @@
 // @name 洛雪
 // @author OmniBox
-// @description 站点：tv.lxyy.club（洛雪）。v2.2.6 修复 jimaoys94.com smart.m3u8 再次 403：宿主沙箱里原生 https（nodeRequest）访问 jimaoys94 失败时 expandMasterM3u8 会 return 原始裸 master（不带 session）→ 播放器请求必 403。改为双通道（nodeRequest → OmniBox.request）取 m3u8 文本；且假 master 只要展开失败就返回 null，绝不把不带 session 的裸 master 交给播放器——直链分支转嗅探兜底、嗅探/跨源分支跳过该候选或回退 parse=1。v2.2.5 修复芒果 TV 直链 403 Forbidden：titan.mgtv.com 等 *.mgtv.com 的 m3u8/ts 签名(pm=)已含设备指纹(mac_id/uid/version)，播放器额外带 Referer/Origin 会被判盗链→403（裸请求/只带 UA 均 200）。新增 mediaHeader() 按直链域名剔除 Referer/Origin，所有返回媒体直链的路径（直链/官方解析/嗅探/跨源兜底/sniffCompatible）统一套用。v2.2.4 修复 jimaoys94.com smart.m3u8 在 MPV 上 403 Forbidden：该 m3u8 是「假 master」，请求的 session 由脚本服务器现场签发、有时效，把不带 session 的 master 原样交给播放器 → 403。expandMasterM3u8() 改为深度展开（最多 4 层、seen 防环），一路跟到含 #EXTINF 的媒体列表；并且嗅探成功/跨源兜底/sniffCompatible 三条返回路径统一在返回 .m3u8 前先展开，杜绝任何未展开的 master 落到播放器。v2.2.3 修复 B站 4K DASH(.mpd) 在不支持 DASH 的宿主上「视频加载失败」：命中 format=dash 时保留 4K DASH 在第一位（支持 DASH 的端照常播 4K），同时嗅探一条 hls/mp4 兼容直链作为第二备选（宿主首个失败可降级）；嗅探不到就只返回 4K 单条，不做跨源重操作。v2.2.2 修复官方解析在宿主上「无授权：请从本站影片播放页打开」：playback_grant 是绑会话的，而宿主 detail 与 play 是两次独立进程、不共享内存，play 新建会话后拿旧会话的 grant 必然被拒（本地单进程 vm 测试反而是通的，容易误判）。改为会话落宿主缓存让两次调用共享（20 分钟续期），并在授权缺失时自动换新会话重新换 grant 重试一次。v2.2.0 新增官方解析线路（洛雪4K/蓝光/臻享/789/麒麟）：官网的 4K/HDR 画质不在采集站里，而是把平台播放页交给站点解析接口换直链。接入完整四段链路 POST /api/playback-session.php 取 csrf+cookie → 带 X-CSRF-Token+Cookie 请求 detail 拿 episodes[].playback_grant → GET /json-player.php?route=&url=&source=&grant= 取 data-authorization → POST /api/json-parse.php 拿 {format,url}；官方线路在详情页排最前，play 时优先走解析、命中即 parse=0 直链（hls 与 dash/.mpd 都支持），失败再回落嗅探与跨源兜底。只对 qq/bilibili/rrmj/hmdj/mgtv 生成官方线路（优酷/爱奇艺实测洛雪4K 返回 noauth），native 格式实测是付费墙直接跳过。可用 LXYY_OFFICIAL_ENABLED/LXYY_OFFICIAL_ROUTES/LXYY_OFFICIAL_GROUPS 调整。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
-// @version 2.2.6
+// @description 站点：tv.lxyy.club（洛雪）。v2.2.7 修复爱奇艺(qiyi)线路只能靠 svip.qlplayer.cyou 嗅探、嗅探失败就播不了：实测爱奇艺经官网解析接口蓝光(muh2fkp2)/789(mwieue15)都能拿到可播 hls 直链(200)，只是 qiyi 不在 OFFICIAL_GROUPS 导致 detail 不生成官方线路、play 点原始线路时跳过官方解析。把 qiyi 加入官方线路并用平台→路线白名单只放行实测可播的蓝光/789（洛雪4K noauth、臻享付费墙、麒麟502、蝉窨403 全部排除）。v2.2.6 修复 jimaoys94.com smart.m3u8 再次 403：宿主沙箱里原生 https（nodeRequest）访问 jimaoys94 失败时 expandMasterM3u8 会 return 原始裸 master（不带 session）→ 播放器请求必 403。改为双通道（nodeRequest → OmniBox.request）取 m3u8 文本；且假 master 只要展开失败就返回 null，绝不把不带 session 的裸 master 交给播放器——直链分支转嗅探兜底、嗅探/跨源分支跳过该候选或回退 parse=1。v2.2.5 修复芒果 TV 直链 403 Forbidden：titan.mgtv.com 等 *.mgtv.com 的 m3u8/ts 签名(pm=)已含设备指纹(mac_id/uid/version)，播放器额外带 Referer/Origin 会被判盗链→403（裸请求/只带 UA 均 200）。新增 mediaHeader() 按直链域名剔除 Referer/Origin，所有返回媒体直链的路径（直链/官方解析/嗅探/跨源兜底/sniffCompatible）统一套用。v2.2.4 修复 jimaoys94.com smart.m3u8 在 MPV 上 403 Forbidden：该 m3u8 是「假 master」，请求的 session 由脚本服务器现场签发、有时效，把不带 session 的 master 原样交给播放器 → 403。expandMasterM3u8() 改为深度展开（最多 4 层、seen 防环），一路跟到含 #EXTINF 的媒体列表；并且嗅探成功/跨源兜底/sniffCompatible 三条返回路径统一在返回 .m3u8 前先展开，杜绝任何未展开的 master 落到播放器。v2.2.3 修复 B站 4K DASH(.mpd) 在不支持 DASH 的宿主上「视频加载失败」：命中 format=dash 时保留 4K DASH 在第一位（支持 DASH 的端照常播 4K），同时嗅探一条 hls/mp4 兼容直链作为第二备选（宿主首个失败可降级）；嗅探不到就只返回 4K 单条，不做跨源重操作。v2.2.2 修复官方解析在宿主上「无授权：请从本站影片播放页打开」：playback_grant 是绑会话的，而宿主 detail 与 play 是两次独立进程、不共享内存，play 新建会话后拿旧会话的 grant 必然被拒（本地单进程 vm 测试反而是通的，容易误判）。改为会话落宿主缓存让两次调用共享（20 分钟续期），并在授权缺失时自动换新会话重新换 grant 重试一次。v2.2.0 新增官方解析线路（洛雪4K/蓝光/臻享/789/麒麟）：官网的 4K/HDR 画质不在采集站里，而是把平台播放页交给站点解析接口换直链。接入完整四段链路 POST /api/playback-session.php 取 csrf+cookie → 带 X-CSRF-Token+Cookie 请求 detail 拿 episodes[].playback_grant → GET /json-player.php?route=&url=&source=&grant= 取 data-authorization → POST /api/json-parse.php 拿 {format,url}；官方线路在详情页排最前，play 时优先走解析、命中即 parse=0 直链（hls 与 dash/.mpd 都支持），失败再回落嗅探与跨源兜底。只对 qq/bilibili/rrmj/hmdj/mgtv 生成官方线路（优酷/爱奇艺实测洛雪4K 返回 noauth），native 格式实测是付费墙直接跳过。可用 LXYY_OFFICIAL_ENABLED/LXYY_OFFICIAL_ROUTES/LXYY_OFFICIAL_GROUPS 调整。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
+// @version 2.2.7
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/影视库/洛雪.js
 
 /**
@@ -431,8 +431,22 @@ const OFFICIAL_ROUTE_CODES = {
 // 只有这些平台线路才生成官方解析线路：其它平台（优酷/爱奇艺等）洛雪4K 实测返回 noauth，
 // 生成出来就是死线路。可用 LXYY_OFFICIAL_GROUPS 覆盖。
 const OFFICIAL_GROUPS = splitConfigList(
-  process.env.LXYY_OFFICIAL_GROUPS || "qq;bilibili;rrmj;hmdj;mgtv",
+  process.env.LXYY_OFFICIAL_GROUPS || "qq;bilibili;rrmj;hmdj;mgtv;qiyi",
 ).map((s) => s.toLowerCase());
+// 部分平台只有特定解析线路能出可播直链（实测），其余线路是 noauth/付费墙/502/403。
+// 用「平台→路线白名单」收敛，避免生成一堆点了没反应的死线路。
+// 爱奇艺(qiyi)：蓝光(muh2fkp2) / 789(mwieue15) 实测 200 application/vnd.apple.mpegurl；
+//                洛雪4K noauth、臻享 302 付费墙、麒麟 502、蝉窨 json-manifest 403。
+const OFFICIAL_GROUP_ROUTES = {
+  qiyi: ["official_muh2fkp2", "official_mwieue15"],
+};
+function officialRouteAllowed(routeId, groupCode) {
+  const allow = OFFICIAL_ROUTE_CODES[routeId];
+  if (allow && allow.length && allow.indexOf(groupCode) < 0) return false;
+  const groupRoutes = OFFICIAL_GROUP_ROUTES[groupCode];
+  if (groupRoutes && groupRoutes.length && groupRoutes.indexOf(routeId) < 0) return false;
+  return true;
+}
 const OFFICIAL_ENABLED = String(process.env.LXYY_OFFICIAL_ENABLED || "true").toLowerCase() !== "false";
 const OFFICIAL_TIMEOUT = Number(process.env.LXYY_OFFICIAL_TIMEOUT || 25000);
 const OFFICIAL_CACHE_TTL = Number(process.env.LXYY_OFFICIAL_CACHE_TTL || 900);
@@ -638,11 +652,7 @@ async function parseOfficial(playPageUrl, source, opts = {}) {
   const group = String(opts.group || "").toLowerCase();
   const routeIds = opts.routeId
     ? [String(opts.routeId)]
-    : OFFICIAL_ROUTES.filter((id) => {
-      const allow = OFFICIAL_ROUTE_CODES[id];
-      if (!allow || !allow.length) return true;
-      return allow.indexOf(group) >= 0;
-    });
+    : OFFICIAL_ROUTES.filter((id) => officialRouteAllowed(id, group));
   if (!routeIds.length) return null;
 
   session = await ensurePlaybackSession();
@@ -891,8 +901,7 @@ function buildOfficialSources(detail) {
     const eps = Array.isArray(group && group.episodes) ? group.episodes : [];
     if (!eps.length) return;
     OFFICIAL_ROUTES.forEach((routeId) => {
-      const allow = OFFICIAL_ROUTE_CODES[routeId];
-      if (allow && allow.length && allow.indexOf(groupCode) < 0) return;
+      if (!officialRouteAllowed(routeId, groupCode)) return;
       const routeName = OFFICIAL_ROUTE_NAMES[routeId] || routeId;
       const routeEpisodes = [];
       eps.forEach((ep, ei) => {
