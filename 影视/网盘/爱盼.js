@@ -1,8 +1,8 @@
-// @name 爱盼网盘
+// @name 爱盼
 // @author 
 // @description 网盘资源导航站：https://aipan.win ，站点仅索引资源不提供播放；支持首页、分类、详情、搜索、网盘播放、刮削、弹幕、播放记录
-// @version 1.0.0
-// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/爱盼网盘.js
+// @version 1.0.1
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/爱盼.js
 // @dependencies cheerio
 
 const OmniBox = require("omnibox_sdk");
@@ -302,7 +302,7 @@ async function getAllVideoFiles(shareURL, files, depth = 0, seen = new Set()) {
           if (nested.length) videos.push(...nested);
         }
       } catch (e) {
-        await OmniBox.log("warn", `[爱盼网盘][detail] 读取子目录失败 share=${shareURL} fid=${fid}: ${e.message}`);
+        await OmniBox.log("warn", `[爱盼][detail] 读取子目录失败 share=${shareURL} fid=${fid}: ${e.message}`);
       }
     }
   }
@@ -418,7 +418,7 @@ async function home(params, context) {
     const list = mapMovies(data?.movies);
     return { class: CLASS_LIST, filters: buildFilters(), list };
   } catch (e) {
-    await OmniBox.log("error", `[爱盼网盘][home] ${e.message}`);
+    await OmniBox.log("error", `[爱盼][home] ${e.message}`);
     return { class: CLASS_LIST, filters: buildFilters(), list: [] };
   }
 }
@@ -440,7 +440,7 @@ async function category(params, context) {
     const pagecount = Math.max(1, Math.ceil(total / PAGE_SIZE));
     return { page, pagecount, total, list };
   } catch (e) {
-    await OmniBox.log("error", `[爱盼网盘][category] ${e.message}`);
+    await OmniBox.log("error", `[爱盼][category] ${e.message}`);
     return { page: 1, pagecount: 0, total: 0, list: [] };
   }
 }
@@ -455,7 +455,7 @@ async function search(params, context) {
     const total = Number(data?.total || 0) || list.length;
     return { page: 1, pagecount: 1, total, list };
   } catch (e) {
-    await OmniBox.log("error", `[爱盼网盘][search] ${e.message}`);
+    await OmniBox.log("error", `[爱盼][search] ${e.message}`);
     return { page: 1, pagecount: 0, total: 0, list: [] };
   }
 }
@@ -525,9 +525,9 @@ async function detail(params, context) {
         const rootFileList = await OmniBox.getDriveFileList(shareURL, "0");
         const rootFiles = Array.isArray(rootFileList?.files) ? rootFileList.files : Array.isArray(rootFileList) ? rootFileList : [];
         allVideoFiles = await getAllVideoFiles(shareURL, rootFiles, 0, new Set());
-        await OmniBox.log("info", `[爱盼网盘][detail] share=${shareURL} rootFiles=${rootFiles.length} videoFiles=${allVideoFiles.length}`);
+        await OmniBox.log("info", `[爱盼][detail] share=${shareURL} rootFiles=${rootFiles.length} videoFiles=${allVideoFiles.length}`);
       } catch (e) {
-        await OmniBox.log("warn", `[爱盼网盘][detail] 扫描网盘文件失败: ${e.message}`);
+        await OmniBox.log("warn", `[爱盼][detail] 扫描网盘文件失败: ${e.message}`);
       }
 
       const episodes = dedupeEpisodes(allVideoFiles.map((file) => {
@@ -574,7 +574,7 @@ async function detail(params, context) {
 
     if (filesForScraping.length > 0) {
       try {
-        await OmniBox.log("info", `[爱盼网盘][detail] 开始统一刮削: vodId=${detailUrl}, files=${filesForScraping.length}`);
+        await OmniBox.log("info", `[爱盼][detail] 开始统一刮削: vodId=${detailUrl}, files=${filesForScraping.length}`);
         await OmniBox.processScraping(detailUrl, title || "", title || "", filesForScraping);
         const metadata = await OmniBox.getScrapeMetadata(detailUrl);
         const scrapeData = metadata?.scrapeData || null;
@@ -598,21 +598,21 @@ async function detail(params, context) {
             if (scrapeData.releaseDate) vodItem.vod_year = String(scrapeData.releaseDate).slice(0, 4);
             if (scrapeData.voteAverage) vodItem.vod_douban_score = Number(scrapeData.voteAverage).toFixed(1);
           }
-          await OmniBox.log("info", `[爱盼网盘][detail] 统一刮削完成: vodId=${detailUrl}, mappings=${videoMappings.length}`);
+          await OmniBox.log("info", `[爱盼][detail] 统一刮削完成: vodId=${detailUrl}, mappings=${videoMappings.length}`);
         } else {
-          await OmniBox.log("info", `[爱盼网盘][detail] 统一刮削无结果: vodId=${detailUrl}`);
+          await OmniBox.log("info", `[爱盼][detail] 统一刮削无结果: vodId=${detailUrl}`);
         }
       } catch (error) {
-        await OmniBox.log("warn", `[爱盼网盘][detail] 统一刮削失败: ${error.message}`);
+        await OmniBox.log("warn", `[爱盼][detail] 统一刮削失败: ${error.message}`);
       }
     } else {
-      await OmniBox.log("info", `[爱盼网盘][detail] 跳过统一刮削: 未收集到可刮削文件`);
+      await OmniBox.log("info", `[爱盼][detail] 跳过统一刮削: 未收集到可刮削文件`);
     }
 
-    await OmniBox.log("info", `[爱盼网盘][detail] url=${detailUrl} title=${vodItem.vod_name || title} shareLinks=${shareLinks.length} lines=${playSources.length}`);
+    await OmniBox.log("info", `[爱盼][detail] url=${detailUrl} title=${vodItem.vod_name || title} shareLinks=${shareLinks.length} lines=${playSources.length}`);
     return { list: [vodItem] };
   } catch (e) {
-    await OmniBox.log("error", `[爱盼网盘][detail] ${e.message}`);
+    await OmniBox.log("error", `[爱盼][detail] ${e.message}`);
     return { list: [] };
   }
 }
@@ -683,7 +683,7 @@ async function play(params, context) {
           if (Array.isArray(matchedDanmaku) && matchedDanmaku.length > 0) result.danmakuList = matchedDanmaku;
         }
       } catch (error) {
-        await OmniBox.log("warn", `[爱盼网盘][play] 弹幕匹配失败: ${error.message}`);
+        await OmniBox.log("warn", `[爱盼][play] 弹幕匹配失败: ${error.message}`);
       }
       return result;
     })();
@@ -725,15 +725,15 @@ async function play(params, context) {
     });
     if (historyPayload) {
       OmniBox.addPlayHistory(historyPayload)
-        .then((added) => OmniBox.log("info", `[爱盼网盘][play] ${added ? "已添加" : "已存在,跳过"}观看记录: ${historyPayload.title}`))
-        .catch((error) => OmniBox.log("warn", `[爱盼网盘][play] 添加观看记录失败: ${error.message}`));
+        .then((added) => OmniBox.log("info", `[爱盼][play] ${added ? "已添加" : "已存在,跳过"}观看记录: ${historyPayload.title}`))
+        .catch((error) => OmniBox.log("warn", `[爱盼][play] 添加观看记录失败: ${error.message}`));
     }
 
     const header = playInfo.header || {};
-    await OmniBox.log("info", `[爱盼网盘][play] route=${routeType} share=${shareURL} fileId=${fileId} urls=${urls.length}`);
+    await OmniBox.log("info", `[爱盼][play] route=${routeType} share=${shareURL} fileId=${fileId} urls=${urls.length}`);
     return { urls, header, parse: 0, jx: 0, danmaku: danmakuList };
   } catch (e) {
-    await OmniBox.log("error", `[爱盼网盘][play] ${e.message}`);
+    await OmniBox.log("error", `[爱盼][play] ${e.message}`);
     return { parse: 0, jx: 0, url: "", urls: [], header: {}, headers: {} };
   }
 }
