@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.4.2：对齐 hongguoTV 0.16.20 PR#146，video_detail 全挂时兜底走 App directory/all_items 取完整有序分集（官网只下发 3 个混淆预览 ID 的场景），SSR 仅补元数据。v2.4.1：新增 SSR IPv4 直连兜底（hongguoduanju.com DNS 只返回 IPv6 时首页/分类/详情全部加载不出来的根因），缩短普通请求超时避免卡死。v2.4.0：REA 逆向 App video_detail 接口（/novel/player/video_detail/v1），detail 优先用它取完整分集（SSR 仅 3 集付费墙，App 接口实测 586 集全拿到且数字 vid 全部可播），失败回退 SSR。v2.3.0：REA 逆向 APK v7.4.5.32(code 74532)，签名基线/UA 从 74332 对齐到 APK 真实版本；放宽 vid 校验以接受 v1_ 加密 ID（APK GetVideoModelRequest.videoId 为 String）。逆向实证：播放端点 /novel/player/multi_video_model/{v1|player/v1}，请求体 snake_case 结构、Playback 签名头(x-khronos/helios/medusa)与枚举(VideoPlatformType.Mixed=1024、DeviceLevel=1/2/3)均已对齐；服务端对匿名身份仍返回空模型（需登录态），非脚本问题。v2.2.6 精简：移除 v3 遗留死代码，压缩头注释。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
-// @version 2.4.2
+// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.4.2：对齐 hongguoTV 0.16.20 PR#146，video_detail 全挂时兜底走 App directory/all_items 取完整有序分集（官网只下发 3 个混淆预览 ID 的场景），SSR 仅补元数据。v2.4.3：详情页封面由 HEIC 改写成 byteimg JPEG（官网 series_cover 是 image/heic，宿主浏览器不支持，签名绑定路径改后缀会 403，改用同 ID 的公开 .image 端点）。v2.4.2：参考 hongguoTV 0.16.20 PR#146，video_detail 全挂时用 /reading/bookapi/directory/all_items/v/ 兜底取完整分集（网站只下发 3 个混淆预览 ID 场景）。v2.4.1：新增 SSR IPv4 直连兜底（hongguoduanju.com DNS 只返回 IPv6 时首页/分类/详情全部加载不出来的根因），缩短普通请求超时避免卡死。v2.4.0：REA 逆向 App video_detail 接口（/novel/player/video_detail/v1），detail 优先用它取完整分集（SSR 仅 3 集付费墙，App 接口实测 586 集全拿到且数字 vid 全部可播），失败回退 SSR。v2.3.0：REA 逆向 APK v7.4.5.32(code 74532)，签名基线/UA 从 74332 对齐到 APK 真实版本；放宽 vid 校验以接受 v1_ 加密 ID（APK GetVideoModelRequest.videoId 为 String）。逆向实证：播放端点 /novel/player/multi_video_model/{v1|player/v1}，请求体 snake_case 结构、Playback 签名头(x-khronos/helios/medusa)与枚举(VideoPlatformType.Mixed=1024、DeviceLevel=1/2/3)均已对齐；服务端对匿名身份仍返回空模型（需登录态），非脚本问题。v2.2.6 精简：移除 v3 遗留死代码，压缩头注释。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
+// @version 2.4.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -2973,6 +2973,17 @@ let installId = randomDeviceId();
 
 const text = (value, fallback = '') => value == null ? fallback : String(value).trim() || fallback;
 const safeArray = (value) => Array.isArray(value) ? value : [];
+// v2.4.3：官网 series_cover 返回带签名的 .heic（image/heic），宿主浏览器不支持 HEIC 解码，
+// 详情页封面因此空白。签名绑定路径，改后缀会 403；改用同一 novel-pic ID 的公开 byteimg
+// .image 端点（image/jpeg，实测 p3/p6-novel.byteimg.com 均 200，p9 返回 403）。
+function normalizeCoverUrl(value) {
+  const raw = text(value);
+  if (!raw) return '';
+  if (!/fqnovelpic\.com/i.test(raw) || !/\.heic(?:[?#]|$)/i.test(raw)) return raw;
+  const match = raw.match(/\/novel-pic\/([^~?/]+)~/);
+  if (!match || !match[1]) return raw;
+  return `https://p6-novel.byteimg.com/novel-pic/${match[1]}~tplv-shrink:640:0.image`;
+}
 function bodyOf(request) {
   if (request && typeof request === 'object' && !Array.isArray(request)) {
     if (request.body && typeof request.body === 'object' && !Array.isArray(request.body)) return request.body;
@@ -3190,7 +3201,7 @@ function itemOf(raw) {
   return {
     vod_id: text(id),
     vod_name: text(name, '未命名'),
-    vod_pic: text(pic),
+    vod_pic: normalizeCoverUrl(pic),
     vod_remarks: count ? `全${text(count)}集` : text(heat),
     vod_content: text(intro),
   };
@@ -3677,7 +3688,7 @@ async function detail(params, context) {
       list.push({
         vod_id: id,
         vod_name: text(series.series_name || series.series_title || series.title),
-        vod_pic: text(series.series_cover || series.cover || series.cover_url),
+        vod_pic: normalizeCoverUrl(series.series_cover || series.cover || series.cover_url),
         vod_year: '', vod_area: '', vod_director: '', vod_actor: actors.join(','),
         vod_content: text(series.series_intro || series.description || series.intro), vod_remarks: text(series.episode_right_text || series.heatText),
         vod_play_from: lines.map((line) => line.name).join('$$$'),
