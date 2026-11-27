@@ -1,7 +1,7 @@
 // @name 爱盼
 // @author 
 // @description 网盘资源导航站：https://aipan.win ，站点仅索引资源不提供播放；支持首页、分类、详情、搜索、网盘播放、刮削、弹幕、播放记录
-// @version 1.0.1
+// @version 1.0.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/爱盼.js
 // @dependencies cheerio
 
@@ -694,12 +694,35 @@ async function play(params, context) {
     ]);
 
     if (playInfoResult.status !== "fulfilled") {
-      throw new Error(playInfoResult.reason && playInfoResult.reason.message ? playInfoResult.reason.message : "网盘直链解析失败");
+      const reason = playInfoResult.reason && playInfoResult.reason.message ? playInfoResult.reason.message : String(playInfoResult.reason || "网盘直链解析失败");
+      await OmniBox.log("warn", `[爱盼][play] getDriveVideoPlayInfo 失败: ${reason}，fallback 打开网盘页 share=${shareURL}`);
+      const fbHeader = { ...HEADERS, Referer: `${HOST}/` };
+      return { urls: [{ name: "打开网盘", url: shareURL }], header: fbHeader, headers: fbHeader, parse: 1, jx: 0, url: shareURL };
     }
-    const playInfo = playInfoResult.value;
-    if (!playInfo || !Array.isArray(playInfo.url) || !playInfo.url.length) throw new Error("网盘直链解析结果为空");
+    const playInfo = playInfoResult.value || {};
+    await OmniBox.log("info", `[爱盼][play] SDK返回 url类型=${typeof playInfo.url} 数组=${Array.isArray(playInfo.url)} urls数组=${Array.isArray(playInfo.urls)} keys=${Object.keys(playInfo).join(",")}`);
 
-    const urls = playInfo.url.map((item) => ({ name: item.name || "播放", url: item.url }));
+    // SDK 的 url 字段可能是 string（见 javascript-sdk.md）或 [{name,url}] 数组，也可能是 urls；三种都要兼容
+    const urls = [];
+    const rawUrls = playInfo.urls || playInfo.url || [];
+    if (typeof rawUrls === "string" && rawUrls) {
+      urls.push({ name: "播放", url: rawUrls });
+    } else if (Array.isArray(rawUrls)) {
+      for (const item of rawUrls) {
+        if (typeof item === "string" && item) {
+          urls.push({ name: "播放", url: item });
+        } else if (item && item.url) {
+          urls.push({ name: item.name || "播放", url: item.url });
+        }
+      }
+    }
+
+    if (!urls.length) {
+      await OmniBox.log("warn", `[爱盼][play] SDK未返回可用直链，fallback parse:1 打开网盘页 share=${shareURL}`);
+      const fbHeader = { ...HEADERS, Referer: `${HOST}/` };
+      return { urls: [{ name: "打开网盘", url: shareURL }], header: fbHeader, headers: fbHeader, parse: 1, jx: 0, url: shareURL };
+    }
+
     let danmakuList = Array.isArray(playInfo.danmaku) ? playInfo.danmaku : [];
     let scrapeTitle = "";
     let scrapePic = "";
