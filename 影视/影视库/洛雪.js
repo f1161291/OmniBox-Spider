@@ -1,7 +1,7 @@
 // @name 洛雪
 // @author OmniBox
-// @description 站点：tv.lxyy.club（洛雪）。v2.2.0 新增官方解析线路（洛雪4K/蓝光/臻享/789/麒麟）：官网的 4K/HDR 画质不在采集站里，而是把平台播放页交给站点解析接口换直链。接入完整四段链路 POST /api/playback-session.php 取 csrf+cookie → 带 X-CSRF-Token+Cookie 请求 detail 拿 episodes[].playback_grant → GET /json-player.php?route=&url=&source=&grant= 取 data-authorization → POST /api/json-parse.php 拿 {format,url}；官方线路在详情页排最前，play 时优先走解析、命中即 parse=0 直链（hls 与 dash/.mpd 都支持），失败再回落嗅探与跨源兜底。只对 qq/bilibili/rrmj/hmdj/mgtv 生成官方线路（优酷/爱奇艺实测洛雪4K 返回 noauth），native 格式实测是付费墙直接跳过。可用 LXYY_OFFICIAL_ENABLED/LXYY_OFFICIAL_ROUTES/LXYY_OFFICIAL_GROUPS 调整。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
-// @version 2.2.1
+// @description 站点：tv.lxyy.club（洛雪）。v2.2.2 修复官方解析在宿主上「无授权：请从本站影片播放页打开」：playback_grant 是绑会话的，而宿主 detail 与 play 是两次独立进程、不共享内存，play 新建会话后拿旧会话的 grant 必然被拒（本地单进程 vm 测试反而是通的，容易误判）。改为会话落宿主缓存让两次调用共享（20 分钟续期），并在授权缺失时自动换新会话重新换 grant 重试一次。v2.2.0 新增官方解析线路（洛雪4K/蓝光/臻享/789/麒麟）：官网的 4K/HDR 画质不在采集站里，而是把平台播放页交给站点解析接口换直链。接入完整四段链路 POST /api/playback-session.php 取 csrf+cookie → 带 X-CSRF-Token+Cookie 请求 detail 拿 episodes[].playback_grant → GET /json-player.php?route=&url=&source=&grant= 取 data-authorization → POST /api/json-parse.php 拿 {format,url}；官方线路在详情页排最前，play 时优先走解析、命中即 parse=0 直链（hls 与 dash/.mpd 都支持），失败再回落嗅探与跨源兜底。只对 qq/bilibili/rrmj/hmdj/mgtv 生成官方线路（优酷/爱奇艺实测洛雪4K 返回 noauth），native 格式实测是付费墙直接跳过。可用 LXYY_OFFICIAL_ENABLED/LXYY_OFFICIAL_ROUTES/LXYY_OFFICIAL_GROUPS 调整。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
+// @version 2.2.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/影视库/洛雪.js
 
 /**
@@ -525,9 +525,30 @@ function collectSetCookie(headers) {
 }
 
 /** 取播放会话（csrf + sg_playback_access cookie），进程内复用，过期自动重建。 */
-async function ensurePlaybackSession() {
+const PLAYBACK_SESSION_CACHE_KEY = "lxyy:playback_session";
+const PLAYBACK_SESSION_TTL = 20 * 60; // 秒；站点 cookie 约 24h，20 分钟续一次足够稳
+
+/**
+ * 取播放会话（csrf + sg_playback_access cookie）。
+ *
+ * 关键：宿主是「detail 一次进程、play 一次进程」，两次不共享内存。
+ * 而 playback_grant 是**绑会话**的——A 会话拿到的 grant 在 B 会话里用，
+ * 站点返回「请从本站影片播放页打开」。所以会话必须落宿主缓存让两次调用共享，
+ * 否则 play 永远拿不到 4K 授权（本地单进程 vm 测试反而是通的，容易误判）。
+ */
+async function ensurePlaybackSession(forceRefresh) {
   const now = Date.now();
-  if (playbackSession && now - playbackSession.at < 20 * 60 * 1000) return playbackSession;
+  if (!forceRefresh && playbackSession && now - playbackSession.at < PLAYBACK_SESSION_TTL * 1000) {
+    return playbackSession;
+  }
+  if (!forceRefresh) {
+    const cached = await getCachedJson(PLAYBACK_SESSION_CACHE_KEY);
+    if (cached && cached.csrf && cached.at && now - Number(cached.at) < PLAYBACK_SESSION_TTL * 1000) {
+      playbackSession = { csrf: String(cached.csrf), cookie: String(cached.cookie || ""), at: Number(cached.at) };
+      logInfo(`官方解析 复用缓存会话 csrf=${playbackSession.csrf.slice(0, 10)}`);
+      return playbackSession;
+    }
+  }
   const res = await nodeRequest(`${HOST}/api/playback-session.php`, { method: "POST" }, {
     "User-Agent": UA,
     Referer: `${HOST}/`,
@@ -541,7 +562,8 @@ async function ensurePlaybackSession() {
   if (!csrf) throw new Error(`播放会话获取失败 HTTP ${res.statusCode}`);
   const cookie = collectSetCookie(res.headers);
   playbackSession = { csrf, cookie, at: now };
-  logInfo(`官方解析 会话就绪 csrf=${csrf.slice(0, 10)} cookie=${cookie ? "有" : "无"}`);
+  await setCachedJson(PLAYBACK_SESSION_CACHE_KEY, playbackSession, PLAYBACK_SESSION_TTL);
+  logInfo(`官方解析 新建会话 csrf=${csrf.slice(0, 10)} cookie=${cookie ? "有" : "无"}`);
   return playbackSession;
 }
 
@@ -591,6 +613,27 @@ async function parseOfficial(playPageUrl, source, opts = {}) {
       logInfo(`官方解析 取 grant 失败: ${error && error.message ? error.message : error}`);
     }
   }
+  // grant 绑会话：宿主 detail 与 play 是两次进程，playId 里的 grant 可能属于上一个会话。
+  // 这种情况下站点会返回「请从本站影片播放页打开」，用当前会话重新换一次即可。
+  let session = null;
+  let refreshed = false;
+  const refreshGrant = async () => {
+    if (refreshed || !opts.collectId) return false;
+    refreshed = true;
+    try {
+      // 必须换新会话再取 grant：旧会话下的 grant 在新会话里无效
+      session = await ensurePlaybackSession(true);
+      const detail = await proxyDetailWithGrant(opts.collectId, source);
+      const next = findGrantByUrl(detail, target);
+      if (!next) return false;
+      grant = next;
+      logInfo("官方解析 会话变更，已重新换取 grant");
+      return true;
+    } catch (error) {
+      logInfo(`官方解析 换 grant 失败: ${error && error.message ? error.message : error}`);
+      return false;
+    }
+  };
 
   const group = String(opts.group || "").toLowerCase();
   const routeIds = opts.routeId
@@ -602,7 +645,7 @@ async function parseOfficial(playPageUrl, source, opts = {}) {
     });
   if (!routeIds.length) return null;
 
-  const session = await ensurePlaybackSession();
+  session = await ensurePlaybackSession();
   for (const routeId of routeIds) {
     const routeName = OFFICIAL_ROUTE_NAMES[routeId] || routeId;
     try {
@@ -616,11 +659,32 @@ async function parseOfficial(playPageUrl, source, opts = {}) {
         ...(session.cookie ? { Cookie: session.cookie } : {}),
       });
       const html = String(pageRes.body || "");
-      const authMatch = html.match(/data-authorization="([^"]*)"/);
+      let authMatch = html.match(/data-authorization="([^"]*)"/);
       if (!authMatch || !authMatch[1]) {
         const errMatch = html.match(/data-authorization-error="([^"]*)"/);
-        logInfo(`官方解析 ${routeName} 无授权: ${errMatch ? errMatch[1] : "unknown"}`);
-        continue;
+        const reason = errMatch ? errMatch[1] : "unknown";
+        // 授权缺失多因会话不匹配：换 grant 后用同一线路重试一次
+        if (await refreshGrant()) {
+          const retryUrl = `${HOST}/json-player.php?route=${encodeURIComponent(routeId)}`
+            + `&url=${encodeURIComponent(target)}`
+            + `&source=${encodeURIComponent(source || "")}`
+            + (grant ? `&grant=${encodeURIComponent(grant)}` : "");
+          const retryRes = await nodeRequest(retryUrl, {}, {
+            "User-Agent": UA,
+            Referer: `${HOST}/`,
+            ...(session.cookie ? { Cookie: session.cookie } : {}),
+          });
+          authMatch = String(retryRes.body || "").match(/data-authorization="([^"]*)"/);
+          if (authMatch && authMatch[1]) {
+            logInfo(`官方解析 ${routeName} 换 grant 后重试成功`);
+          } else {
+            logInfo(`官方解析 ${routeName} 无授权: ${reason}`);
+            continue;
+          }
+        } else {
+          logInfo(`官方解析 ${routeName} 无授权: ${reason}`);
+          continue;
+        }
       }
 
       const payload = JSON.stringify({
