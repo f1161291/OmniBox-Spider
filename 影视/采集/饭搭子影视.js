@@ -1,7 +1,7 @@
 // @name 饭搭子影视
-// @version 1.0.6
+// @version 1.1.0
 // @author omnibox-spider
-// @description 饭搭子影视（fdzys.com）OmniBox Spider：官网 SSR 首页/分类/搜索/详情，播放页 player_aaaa 解直链，多线路自动探测 m3u8 + 首分片后自动选择最优线路；支持官方平台页面嗅探/parse=1 兜底
+// @description 饭搭子影视（fdzys.com）OmniBox Spider：官网 SSR 首页/分类/搜索/详情，播放页 player_aaaa 解直链，按线路播放；支持官方平台页面嗅探/parse=1 兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/饭搭子影视.js
 
 // 【环境变量】站点是 HTML 前台而非 JSON 采集 API，因此站点地址使用 XXX_HOST 风格的 FDZYS_HOST，
@@ -14,11 +14,6 @@
 //  FDZYS_CACHE_TTL       页面缓存秒数，默认 300
 //  FDZYS_DETAIL_TTL      详情/播放页缓存秒数，默认 600
 //  FDZYS_FILTER_TTL      筛选定义缓存秒数，默认 1800
-//  FDZYS_AUTO_PROBE      是否启用多线路自动探测，默认 1；设 0 直接取首选线路
-//  FDZYS_MAX_ROUTES      自动探测最多线路数，默认 11
-//  FDZYS_PROBE_LIMIT     线路探测并发数，默认 4
-//  FDZYS_PROBE_TIMEOUT   单线路探测超时毫秒，默认 4000
-//  FDZYS_PROBE_CACHE_TTL 线路探测结果缓存秒数，默认 600；设 0 关闭
 //  FDZYS_PLAY_TTL        播放页解析结果缓存秒数，默认 180
 
 // OmniBox 宿主用 stdout 传递 JSON 响应；部分版本的 omnibox_sdk.log 会把日志
@@ -88,11 +83,6 @@ const CACHE_TTL = Math.max(30, Number(process.env.FDZYS_CACHE_TTL || 300) || 300
 const DETAIL_TTL = Math.max(60, Number(process.env.FDZYS_DETAIL_TTL || 600) || 600);
 const FILTER_TTL = Math.max(300, Number(process.env.FDZYS_FILTER_TTL || 1800) || 1800);
 const PLAY_TTL = Math.max(30, Number(process.env.FDZYS_PLAY_TTL || 180) || 180);
-const AUTO_PROBE = !["0", "false", "no", "off"].includes(String(process.env.FDZYS_AUTO_PROBE || "1").trim().toLowerCase());
-const MAX_ROUTES = Math.max(1, Math.min(20, Number(process.env.FDZYS_MAX_ROUTES || 11) || 11));
-const PROBE_LIMIT = Math.max(1, Math.min(8, Number(process.env.FDZYS_PROBE_LIMIT || 4) || 4));
-const PROBE_TIMEOUT = Math.max(1000, Number(process.env.FDZYS_PROBE_TIMEOUT || 4000) || 4000);
-const PROBE_CACHE_TTL = Math.max(0, Number(process.env.FDZYS_PROBE_CACHE_TTL || 600) || 0);
 const HTTP_MODE = String(process.env.FDZYS_HTTP_MODE || 'auto').trim().toLowerCase();
 
 // runner 用 stdout 传递 JSON 响应；日志全部写 stderr，避免异步日志污染下一集响应。
@@ -115,7 +105,6 @@ const CATEGORY_KEYS = CLASS_LIST.map((c) => c.key);
 const MAIN_PATH_RE = /^(movie|tv|dongman|zongyi|tiyu|duanju)(?:\/|$)/;
 const FILTER_TITLE_KEY = { "类型": "type", "地区": "area", "语言": "lang", "年份": "year", "排序": "sort" };
 const FILTER_ORDER = ["type", "area", "lang", "year", "sort"];
-const TRUSTED_FROMS = new Set(["bilibili", "mgtv", "qiyi", "iqiyi", "qq", "youku"]);
 const OFFICIAL_FROM_NAMES = {
   bilibili: "哔哩哔哩", mgtv: "芒果TV", qiyi: "爱奇艺", iqiyi: "爱奇艺",
   qq: "腾讯视频", youku: "优酷",
@@ -709,7 +698,7 @@ function makeToken(mode, detailPath, episodeHref, episodeName, sid, lineName) {
     encodeURIComponent(episodeHref),
     encodeURIComponent(episodeName || "立即播放"),
     String(sid || 1),
-    encodeURIComponent(lineName || "自动优选"),
+    encodeURIComponent(lineName || "播放"),
   ].join(":");
 }
 function parseToken(value) {
@@ -744,9 +733,7 @@ function buildLegacyPlayFields(sources) {
   };
 }
 
-function isM3u8(url) { return /\.m3u8(?:\?|#|$)/i.test(str(url)); }
 function isDirectMedia(url) { return /\.(m3u8|mp4|m4s|ts|flv|mkv|avi|mov|webm|wmv)(?:\?|#|$)/i.test(str(url)); }
-function isTrustedFrom(from) { return TRUSTED_FROMS.has(str(from).toLowerCase()); }
 
 async function sniffOrExtract(url, headers) {
   try {
@@ -762,7 +749,7 @@ async function sniffOrExtract(url, headers) {
     logI(`[sniff] SDK 嗅探跳过 url=${str(url).slice(0, 100)} err=${err.message || err}`);
   }
   try {
-    const res = await httpGet(url, { timeout: PROBE_TIMEOUT, maxBytes: 512 * 1024, headers: { ...headers, "Accept-Encoding": "identity" } });
+    const res = await httpGet(url, { timeout: TIMEOUT, maxBytes: 512 * 1024, headers: { ...headers, "Accept-Encoding": "identity" } });
     if (res.statusCode !== 200 || !res.body) return "";
     const body = res.body.replace(/\\\//g, "/");
     const player = extractPlayerData(body);
@@ -781,124 +768,6 @@ async function sniffOrExtract(url, headers) {
   return "";
 }
 
-function playlistLines(body) {
-  return String(body || "").replace(/\r/g, "").split("\n").map((x) => x.trim()).filter(Boolean);
-}
-async function probeM3u8(url, headers, depth = 0) {
-  const t0 = Date.now();
-  const res = await httpGet(url, {
-    timeout: PROBE_TIMEOUT,
-    maxBytes: 128 * 1024,
-    headers: { ...headers, Range: "bytes=0-65535", "Accept-Encoding": "identity" },
-  });
-  const ms = Date.now() - t0;
-  if (res.statusCode < 200 || res.statusCode >= 300 || !res.body) {
-    return { ok: false, status: res.statusCode, ms, kind: "m3u8-manifest", url, error: res.error || "manifest unavailable" };
-  }
-  const lines = playlistLines(res.body);
-  if (!lines.some((line) => /^#EXTM3U\b/i.test(line))) {
-    return { ok: false, status: res.statusCode, ms, kind: "m3u8-manifest", url, error: "not m3u8" };
-  }
-  for (let i = 0; i < lines.length; i++) {
-    if (/^#EXT-X-STREAM-INF\b/i.test(lines[i])) {
-      for (let j = i + 1; j < lines.length; j++) {
-        if (lines[j].startsWith("#")) continue;
-        const variant = absUrl(lines[j], url);
-        if (variant && depth < 1 && variant !== url) {
-          const nested = await probeM3u8(variant, headers, depth + 1);
-          return { ...nested, url: nested.url || variant, parent: url, ms: Date.now() - t0 };
-        }
-        break;
-      }
-    }
-  }
-  let segment = "";
-  for (const line of lines) {
-    if (line.startsWith("#")) continue;
-    segment = absUrl(line, url);
-    if (segment) break;
-  }
-  if (!segment) {
-    return { ok: true, status: res.statusCode, ms, kind: "m3u8-manifest", url, segment: false, partial: true };
-  }
-  const segRes = await httpGet(segment, {
-    timeout: PROBE_TIMEOUT,
-    maxBytes: 4096,
-    headers: { ...headers, Range: "bytes=0-1023", "Accept-Encoding": "identity" },
-  });
-  const segMs = Date.now() - t0;
-  const ok = segRes.statusCode >= 200 && segRes.statusCode < 300 && segRes.bytes > 0;
-  return {
-    ok,
-    status: segRes.statusCode,
-    ms: segMs,
-    kind: "m3u8",
-    url,
-    segment: segment,
-    segmentOk: ok,
-    partial: false,
-    error: ok ? "" : (segRes.error || `segment HTTP ${segRes.statusCode}`),
-  };
-}
-async function probeMedia(url, from, headers, opts = {}) {
-  const direct = opts.direct !== false;
-  const depth = Number(opts.depth || 0);
-  const t0 = Date.now();
-  if (isTrustedFrom(from) && !direct) {
-    return { ok: true, score: 900, kind: "trusted-page", url, ms: 0, parse: 1, direct: false };
-  }
-  if (direct && isM3u8(url)) {
-    const r = await probeM3u8(url, headers, 0);
-    const score = r.ok ? (10000 - Math.min(r.ms, 8000) + (r.segmentOk ? 1200 : 0)) : 200;
-    return { ...r, score, parse: 0, direct: true };
-  }
-  if (direct && isDirectMedia(url)) {
-    const res = await httpGet(url, {
-      timeout: PROBE_TIMEOUT,
-      maxBytes: 4096,
-      headers: { ...headers, Range: "bytes=0-1023", "Accept-Encoding": "identity" },
-    });
-    const ok = res.statusCode >= 200 && res.statusCode < 300 && res.bytes > 0;
-    return {
-      ok,
-      score: ok ? 9000 - Math.min(Date.now() - t0, 8000) : 180,
-      status: res.statusCode,
-      ms: Date.now() - t0,
-      kind: "direct-media",
-      url,
-      parse: 0,
-      direct: true,
-      error: ok ? "" : (res.error || `HTTP ${res.statusCode}`),
-    };
-  }
-  if (depth < 2) {
-    const sniffed = await sniffOrExtract(url, headers);
-    if (sniffed && sniffed !== url) {
-      const nested = await probeMedia(sniffed, from, headers, { direct: true, depth: depth + 1 });
-      return { ...nested, url: sniffed, fromPage: url, score: Math.max(nested.score || 0, 1200) };
-    }
-  }
-  if (isTrustedFrom(from)) {
-    return { ok: true, score: 900, kind: "trusted-page", url, ms: Date.now() - t0, parse: 1, direct: false };
-  }
-  return { ok: false, score: 50, kind: "page", url, ms: Date.now() - t0, parse: 1, direct: false };
-}
-
-async function probeMediaCached(url, from, headers, opts = {}) {
-  const direct = opts.direct !== false;
-  const rawKey = `${url}|${from || ""}|${direct ? 1 : 0}|${opts.depth || 0}`;
-  const key = cacheKey("probe", rawKey);
-  if (PROBE_CACHE_TTL > 0) {
-    const cached = await cacheGet(key);
-    if (cached && typeof cached === "object" && typeof cached.score === "number") return cached;
-  }
-  const result = await probeMedia(url, from, headers, opts);
-  if (PROBE_CACHE_TTL > 0) {
-    const ttl = result.ok ? PROBE_CACHE_TTL : Math.min(60, PROBE_CACHE_TTL);
-    await cacheSet(key, result, ttl);
-  }
-  return result;
-}
 
 async function resolvePlayPageInfo(playUrl, ttl = PLAY_TTL) {
   const key = cacheKey("play", playUrl);
@@ -926,50 +795,6 @@ async function resolvePlayPageInfo(playUrl, ttl = PLAY_TTL) {
   }
   await cacheSet(key, out, ttl);
   return out;
-}
-
-function findEpisodeInPane(episodes, token) {
-  const list = Array.isArray(episodes) ? episodes : [];
-  if (!list.length) return { href: token.episodeHref, name: token.episodeName || "立即播放" };
-  const want = episodeKey(token.episodeHref);
-  return list.find((e) => episodeKey(e.href) === want)
-    || list.find((e) => str(e.name) === str(token.episodeName))
-    || list[0];
-}
-async function collectAutoCandidates(token) {
-  const detailUrl = `${SITE}/${token.detailPath.replace(/^\/+/, "")}`;
-  const html = await getHtmlCached(detailUrl, DETAIL_TTL);
-  let routes = parseRoutes(html);
-  const panes = parsePanes(html, token.detailPath);
-  if (!routes.length) {
-    const sids = [...panes.keys()].sort((a, b) => a - b);
-    routes = sids.length ? sids.map((sid, i) => ({ sid, name: `线路${sid}`, from: "", order: i }))
-      : [{ sid: 1, name: "默认线路", from: "", order: 0 }];
-  }
-  routes = routes.slice(0, MAX_ROUTES);
-  const candidates = [];
-  for (const route of routes) {
-    const episodes = panes.get(route.sid) || [];
-    const ep = findEpisodeInPane(episodes, token);
-    const playUrl = buildEpisodePlayUrl(ep.href || token.episodeHref, route.sid);
-    candidates.push({
-      sid: route.sid,
-      name: str(route.name) || `线路${route.sid}`,
-      from: str(route.from || ""),
-      playUrl,
-      routeOrder: route.order ?? routes.indexOf(route),
-    });
-  }
-  if (!candidates.length) {
-    candidates.push({
-      sid: token.sid || 1,
-      name: token.lineName || "默认线路",
-      from: "",
-      playUrl: buildEpisodePlayUrl(token.episodeHref || detailUrl, token.sid || 1),
-      routeOrder: 0,
-    });
-  }
-  return candidates;
 }
 
 async function resolveCategoryUrl(categoryId, filters, page) {
@@ -1070,20 +895,14 @@ async function detail(params, context) {
     let routeList = routes.length ? routes : [...panes.keys()].sort((a, b) => a - b).map((sid, i) => ({ sid, name: `线路${sid}`, from: "", order: i }));
     if (!routeList.length) routeList = [{ sid: 1, name: "默认线路", from: "", order: 0 }];
 
-    let masterSid = routeList[0].sid;
-    let masterEpisodes = panes.get(masterSid) || [];
+    let masterEpisodes = panes.get(routeList[0].sid) || [];
     for (const route of routeList) {
       const eps = panes.get(route.sid) || [];
-      if (eps.length > masterEpisodes.length) { masterSid = route.sid; masterEpisodes = eps; }
+      if (eps.length > masterEpisodes.length) masterEpisodes = eps;
     }
     if (!masterEpisodes.length) masterEpisodes = [{ href: `${SITE}/${detailPath}`, name: "立即播放" }];
 
     const sources = [];
-    const autoEpisodes = masterEpisodes.map((ep) => ({
-      name: str(ep.name) || "立即播放",
-      playId: makeToken("auto", detailPath, ep.href, str(ep.name) || "立即播放", masterSid, "自动优选"),
-    }));
-    sources.push({ name: "自动优选", episodes: autoEpisodes });
     for (const route of routeList) {
       const eps = (panes.get(route.sid) || []).length ? panes.get(route.sid) : masterEpisodes;
       const lineName = str(route.name) || `线路${route.sid}`;
@@ -1165,7 +984,7 @@ async function playSinglePlayPage(playUrl, flag) {
 async function play(params, context) {
   const body = objectOf(params);
   const rawId = str(body.playId ?? body.id ?? body.url ?? "");
-  const flag = str(body.flag ?? "自动优选") || "自动优选";
+  const flag = str(body.flag ?? "") || "播放";
   try {
     logI(`[play] 入口 playId=${rawId.slice(0, 180)} flag=${flag} from=${context?.from || "web"}`);
     if (!rawId) throw new Error("playId 缺失");
@@ -1177,70 +996,8 @@ async function play(params, context) {
       const pageUrl = /^https?:\/\//i.test(rawId) ? rawId : absUrl(rawId, SITE + "/");
       return await playSinglePlayPage(pageUrl, flag);
     }
-    if (token.mode !== "auto") {
-      const pageUrl = buildEpisodePlayUrl(token.episodeHref, token.sid);
-      return await playSinglePlayPage(pageUrl, token.lineName || flag);
-    }
-
-    const candidates = await collectAutoCandidates(token);
-    logI(`[play][auto] 候选线路=${candidates.length} autoProbe=${AUTO_PROBE ? 1 : 0} limit=${PROBE_LIMIT} firstUrl=${String(candidates[0]?.playUrl || "").slice(0, 130)}`);
-    const header = playHeaders();
-    if (!AUTO_PROBE) {
-      const first = candidates[0];
-      return await playSinglePlayPage(first.playUrl, first.name || "自动优选");
-    }
-
-    const probed = await mapLimit(candidates, PROBE_LIMIT, async (candidate) => {
-      try {
-        const info = await resolvePlayPageInfo(candidate.playUrl);
-        const mediaUrl = str(info.url || candidate.playUrl);
-        const direct = !!info.direct && isDirectMedia(mediaUrl);
-        const from = str(info.from || candidate.from || "");
-        const fallbackProbe = { ok: false, score: 20, kind: "timeout", url: mediaUrl, ms: PROBE_TIMEOUT * 3, error: "线路探测总超时" };
-        const probe = await withTimeout(
-          probeMediaCached(mediaUrl, from, header, { direct, depth: 0 }),
-          PROBE_TIMEOUT * 3 + 1200,
-          fallbackProbe,
-        );
-        const finalUrl = str(probe.url || mediaUrl);
-        const parse = isDirectMedia(finalUrl) ? 0 : (probe.parse ?? 1);
-        return {
-          ...candidate,
-          url: finalUrl,
-          score: Number(probe.score || 0),
-          ok: !!probe.ok,
-          kind: str(probe.kind || ""),
-          ms: Number(probe.ms || 0),
-          parse,
-          from,
-          error: str(probe.error || ""),
-        };
-      } catch (err) {
-        logE(`[play][auto] 线路失败 sid=${candidate.sid} name=${candidate.name}: ${err.message || err}`);
-        return { ...candidate, url: candidate.playUrl, score: 40, ok: false, kind: "error", ms: 0, parse: 1, from: candidate.from, error: err.message || String(err) };
-      }
-    });
-
-    const results = probed.filter(Boolean).sort((a, b) => {
-      const ap = Number(a.parse ?? 1) === 0 ? 1 : 0;
-      const bp = Number(b.parse ?? 1) === 0 ? 1 : 0;
-      if (ap !== bp) return bp - ap;
-      return (b.score - a.score) || (a.routeOrder - b.routeOrder) || (a.sid - b.sid);
-    });
-    const good = results.filter((r) => r.url).slice(0, MAX_ROUTES);
-    if (!good.length) throw new Error("所有线路均未返回地址");
-    const best = good[0];
-    const urls = good.map((r) => ({ name: str(r.name) || `线路${r.sid}`, url: str(r.url) }));
-    const finalParse = best.parse ?? (isDirectMedia(best.url) ? 0 : 1);
-    logI(`[play][auto] 选中线路 sid=${best.sid} name=${best.name} score=${best.score} kind=${best.kind} ms=${best.ms} parse=${finalParse} url=${str(best.url).slice(0, 140)}`);
-    return {
-      urls,
-      url: str(best.url),
-      flag: best.name || flag,
-      header,
-      parse: finalParse,
-      playUrl: "",
-    };
+    const pageUrl = buildEpisodePlayUrl(token.episodeHref, token.sid);
+    return await playSinglePlayPage(pageUrl, token.lineName || flag);
   } catch (err) {
     logE(`[play] 失败 playId=${rawId.slice(0, 160)}: ${err.message || err}`);
     return { urls: [], url: "", flag, header: playHeaders(), parse: 0, playUrl: "" };
