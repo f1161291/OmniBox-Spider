@@ -1,13 +1,19 @@
 // @name 乌云影视
 // @author 梦
 // @description 刮削：未接入，弹幕：站内弹幕接口，嗅探：不需要
-// @version 1.1.4
+// @dependencies: axios
+// @version 1.1.5
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/乌云影视.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");
+const https = require("https");
+const axios = require("axios");
 
 const SITE = "https://wooyun.tv";
+// wooyun.tv 的 SNI 在部分网络被 RST（源站 CloudFlare Origin 证书 SAN=api.oztui.com），
+// 保留原域名做 DNS 解析，仅用自定义 agent 覆盖 SNI 为非封锁域名并忽略证书不匹配。
+const SNI_AGENT = new https.Agent({ rejectUnauthorized: false, servername: "example.com" });
 const DEFAULT_PAGE_SIZE = 24;
 const DEFAULT_HOME_LIMIT = 12;
 
@@ -168,6 +174,9 @@ async function play(params, context) {
       return emptyPlay(flag);
     }
 
+    // 站点返回的是 wooyun.tv/gen_domestic/<真实CDN> 反代路径；宿主播放器无法覆盖 SNI，
+    // 走 wooyun.tv 会被 RST。剥掉反代前缀，返回真实 CDN 直链（已实测裸请求可达）。
+    finalUrl = unwrapProxyUrl(finalUrl);
     await logInfo(`[play] resolved=${finalUrl}`);
     return {
       parse: 0,
@@ -433,7 +442,20 @@ function mapVod(item) {
 }
 
 function pickPoster(item) {
-  return String(item?.posterUrlS3 || item?.posterUrl || item?.thumbUrlS3 || item?.thumbUrl || "");
+  const candidates = [item?.posterUrl, item?.thumbUrl, item?.posterUrlS3, item?.thumbUrlS3];
+  // 优先取非 wooyun.tv 域的真实图床（static.wooyun.tv 的 SNI 被 RST，宿主浏览器无法加载）。
+  for (const value of candidates) {
+    const url = String(value || "").trim();
+    if (!url) continue;
+    if (/^https?:\/\/[^/]*wooyun\.tv\//i.test(url)) continue;
+    return url;
+  }
+  // 全部候选都被封锁时退回第一个非空值，至少保持结构完整。
+  for (const value of candidates) {
+    const url = String(value || "").trim();
+    if (url) return url;
+  }
+  return "";
 }
 
 function findPlayUrl(seasons, target) {
@@ -452,34 +474,46 @@ function findPlayUrl(seasons, target) {
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
+function asJson(data) {
+  if (data == null) return {};
+  if (typeof data === "string") {
+    try { return JSON.parse(data); } catch (_) { return {}; }
+  }
+  return data;
+}
+
+function checkApiJson(json, label) {
+  if (json && json.code && json.code !== 200 && json.isSuccess === false) {
+    throw new Error(`${label} => ${json.resultMsg || json.code}`);
+  }
+  return json?.data;
+}
+
 async function fetchJson(path) {
   const url = path.startsWith("http") ? path : `${SITE}${path}`;
-  const res = await OmniBox.request(url, {
-    method: "GET",
+  const res = await axios.get(url, {
+    httpsAgent: SNI_AGENT,
+    validateStatus: () => true,
     headers: {
       Accept: "application/json, text/plain, */*",
       Referer: `${SITE}/`,
       Origin: SITE,
       "User-Agent": UA,
     },
+    timeout: 20000,
   });
 
-  if (res.statusCode !== 200) {
-    throw new Error(`GET ${path} => HTTP ${res.statusCode}`);
+  if (res.status !== 200) {
+    throw new Error(`GET ${path} => HTTP ${res.status}`);
   }
-
-  const json = JSON.parse(res.body || "{}");
-  if (json && json.code && json.code !== 200 && json.isSuccess === false) {
-    throw new Error(`GET ${path} => ${json.resultMsg || json.code}`);
-  }
-
-  return json?.data;
+  return checkApiJson(asJson(res.data), `GET ${path}`);
 }
 
 async function postJson(path, body) {
   const url = `${SITE}${path}`;
-  const res = await OmniBox.request(url, {
-    method: "POST",
+  const res = await axios.post(url, JSON.stringify(body), {
+    httpsAgent: SNI_AGENT,
+    validateStatus: () => true,
     headers: {
       Accept: "application/json, text/plain, */*",
       Referer: `${SITE}/`,
@@ -487,19 +521,21 @@ async function postJson(path, body) {
       "User-Agent": UA,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(body),
+    timeout: 20000,
   });
 
-  if (res.statusCode !== 200) {
-    throw new Error(`POST ${path} => HTTP ${res.statusCode}`);
+  if (res.status !== 200) {
+    throw new Error(`POST ${path} => HTTP ${res.status}`);
   }
+  return checkApiJson(asJson(res.data), `POST ${path}`);
+}
 
-  const json = JSON.parse(res.body || "{}");
-  if (json && json.code && json.code !== 200 && json.isSuccess === false) {
-    throw new Error(`POST ${path} => ${json.resultMsg || json.code}`);
-  }
-
-  return json?.data;
+// 剥掉本站反代前缀 https://wooyun.tv/gen_xxx/<真实URL>，返回真实 CDN 直链。
+// 仅当路径段是 gen_ 开头的反代且其后是完整 http(s) URL 时才剥，避免误伤正常链接。
+function unwrapProxyUrl(url) {
+  const value = String(url || "").trim();
+  const m = value.match(/^https?:\/\/[^/]+\/(gen_[a-z0-9_]+\/)(https?:\/\/.+)$/i);
+  return m ? m[2] : value;
 }
 
 function encodePlayId(payload) {
