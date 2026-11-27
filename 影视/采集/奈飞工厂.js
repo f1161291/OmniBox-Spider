@@ -2,7 +2,7 @@
 // @author @lucky_TJQ
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios,cheerio
-// @version 1.0.3
+// @version 1.0.4
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/奈飞工厂.js
 
 /**
@@ -512,9 +512,9 @@ const CLASS_LIST = [
 ];
 
 const SORT_OPTIONS = [
-  { n: '最新', v: 'time' },
-  { n: '最热', v: 'hits' },
-  { n: '评分', v: 'score' },
+  { name: '最新', value: 'time' },
+  { name: '最热', value: 'hits' },
+  { name: '评分', value: 'score' },
 ];
 
 const FILTER_SOURCE = {
@@ -565,9 +565,9 @@ function buildValueList(raw, withAll = true) {
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
-  const list = withAll ? [{ n: '全部', v: '' }] : [];
+  const list = withAll ? [{ name: '全部', value: '' }] : [];
   for (const item of items) {
-    list.push({ n: item, v: item });
+    list.push({ name: item, value: item });
   }
   return list;
 }
@@ -602,7 +602,7 @@ const FILTER_VALUE_POOL = (() => {
     for (const typeId of Object.keys(FILTERS)) {
       for (const group of FILTERS[typeId]) {
         if (group.key !== key) continue;
-        for (const option of group.value || []) values.add(String(option.v));
+        for (const option of group.value || []) values.add(String(option.value));
       }
     }
     pool[key] = values;
