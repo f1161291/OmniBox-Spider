@@ -1,7 +1,7 @@
 // @name 饭搭子影视
-// @version 1.1.0
+// @version 1.2.0
 // @author omnibox-spider
-// @description 饭搭子影视（fdzys.com）OmniBox Spider：官网 SSR 首页/分类/搜索/详情，播放页 player_aaaa 解直链，按线路播放；支持官方平台页面嗅探/parse=1 兜底
+// @description 饭搭子影视（fdzys.com）OmniBox Spider：官网 SSR 首页/分类/搜索/详情，播放页 player_aaaa 解直链；「自动选线」并发探测各线路按直链+实测延时挑最优（可关），支持官方平台页面嗅探/parse=1 兜底
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/饭搭子影视.js
 
 // 【环境变量】站点是 HTML 前台而非 JSON 采集 API，因此站点地址使用 XXX_HOST 风格的 FDZYS_HOST，
@@ -14,6 +14,14 @@
 //  FDZYS_CACHE_TTL       页面缓存秒数，默认 300
 //  FDZYS_DETAIL_TTL      详情/播放页缓存秒数，默认 600
 //  FDZYS_FILTER_TTL      筛选定义缓存秒数，默认 1800
+//  FDZYS_AUTO_PICK       是否启用「自动选线」，默认 1；设 0 则播放时按线路直接取
+//  FDZYS_PICK_ROUTES     自动选线最多探测的线路数，默认 6
+//  FDZYS_PICK_LIMIT      自动选线并发数，默认 6
+//  FDZYS_PICK_TIMEOUT    单线路探测超时毫秒，默认 1500
+//  FDZYS_PICK_BUDGET     自动选线整体预算毫秒，默认 3000（到点用已有结果排序）
+//  FDZYS_PICK_MIN_HITS   攒够几条直链立即返回，默认 2
+//  FDZYS_PICK_GRACE      首个直链出现后的收尾宽限毫秒，默认 400
+//  FDZYS_PICK_CACHE_TTL  选线结果缓存秒数，默认 600；设 0 关闭
 //  FDZYS_PLAY_TTL        播放页解析结果缓存秒数，默认 180
 
 // OmniBox 宿主用 stdout 传递 JSON 响应；部分版本的 omnibox_sdk.log 会把日志
@@ -83,6 +91,17 @@ const CACHE_TTL = Math.max(30, Number(process.env.FDZYS_CACHE_TTL || 300) || 300
 const DETAIL_TTL = Math.max(60, Number(process.env.FDZYS_DETAIL_TTL || 600) || 600);
 const FILTER_TTL = Math.max(300, Number(process.env.FDZYS_FILTER_TTL || 1800) || 1800);
 const PLAY_TTL = Math.max(30, Number(process.env.FDZYS_PLAY_TTL || 180) || 180);
+// 自动选线：打开即挑最优线路。整体截止时间优先于单线路超时，
+// 到点就用已探测到的结果排序，不再等慢线路。
+const AUTO_PICK = !["0", "false", "no", "off"].includes(String(process.env.FDZYS_AUTO_PICK || "1").trim().toLowerCase());
+const PICK_ROUTES = Math.max(1, Math.min(20, Number(process.env.FDZYS_PICK_ROUTES || 6) || 6));
+const PICK_LIMIT = Math.max(1, Math.min(8, Number(process.env.FDZYS_PICK_LIMIT || 6) || 6));
+const PICK_TIMEOUT = Math.max(800, Number(process.env.FDZYS_PICK_TIMEOUT || 1500) || 1500);
+const PICK_BUDGET = Math.max(1000, Number(process.env.FDZYS_PICK_BUDGET || 3000) || 3000);
+const PICK_CACHE_TTL = Math.max(0, Number(process.env.FDZYS_PICK_CACHE_TTL || 600) || 0);
+// 攒够 PICK_MIN_HITS 条直链立刻返回；否则首个直链出现后再等 PICK_GRACE 毫秒收尾
+const PICK_MIN_HITS = Math.max(1, Math.min(8, Number(process.env.FDZYS_PICK_MIN_HITS || 2) || 2));
+const PICK_GRACE = Math.max(0, Number(process.env.FDZYS_PICK_GRACE || 400) || 0);
 const HTTP_MODE = String(process.env.FDZYS_HTTP_MODE || 'auto').trim().toLowerCase();
 
 // runner 用 stdout 传递 JSON 响应；日志全部写 stderr，避免异步日志污染下一集响应。
@@ -768,6 +787,269 @@ async function sniffOrExtract(url, headers) {
   return "";
 }
 
+// ── 自动选线（探测）──────────────────────────────────────────────────────────
+// 目标：打开即挑最优线路，但绝不为了探测牺牲首帧。所有探测共享一个整体预算
+// PICK_BUDGET，到点立即用已有结果排序返回，慢线路不再等待。
+
+function withDeadline(promise, ms, fallbackValue) {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      resolve(fallbackValue);
+    }, Math.max(1, ms));
+    Promise.resolve(promise).then(
+      (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } },
+      () => { if (!done) { done = true; clearTimeout(timer); resolve(fallbackValue); } },
+    );
+  });
+}
+
+function playlistLines(body) {
+  return String(body || "").replace(/\r/g, "").split("\n").map((x) => x.trim()).filter(Boolean);
+}
+
+async function probeM3u8(url, headers, depth = 0) {
+  const t0 = Date.now();
+  const res = await httpGet(url, {
+    timeout: PICK_TIMEOUT,
+    maxBytes: 128 * 1024,
+    headers: { ...headers, Range: "bytes=0-65535", "Accept-Encoding": "identity" },
+  });
+  const ms = Date.now() - t0;
+  if (res.statusCode < 200 || res.statusCode >= 300 || !res.body) {
+    return { ok: false, status: res.statusCode, ms, kind: "m3u8-manifest", url, error: res.error || "manifest unavailable" };
+  }
+  const lines = playlistLines(res.body);
+  if (!lines.some((line) => /^#EXTM3U\b/i.test(line))) {
+    return { ok: false, status: res.statusCode, ms, kind: "m3u8-manifest", url, error: "not m3u8" };
+  }
+  // master playlist：展开第一条子流（depth<1 防止无限递归）
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^#EXT-X-STREAM-INF\b/i.test(lines[i])) continue;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (lines[j].startsWith("#")) continue;
+      const variant = absUrl(lines[j], url);
+      if (variant && depth < 1 && variant !== url) {
+        const nested = await probeM3u8(variant, headers, depth + 1);
+        return { ...nested, url: nested.url || variant, parent: url, ms: Date.now() - t0 };
+      }
+      break;
+    }
+  }
+  // 媒体列表：抓第一个分片确认真能播
+  let segment = "";
+  for (const line of lines) {
+    if (line.startsWith("#")) continue;
+    segment = absUrl(line, url);
+    if (segment) break;
+  }
+  if (!segment) {
+    return { ok: true, status: res.statusCode, ms, kind: "m3u8-manifest", url, segmentOk: false, partial: true, parse: 0 };
+  }
+  const segRes = await httpGet(segment, {
+    timeout: PICK_TIMEOUT,
+    maxBytes: 4096,
+    headers: { ...headers, Range: "bytes=0-1023", "Accept-Encoding": "identity" },
+  });
+  const segOk = segRes.statusCode >= 200 && segRes.statusCode < 300 && segRes.bytes > 0;
+  return {
+    ok: segOk,
+    status: segRes.statusCode,
+    ms: Date.now() - t0,
+    kind: "m3u8",
+    url,
+    segment,
+    segmentOk: segOk,
+    partial: false,
+    parse: 0,
+    error: segOk ? "" : (segRes.error || `segment HTTP ${segRes.statusCode}`),
+  };
+}
+
+// 对单个候选打分：能直连播放且越快分越高；页面型兜底给低分
+async function probeMedia(url, from, headers) {
+  const t0 = Date.now();
+  if (isDirectMedia(url) && /\.m3u8(?:\?|#|$)/i.test(url)) {
+    const r = await probeM3u8(url, headers, 0);
+    const score = r.ok ? (10000 - Math.min(r.ms, 8000) + (r.segmentOk ? 1200 : 0)) : 200;
+    return { ...r, score, parse: 0 };
+  }
+  if (isDirectMedia(url)) {
+    const res = await httpGet(url, {
+      timeout: PICK_TIMEOUT,
+      maxBytes: 4096,
+      headers: { ...headers, Range: "bytes=0-1023", "Accept-Encoding": "identity" },
+    });
+    const ok = res.statusCode >= 200 && res.statusCode < 300 && res.bytes > 0;
+    return {
+      ok,
+      score: ok ? (9000 - Math.min(Date.now() - t0, 8000)) : 180,
+      status: res.statusCode,
+      ms: Date.now() - t0,
+      kind: "direct-media",
+      url,
+      parse: 0,
+      error: ok ? "" : (res.error || `HTTP ${res.statusCode}`),
+    };
+  }
+  // 页面型：嗅探一次，能挖出直链就按直链算分
+  const sniffed = await sniffOrExtract(url, headers);
+  if (sniffed && sniffed !== url) {
+    const nested = await probeMedia(sniffed, from, headers);
+    return { ...nested, fromPage: url, score: Math.max(nested.score || 0, 1200) };
+  }
+  return { ok: false, score: 50, kind: "page", url, ms: Date.now() - t0, parse: 1, error: "无直链" };
+}
+
+async function probeMediaCached(url, from, headers) {
+  const key = cacheKey("pick", `${url}|${from || ""}`);
+  if (PICK_CACHE_TTL > 0) {
+    const cached = await cacheGet(key);
+    if (cached && typeof cached === "object" && typeof cached.score === "number") return cached;
+  }
+  const result = await probeMedia(url, from, headers);
+  if (PICK_CACHE_TTL > 0) {
+    await cacheSet(key, result, result.ok ? PICK_CACHE_TTL : Math.min(60, PICK_CACHE_TTL));
+  }
+  return result;
+}
+
+function findEpisodeInPane(episodes, token) {
+  const list = Array.isArray(episodes) ? episodes : [];
+  if (!list.length) return { href: token.episodeHref, name: token.episodeName || "立即播放" };
+  const want = episodeKey(token.episodeHref);
+  return list.find((e) => episodeKey(e.href) === want)
+    || list.find((e) => str(e.name) === str(token.episodeName))
+    || list[0];
+}
+
+// 同一集在每条线路上的播放页 URL，作为探测候选
+async function collectPickCandidates(token) {
+  const detailUrl = `${SITE}/${token.detailPath.replace(/^\/+/, "")}`;
+  const html = await getHtmlCached(detailUrl, DETAIL_TTL);
+  let routes = parseRoutes(html);
+  const panes = parsePanes(html, token.detailPath);
+  if (!routes.length) {
+    const sids = [...panes.keys()].sort((a, b) => a - b);
+    routes = sids.length
+      ? sids.map((sid, i) => ({ sid, name: `线路${sid}`, from: "", order: i }))
+      : [{ sid: 1, name: "默认线路", from: "", order: 0 }];
+  }
+  routes = routes.slice(0, PICK_ROUTES);
+  const candidates = routes.map((route, i) => {
+    const ep = findEpisodeInPane(panes.get(route.sid) || [], token);
+    return {
+      sid: route.sid,
+      name: str(route.name) || `线路${route.sid}`,
+      from: str(route.from || ""),
+      playUrl: buildEpisodePlayUrl(ep.href || token.episodeHref, route.sid),
+      routeOrder: route.order ?? i,
+    };
+  });
+  if (!candidates.length) {
+    candidates.push({
+      sid: token.sid || 1,
+      name: token.lineName || "默认线路",
+      from: "",
+      playUrl: buildEpisodePlayUrl(token.episodeHref || detailUrl, token.sid || 1),
+      routeOrder: 0,
+    });
+  }
+  return candidates;
+}
+
+// 探测所有候选并排序：parse=0 直链优先，其次按实测分（含延时）降序。
+// 关键：一旦攒够直链就进入「宽限期」收尾，不再等慢线路，保证首帧快。
+async function pickBestRoute(token, header) {
+  const candidates = await collectPickCandidates(token);
+  const startedAt = Date.now();
+  const deadline = startedAt + PICK_BUDGET;
+
+  const results = [];
+  let firstHitAt = 0;
+  let finished = false;
+  let resolveDone;
+  const donePromise = new Promise((resolve) => { resolveDone = resolve; });
+  let pollTimer = null;
+
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    resolveDone();
+  };
+
+  const directHits = () => results.filter((r) => r && r.ok && Number(r.parse) === 0 && r.url).length;
+
+  const check = () => {
+    if (finished) return;
+    const now = Date.now();
+    const hits = directHits();
+    if (hits > 0 && !firstHitAt) firstHitAt = now;
+    if (hits >= PICK_MIN_HITS) return finish();          // 够排序了，立即返回
+    if (firstHitAt && now - firstHitAt >= PICK_GRACE) return finish(); // 宽限期到，用已有结果
+    if (now >= deadline) return finish();                 // 整体预算耗尽
+    if (results.length >= candidates.length) return finish(); // 全部探测完
+    pollTimer = setTimeout(check, 60);
+  };
+
+  const probeOne = async (candidate) => {
+    const remain = deadline - Date.now();
+    if (remain <= 0) return { ...candidate, url: "", score: -1, ok: false, kind: "skipped", ms: 0, parse: 1 };
+    try {
+      const info = await withDeadline(resolvePlayPageInfo(candidate.playUrl), Math.min(remain, PICK_TIMEOUT * 2), null);
+      if (!info) return { ...candidate, url: "", score: -1, ok: false, kind: "timeout-page", ms: Date.now() - startedAt, parse: 1 };
+      const mediaUrl = str(info.url || candidate.playUrl);
+      const from = str(info.from || candidate.from || "");
+      const probe = await withDeadline(
+        probeMediaCached(mediaUrl, from, header),
+        Math.max(500, Math.min(deadline - Date.now(), PICK_TIMEOUT * 2)),
+        { ok: false, score: 60, kind: "timeout", url: mediaUrl, ms: PICK_TIMEOUT * 2, parse: 1, error: "探测超时" },
+      );
+      const finalUrl = str(probe.url || mediaUrl);
+      return {
+        ...candidate,
+        url: finalUrl,
+        score: Number(probe.score || 0),
+        ok: !!probe.ok,
+        kind: str(probe.kind || ""),
+        ms: Number(probe.ms || 0),
+        parse: isDirectMedia(finalUrl) ? 0 : (probe.parse ?? 1),
+        error: str(probe.error || ""),
+      };
+    } catch (err) {
+      logE(`[pick] 线路探测失败 sid=${candidate.sid} name=${candidate.name}: ${err.message || err}`);
+      return { ...candidate, url: candidate.playUrl, score: 40, ok: false, kind: "error", ms: 0, parse: 1, error: err.message || String(err) };
+    }
+  };
+
+  let cursor = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(PICK_LIMIT, candidates.length)) }, async () => {
+    for (;;) {
+      if (finished) return;
+      const i = cursor++;
+      if (i >= candidates.length) return;
+      const r = await probeOne(candidates[i]);
+      results.push(r);
+    }
+  });
+
+  check();
+  await Promise.race([donePromise, Promise.all(workers).then(() => finish())]);
+
+  const ranked = results.filter(Boolean).sort((a, b) => {
+    const ap = Number(a.parse ?? 1) === 0 ? 1 : 0;
+    const bp = Number(b.parse ?? 1) === 0 ? 1 : 0;
+    if (ap !== bp) return bp - ap;
+    return (b.score - a.score) || (a.routeOrder - b.routeOrder) || (a.sid - b.sid);
+  });
+  const usable = ranked.filter((r) => r.url);
+  logI(`[pick] 候选=${candidates.length} 已探测=${results.length} 可用=${usable.length} 耗时=${Date.now() - startedAt}ms 选中=${usable[0]?.name || "-"}/${usable[0]?.score ?? "-"}/${usable[0]?.ms ?? "-"}ms`);
+  return usable;
+}
+
 
 async function resolvePlayPageInfo(playUrl, ttl = PLAY_TTL) {
   const key = cacheKey("play", playUrl);
@@ -913,6 +1195,16 @@ async function detail(params, context) {
       if (episodes.length) sources.push({ name: lineName, episodes });
     }
 
+    // 「自动选线」放第一条：播放时并发探测各线路，按直链+实测延时挑最优。
+    // 只有一条线路时没必要探测，直接给单线路。
+    if (AUTO_PICK && sources.length > 1) {
+      const pickEpisodes = masterEpisodes.map((ep) => ({
+        name: str(ep.name) || "立即播放",
+        playId: makeToken("pick", detailPath, ep.href, str(ep.name) || "立即播放", routeList[0].sid, "自动选线"),
+      }));
+      if (pickEpisodes.length) sources.unshift({ name: "自动选线", episodes: pickEpisodes });
+    }
+
     const ogTitle = metaContent(html, "og:title");
     const titleText = firstMatch(html, /<title>([\s\S]*?)<\/title>/i);
     const name = cleanVodName(vodData.vod_name || ogTitle || titleText.split("_")[0]) || detailPath;
@@ -996,6 +1288,35 @@ async function play(params, context) {
       const pageUrl = /^https?:\/\//i.test(rawId) ? rawId : absUrl(rawId, SITE + "/");
       return await playSinglePlayPage(pageUrl, flag);
     }
+
+    // 自动选线：并发探测各线路，挑直链且最快的；探测失败则回退单线路解析
+    if (token.mode === "pick") {
+      const header = playHeaders();
+      try {
+        const ranked = await pickBestRoute(token, header);
+        // 备选池：所有探测到 url 的线路（已按 直链优先+实测分 排序），best 取第一条
+        const pool = ranked.filter((r) => r.url);
+        if (pool.length) {
+          const best = pool[0];
+          const urls = pool.map((r) => ({ name: str(r.name) || `线路${r.sid}`, url: str(r.url) }));
+          if (urls.length) {
+            logI(`[play][pick] 选中 name=${best.name} score=${best.score} ms=${best.ms} parse=${best.parse} 备选=${urls.length}`);
+            return {
+              urls,
+              url: str(best.url),
+              flag: str(best.name) || flag,
+              header,
+              parse: Number(best.parse ?? 0),
+              playUrl: "",
+            };
+          }
+        }
+        logI(`[play][pick] 探测无可用直链，回退单线路解析`);
+      } catch (err) {
+        logE(`[play][pick] 自动选线失败，回退单线路解析: ${err.message || err}`);
+      }
+    }
+
     const pageUrl = buildEpisodePlayUrl(token.episodeHref, token.sid);
     return await playSinglePlayPage(pageUrl, token.lineName || flag);
   } catch (err) {
