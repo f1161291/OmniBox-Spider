@@ -1,18 +1,17 @@
 // @name 乌云影视
 // @author 梦
 // @description 刮削：未接入，弹幕：站内弹幕接口，嗅探：不需要
-// @dependencies: axios
-// @version 1.1.5
+// @version 1.1.6
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/乌云影视.js
 
 const OmniBox = require("omnibox_sdk");
 const runner = require("spider_runner");
 const https = require("https");
-const axios = require("axios");
 
 const SITE = "https://wooyun.tv";
-// wooyun.tv 的 SNI 在部分网络被 RST（源站 CloudFlare Origin 证书 SAN=api.oztui.com），
-// 保留原域名做 DNS 解析，仅用自定义 agent 覆盖 SNI 为非封锁域名并忽略证书不匹配。
+// wooyun.tv 的 SNI 在部分网络被 RST（源站 CloudFlare Origin 证书 SAN=api.oztui.com）。
+// 用 Node 原生 https.request + agent.servername 覆盖 SNI 为非封锁域名，不依赖宿主 axios adapter
+// 是否透传 httpsAgent.servername（宿主环境已证实 axios 方案不生效）。忽略证书不匹配（SAN 是 oztui.com）。
 const SNI_AGENT = new https.Agent({ rejectUnauthorized: false, servername: "example.com" });
 const DEFAULT_PAGE_SIZE = 24;
 const DEFAULT_HOME_LIMIT = 12;
@@ -489,45 +488,65 @@ function checkApiJson(json, label) {
   return json?.data;
 }
 
+// 原生 https 请求：用 agent.servername 覆盖 SNI，绕开 wooyun.tv 的 SNI 封锁。
+// 不依赖宿主的 axios adapter（已证实宿主不认 httpsAgent.servername）。
+function rawRequest(url, { method = "GET", headers = {}, body = null, timeout = 20000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let target;
+    try {
+      target = new URL(url);
+    } catch (_) {
+      reject(new Error(`invalid url: ${url}`));
+      return;
+    }
+    const payload = body == null ? null : (typeof body === "string" ? body : JSON.stringify(body));
+    const opts = {
+      hostname: target.hostname,
+      port: target.port || 443,
+      path: `${target.pathname}${target.search}`,
+      method,
+      agent: SNI_AGENT,
+      headers: Object.assign({
+        Accept: "application/json, text/plain, */*",
+        Referer: `${SITE}/`,
+        Origin: SITE,
+        "User-Agent": UA,
+      }, headers || {}),
+    };
+    if (payload != null) opts.headers["Content-Length"] = Buffer.byteLength(payload);
+    const req = https.request(opts, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { text += chunk; });
+      res.on("end", () => resolve({ status: res.statusCode || 0, text }));
+    });
+    req.on("error", (err) => reject(err));
+    req.setTimeout(timeout, () => req.destroy(new Error(`timeout after ${timeout}ms`)));
+    if (payload != null) req.write(payload);
+    req.end();
+  });
+}
+
 async function fetchJson(path) {
   const url = path.startsWith("http") ? path : `${SITE}${path}`;
-  const res = await axios.get(url, {
-    httpsAgent: SNI_AGENT,
-    validateStatus: () => true,
-    headers: {
-      Accept: "application/json, text/plain, */*",
-      Referer: `${SITE}/`,
-      Origin: SITE,
-      "User-Agent": UA,
-    },
-    timeout: 20000,
-  });
-
+  const res = await rawRequest(url, { method: "GET" });
   if (res.status !== 200) {
     throw new Error(`GET ${path} => HTTP ${res.status}`);
   }
-  return checkApiJson(asJson(res.data), `GET ${path}`);
+  return checkApiJson(asJson(res.text), `GET ${path}`);
 }
 
 async function postJson(path, body) {
   const url = `${SITE}${path}`;
-  const res = await axios.post(url, JSON.stringify(body), {
-    httpsAgent: SNI_AGENT,
-    validateStatus: () => true,
-    headers: {
-      Accept: "application/json, text/plain, */*",
-      Referer: `${SITE}/`,
-      Origin: SITE,
-      "User-Agent": UA,
-      "Content-Type": "application/json",
-    },
-    timeout: 20000,
+  const res = await rawRequest(url, {
+    method: "POST",
+    body,
+    headers: { "Content-Type": "application/json" },
   });
-
   if (res.status !== 200) {
     throw new Error(`POST ${path} => HTTP ${res.status}`);
   }
-  return checkApiJson(asJson(res.data), `POST ${path}`);
+  return checkApiJson(asJson(res.text), `POST ${path}`);
 }
 
 // 剥掉本站反代前缀 https://wooyun.tv/gen_xxx/<真实URL>，返回真实 CDN 直链。
