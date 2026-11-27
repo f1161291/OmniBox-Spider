@@ -1,7 +1,7 @@
 // @name 洛雪
 // @author OmniBox
-// @description 站点：tv.lxyy.club（洛雪）。v2.2.3 修复 B站 4K DASH(.mpd) 在不支持 DASH 的宿主上「视频加载失败」：命中 format=dash 时保留 4K DASH 在第一位（支持 DASH 的端照常播 4K），同时嗅探一条 hls/mp4 兼容直链作为第二备选（宿主首个失败可降级）；嗅探不到就只返回 4K 单条，不做跨源重操作。v2.2.2 修复官方解析在宿主上「无授权：请从本站影片播放页打开」：playback_grant 是绑会话的，而宿主 detail 与 play 是两次独立进程、不共享内存，play 新建会话后拿旧会话的 grant 必然被拒（本地单进程 vm 测试反而是通的，容易误判）。改为会话落宿主缓存让两次调用共享（20 分钟续期），并在授权缺失时自动换新会话重新换 grant 重试一次。v2.2.0 新增官方解析线路（洛雪4K/蓝光/臻享/789/麒麟）：官网的 4K/HDR 画质不在采集站里，而是把平台播放页交给站点解析接口换直链。接入完整四段链路 POST /api/playback-session.php 取 csrf+cookie → 带 X-CSRF-Token+Cookie 请求 detail 拿 episodes[].playback_grant → GET /json-player.php?route=&url=&source=&grant= 取 data-authorization → POST /api/json-parse.php 拿 {format,url}；官方线路在详情页排最前，play 时优先走解析、命中即 parse=0 直链（hls 与 dash/.mpd 都支持），失败再回落嗅探与跨源兜底。只对 qq/bilibili/rrmj/hmdj/mgtv 生成官方线路（优酷/爱奇艺实测洛雪4K 返回 noauth），native 格式实测是付费墙直接跳过。可用 LXYY_OFFICIAL_ENABLED/LXYY_OFFICIAL_ROUTES/LXYY_OFFICIAL_GROUPS 调整。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
-// @version 2.2.3
+// @description 站点：tv.lxyy.club（洛雪）。v2.2.4 修复 jimaoys94.com smart.m3u8 在 MPV 上 403 Forbidden：该 m3u8 是「假 master」，请求的 session 由脚本服务器现场签发、有时效，把不带 session 的 master 原样交给播放器 → 403。expandMasterM3u8() 改为深度展开（最多 4 层、seen 防环），一路跟到含 #EXTINF 的媒体列表；并且嗅探成功/跨源兜底/sniffCompatible 三条返回路径统一在返回 .m3u8 前先展开，杜绝任何未展开的 master 落到播放器。v2.2.3 修复 B站 4K DASH(.mpd) 在不支持 DASH 的宿主上「视频加载失败」：命中 format=dash 时保留 4K DASH 在第一位（支持 DASH 的端照常播 4K），同时嗅探一条 hls/mp4 兼容直链作为第二备选（宿主首个失败可降级）；嗅探不到就只返回 4K 单条，不做跨源重操作。v2.2.2 修复官方解析在宿主上「无授权：请从本站影片播放页打开」：playback_grant 是绑会话的，而宿主 detail 与 play 是两次独立进程、不共享内存，play 新建会话后拿旧会话的 grant 必然被拒（本地单进程 vm 测试反而是通的，容易误判）。改为会话落宿主缓存让两次调用共享（20 分钟续期），并在授权缺失时自动换新会话重新换 grant 重试一次。v2.2.0 新增官方解析线路（洛雪4K/蓝光/臻享/789/麒麟）：官网的 4K/HDR 画质不在采集站里，而是把平台播放页交给站点解析接口换直链。接入完整四段链路 POST /api/playback-session.php 取 csrf+cookie → 带 X-CSRF-Token+Cookie 请求 detail 拿 episodes[].playback_grant → GET /json-player.php?route=&url=&source=&grant= 取 data-authorization → POST /api/json-parse.php 拿 {format,url}；官方线路在详情页排最前，play 时优先走解析、命中即 parse=0 直链（hls 与 dash/.mpd 都支持），失败再回落嗅探与跨源兜底。只对 qq/bilibili/rrmj/hmdj/mgtv 生成官方线路（优酷/爱奇艺实测洛雪4K 返回 noauth），native 格式实测是付费墙直接跳过。可用 LXYY_OFFICIAL_ENABLED/LXYY_OFFICIAL_ROUTES/LXYY_OFFICIAL_GROUPS 调整。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
+// @version 2.2.4
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/影视库/洛雪.js
 
 /**
@@ -1705,25 +1705,34 @@ function isDirectMedia(url) {
 }
 
 // 部分站点的 .m3u8 是「假 master」：只有一个 BANDWIDTH 变体，指向带动态 session
-// 的相对路径子列表。不少播放器（含 MPV/内置内核）卡在解析这种单层 master 而转圈。
-// 服务端先展开一层，直接返回绝对的子 m3u8 URL（内容是绝对 ts），让播放器一步到位。
+// 的相对路径子列表（如 jimaoys94.com 的 smart.m3u8 → smart.m3u8?session=<64hex>）。
+// 这种 session 由脚本服务器请求时签发、有时效且和签发环境绑定；把 master 原样交给
+// 播放器（MPV/内置内核）时，播放器侧拿不到有效 session → 403 Forbidden。
+// 所以服务端一路展开到「含 #EXTINF 的媒体列表」再返回，播放器直接用最终地址。
 async function expandMasterM3u8(masterUrl, headers = {}) {
+  let current = masterUrl;
+  const seen = new Set();
   try {
-    const res = await nodeRequest(masterUrl, { timeout: 12000 }, { "User-Agent": UA, ...headers });
-    if (res.statusCode !== 200 || !res.body) return masterUrl;
-    const text = res.body.trim();
-    if (!/#EXT-X-STREAM-INF/i.test(text)) return masterUrl; // 已是子列表，无需展开
-    const lines = text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-    const child = lines.find((line) => !line.startsWith("#") && /^https?:\/\//i.test(line));
-    const childRel = child || lines.find((line) => !line.startsWith("#"));
-    if (!childRel) return masterUrl;
-    const expanded = new URL(childRel, masterUrl).toString();
-    logInfo(`play 展开假 master → ${expanded.slice(0, 90)}`);
-    return expanded;
+    for (let depth = 0; depth < 4; depth++) {
+      if (seen.has(current)) break;
+      seen.add(current);
+      const res = await nodeRequest(current, { timeout: 12000 }, { "User-Agent": UA, ...headers });
+      if (res.statusCode !== 200 || !res.body) return current;
+      const text = res.body.trim();
+      if (!/#EXT-X-STREAM-INF/i.test(text)) return current; // 已是媒体列表，展开到位
+      const lines = text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      const child = lines.find((line) => !line.startsWith("#") && /^https?:\/\//i.test(line));
+      const childRel = child || lines.find((line) => !line.startsWith("#"));
+      if (!childRel) return current;
+      const next = new URL(childRel, current).toString();
+      if (next === current || seen.has(next)) return current;
+      logInfo(`play 展开假 master 第${depth + 1}层 → ${next.slice(0, 90)}`);
+      current = next;
+    }
   } catch (error) {
-    logInfo(`play master 展开失败，用原地址: ${error && error.message ? error.message : error}`);
-    return masterUrl;
+    logInfo(`play master 展开失败，用当前地址: ${error && error.message ? error.message : error}`);
   }
+  return current;
 }
 
 function buildPlayerPageUrl(playerApi, playPageUrl) {
@@ -1788,7 +1797,12 @@ async function sniffCompatible(meta, header) {
       const sniffed = await OmniBox.sniffVideo(page, { ...header, Referer: referer });
       const url = sniffed && (sniffed.url || sniffed.mediaUrl);
       if (url && /^https?:\/\//i.test(String(url)) && !/\.mpd(\?|$)/i.test(String(url))) {
-        return { url: String(url), header: sniffed.header || {} };
+        // 兼容备选同样可能是「假 master」（jimaoys94 之类），展开到媒体列表再交给播放器
+        let finalUrl = String(url);
+        if (/\.m3u8(\?|$)/i.test(finalUrl)) {
+          finalUrl = await expandMasterM3u8(finalUrl, sniffed.header || {});
+        }
+        return { url: finalUrl, header: sniffed.header || {} };
       }
     } catch (_) { /* 单条失败继续下一条 */ }
   }
@@ -1861,8 +1875,14 @@ async function play(params, context) {
             const sniffUrl = sniffed && (sniffed.url || sniffed.mediaUrl);
             if (sniffUrl && /^https?:\/\//i.test(String(sniffUrl))) {
               logInfo(`play 嗅探成功 ${String(sniffUrl).slice(0, 90)}`);
+              // 嗅探命中的也可能是「假 master」（jimaoys94 之类），展开后再交给播放器，
+              // 否则播放器请求不带 session 的 master → 403 Forbidden。
+              let finalUrl = String(sniffUrl);
+              if (/\.m3u8(\?|$)/i.test(finalUrl)) {
+                finalUrl = await expandMasterM3u8(finalUrl, sniffed.header || {});
+              }
               return {
-                urls: [{ name: meta.g || "解析播放", url: sniffUrl }],
+                urls: [{ name: meta.g || "解析播放", url: finalUrl }],
                 flag: meta.g || "洛雪",
                 parse: 0,
                 header: Object.assign({}, header, sniffed.header || {}),
@@ -1878,8 +1898,13 @@ async function play(params, context) {
       // m3u8 直链兜底（parse:0），彻底避免 "unrecognized file format"。
       const direct = await findDirectFallback(meta);
       if (direct) {
-        logInfo(`play 返回跨源直链 ${direct.url.slice(0, 80)}`);
-        return { urls: [{ name: direct.flag || "直链", url: direct.url }], flag: direct.flag || "洛雪", parse: 0, header: direct.header };
+        // 跨源兜底拿到的同样可能是「假 master」（jimaoys94 之类），展开后再返回。
+        let directUrl = direct.url;
+        if (/\.m3u8(\?|$)/i.test(directUrl)) {
+          directUrl = await expandMasterM3u8(directUrl, direct.header || {});
+        }
+        logInfo(`play 返回跨源直链 ${directUrl.slice(0, 80)}`);
+        return { urls: [{ name: direct.flag || "直链", url: directUrl }], flag: direct.flag || "洛雪", parse: 0, header: direct.header };
       }
       // 直链兜底也失败：回退 parse=1（ok影视 可继续嗅探），解析入口排在原始页前面
       return { urls, flag: meta.g || "洛雪", parse: 1, header };
