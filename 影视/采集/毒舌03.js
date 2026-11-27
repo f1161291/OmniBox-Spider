@@ -2,7 +2,7 @@
 // @author 梦
 // @description 影视站：https://www.dushe03.com/ ，支持首页、分类、详情、搜索与播放
 // @dependencies cheerio
-// @version 1.0.9
+// @version 1.1.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/采集/毒舌03.js
 
 const OmniBox = require("omnibox_sdk");
@@ -28,7 +28,7 @@ const CATEGORY_CONFIG = [
 
 const CLASS_LIST = CATEGORY_CONFIG.map((item) => ({ type_id: item.id, type_name: item.name }));
 const CATEGORY_SHOW_PATH = Object.fromEntries(CATEGORY_CONFIG.map((item) => [item.id, `/show/${item.id}------.html`]));
-const STATIC_HOST = process.env.DUSHE03_STATIC_HOST || "https://vres.bavdxfg.cn";
+const STATIC_HOST = process.env.DUSHE03_STATIC_HOST || "https://vres.jzxjlj.com";
 const PIC_HEADERS = {
   Referer: `${BASE_URL}/`,
   Origin: BASE_URL,
