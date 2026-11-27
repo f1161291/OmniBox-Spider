@@ -3,7 +3,8 @@
 // @description 网盘资源导航站：https://aipan.win ，站点仅索引资源不提供播放；支持首页、分类、详情、搜索、网盘播放、刮削、弹幕、播放记录
 // v1.0.3 对齐人人电影.py：playId 改 JSON（drive-file + routeType 逐线路编码）；修复 addPlayHistory 在宿主不存在导致 TypeError 冒泡、已拿到直链却返回空 urls 的致命 bug；fallback 统一 parse:0
 // v1.0.4 夸克线路强制展开「本地代理 / 服务端代理 / 直连」三条，不受调用方过滤与 EXTERNAL_SERVER_PROXY_ENABLED 影响（FORCE_ALL_ROUTE_TYPES_CONFIG 可配）
-// @version 1.0.4
+// v1.0.5 百度网盘只保留「直连」一条线路，不再展开代理（DIRECT_ONLY_ROUTE_TYPES_CONFIG 可配）
+// @version 1.0.5
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/爱盼.js
 // @dependencies cheerio
 
@@ -28,6 +29,8 @@ const EXTERNAL_SERVER_PROXY_ENABLED = String(process.env.EXTERNAL_SERVER_PROXY_E
 // 需要「强制展开全部代理线路」的网盘类型：夸克默认同时给出 本地代理 / 服务端代理 / 直连，
 // 不受调用方过滤与 allowServerProxy 影响（夸克直连在国内网络下经常不稳，多留两条线路给用户切换）
 const FORCE_ALL_ROUTE_TYPES_CONFIG = splitConfigList(process.env.FORCE_ALL_ROUTE_TYPES_CONFIG || "quark").map((s) => s.toLowerCase());
+// 只给「直连」一条线路的网盘类型：百度网盘自身直连足够，多余的代理线路只是噪音
+const DIRECT_ONLY_ROUTE_TYPES_CONFIG = splitConfigList(process.env.DIRECT_ONLY_ROUTE_TYPES_CONFIG || "baidu").map((s) => s.toLowerCase());
 
 const VIDEO_EXTENSIONS = [
   ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".mpg", ".mpeg", ".rmvb", ".ts", ".m2ts", ".webm", ".iso",
@@ -256,11 +259,13 @@ function filterSourceNamesForCaller(sourceNames = [], callerSource = "", context
 
 // 对齐人人电影.py get_route_types：仅已知网盘类型展开多线路（本地代理/服务端代理/直连），
 // 未知类型统一「直连」。DRIVE_TYPE_CONFIG / SOURCE_NAMES_CONFIG 均为 splitConfigList 返回的数组。
-// FORCE_ALL_ROUTE_TYPES_CONFIG 里的网盘（默认 quark）无视调用方过滤，始终给全部线路。
+// DIRECT_ONLY_ROUTE_TYPES_CONFIG（默认 baidu）只给「直连」，FORCE_ALL_ROUTE_TYPES_CONFIG（默认 quark）给全部线路。
 function getRouteTypes(context = {}, driveType = "") {
   const normalized = String(driveType || "").toLowerCase();
   const known = Array.isArray(DRIVE_TYPE_CONFIG) && DRIVE_TYPE_CONFIG.includes(normalized);
   if (!known) return ["直连"];
+  const directOnly = Array.isArray(DIRECT_ONLY_ROUTE_TYPES_CONFIG) && DIRECT_ONLY_ROUTE_TYPES_CONFIG.includes(normalized);
+  if (directOnly) return ["直连"];
   const forceAll = Array.isArray(FORCE_ALL_ROUTE_TYPES_CONFIG) && FORCE_ALL_ROUTE_TYPES_CONFIG.includes(normalized);
   if (forceAll) {
     const all = Array.isArray(SOURCE_NAMES_CONFIG) ? SOURCE_NAMES_CONFIG.filter(Boolean) : [];
