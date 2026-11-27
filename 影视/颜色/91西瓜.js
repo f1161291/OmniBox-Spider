@@ -1,7 +1,7 @@
 // @name 91西瓜
 // @author 宝宝巴士
 // @description 91西瓜(91xg.tv / www.xigua662.com) 采集源：纯前端 SPA，数据走 POST xmjk.kphm88.com/forward 私有 JSON 接口（WEB_GET_ALL / WEB_GET_INFO / WEB_GET_INFO_DETAIL）；首页/分类/搜索/详情/播放全支持；播放地址 = getDataInit 的 macVodLinkMap[vod_server_id].LINK_N + vod_url（AES-128 HLS，key 与分片均 CORS 全开）
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/颜色/91西瓜.js
 // @dependencies axios
 /**
@@ -15,15 +15,15 @@
  *   1) 首页    {command:"WEB_GET_ALL", languageType:"CN", content:""}
  *      → data.resultList[] = 每个栏目 {t_Name, type_id, type_Mid, t_type, href, t_list[]}
  *        t_type = M_VOIDE（视频/电影）| M_ART（图片/小说）
- *        t_list[] 条目字段：
- *          视频：{id, vod_name, vod_pic(绝对URL), vod_class, type_Mid, vod_server_id, href:"moviePlayer.html"}
- *          图文：{id, art_name, art_pic, art_class, type_Mid, href:"imageShow.html"}
+ *        t_list[] 条目字段（只收视频）：
+ *          {id, vod_name, vod_pic(绝对URL), vod_class, type_Mid, vod_server_id, href:"moviePlayer.html"}
+ *        图文条目（art_name/art_pic/imageShow.html）不收，本源只做视频
  *
  *   2) 分类/搜索  {command:"WEB_GET_INFO", pageNumber, RecordsPage, typeId, typeMid,
  *                  languageType:"CN", content:"" , type:1}
  *      → data.{count, pageNumber, pageAllNumber, t_Name, resultList[]}
  *        搜索：content=关键词 + type=1（实测「巨乳」命中 7862 条）
- *        分类：typeId=叶子分类 id，typeMid=1（视频类）/ 2（图文类）
+ *        分类：typeId=叶子分类 id，typeMid=1（视频类，本源固定 1）
  *        实测 typeId=6（91传媒）count=2959、pageAllNumber=148（每页 20）
  *
  *   3) 详情    {command:"WEB_GET_INFO_DETAIL", type_Mid, id, languageType:"CN"}
@@ -41,7 +41,9 @@
  *      key 16 字节、ts 分片 video/mp2t，三者 Access-Control-Allow-Origin: * → 浏览器端可直解。
  *
  * 【分类菜单】getDataInit.menu0ListMap 里前 5 组是真实内容分类，其余为博彩/成人外链广告位
- *   （href 指向 123adpda.com 等），本脚本已剔除，只保留 传媒/视频/电影/图片/小说。
+ *   （href 指向 123adpda.com 等），本脚本已剔除；
+ *   其中 图片(id=4) 与 小说(id=5) 属于 typeMid=2 图文，本源不收录，
+ *   最终只保留 传媒/视频/电影 三组视频分类。
  */
 const axios = require('axios');
 const OmniBox = require('omnibox_sdk');
@@ -57,7 +59,9 @@ const SITE = String(process.env.XIGUA_HOST || 'https://www.xigua662.com').trim()
 const TIMEOUT = Math.max(5000, Number(process.env.XIGUA_TIMEOUT || 15000) || 15000);
 const PAGE_SIZE = Math.max(1, Number(process.env.XIGUA_PAGE_SIZE || 20) || 20);
 
-// 官网真实内容分类（2026-11-27 从 getDataInit.menu0ListMap 提取，已剔除博彩/外链广告位）
+// 官网真实视频分类（2026-11-27 从 getDataInit.menu0ListMap 提取）
+// 只保留 传媒/视频/电影 三组视频分类；图片(id=4, typeMid=2) 与 小说(id=5, typeMid=2) 不收录
+// 其余 20 组为博彩/外链广告位（href 指向 123adpda.com 等），同样剔除
 const CATEGORY_GROUPS = [
   { id: '1', name: '传媒', mid: 1, subs: [
     ['6', '91传媒', 1], ['7', '精东传媒', 1], ['8', '麻豆传媒', 1], ['9', '麻豆映画', 1],
@@ -70,14 +74,6 @@ const CATEGORY_GROUPS = [
   { id: '3', name: '电影', mid: 1, subs: [
     ['22', '中文字幕', 1], ['23', '经典素人', 1], ['24', '高清无码', 1], ['25', '美颜巨乳', 1],
     ['26', '丝袜制服', 1], ['27', 'SM系列', 1], ['28', '欧美系列', 1], ['29', 'H動畫', 1],
-  ] },
-  { id: '4', name: '图片', mid: 2, subs: [
-    ['30', '街拍偷拍', 2], ['31', '丝袜美腿', 2], ['32', '欧美风情', 2], ['33', '网友自拍', 2],
-    ['34', '卡通漫画', 2], ['35', '露出激情', 2], ['36', '唯美写真', 2], ['37', '女优情报', 2],
-  ] },
-  { id: '5', name: '小说', mid: 2, subs: [
-    ['38', '都市激情', 2], ['39', '校园情事', 2], ['40', '人妻縱情', 2], ['41', '風俗倫理', 2],
-    ['42', '另类小说', 2], ['43', '武侠古典', 2], ['44', '长篇连载', 2], ['45', '科学幻想', 2],
   ] },
 ];
 
@@ -163,14 +159,11 @@ function realPic(u) {
   return absUrl(s);
 }
 
-/** 小说分类 typeId 集合（38-45 组为小说，30-37 组为图片集）。 */
-const NOVEL_IDS = new Set(['38','39','40','41','42','43','44','45']);
-
-/** 列表条目 → OmniBox vod 结构。视频与图文两种结构都兼容。 */
-function mapItem(it, typeId) {
+/** 列表条目 → OmniBox vod 结构。只收视频条目（图文 art_* 直接跳过）。 */
+function mapItem(it) {
   if (!it || typeof it !== 'object') return null;
-  const isArt = it.art_name != null || it.href === 'imageShow.html';
-  const name = text(isArt ? it.art_name : it.vod_name);
+  if (it.art_name != null || it.href === 'imageShow.html') return null; // 图文/小说不收
+  const name = text(it.vod_name);
   if (!name) return null;
   const id = text(it.id);
   if (!id) return null;
@@ -178,19 +171,19 @@ function mapItem(it, typeId) {
   return {
     vod_id: `${mid}:${id}`,
     vod_name: name,
-    vod_pic: realPic(isArt ? it.art_pic : it.vod_pic),
-    vod_remarks: isArt ? (NOVEL_IDS.has(String(typeId)) ? '小说' : '图片') : '视频',
+    vod_pic: realPic(it.vod_pic),
+    vod_remarks: '视频',
     vod_tag: 'video',
     vod_content: '',
     type_id: String(mid),
-    type_name: isArt ? (NOVEL_IDS.has(String(typeId)) ? '小说' : '图文') : '视频',
+    type_name: '视频',
   };
 }
 
-function mapList(arr, typeId) {
+function mapList(arr) {
   const out = [];
   for (const it of (arr || [])) {
-    const v = mapItem(it, typeId);
+    const v = mapItem(it);
     if (v) out.push(v);
   }
   return out;
@@ -280,7 +273,7 @@ async function category(params) {
       typeId: Number(typeId) || typeId,
       typeMid: mid,
     });
-    const list = mapList(data.resultList, typeId);
+    const list = mapList(data.resultList);
     const total = Number(data.count || 0) || 0;
     const pageAll = Number(data.pageAllNumber || 0) || 0;
     // pagecount 语义：宿主用于判断是否还有下一页，给「总页数」最稳
@@ -308,7 +301,7 @@ async function search(params) {
       content: kw,
       type: 1,
     });
-    const list = mapList(data.resultList, 0);
+    const list = mapList(data.resultList);
     const total = Number(data.count || 0) || 0;
     const pageAll = Number(data.pageAllNumber || 0) || 0;
     const pagecount = pageAll > 0 ? pageAll : (list.length >= PAGE_SIZE ? page + 1 : page);
@@ -332,52 +325,7 @@ async function detail(params, context) {
   try {
     const data = await forward({ command: 'WEB_GET_INFO_DETAIL', type_Mid: mid, id: Number(id) || id });
     const r = data.result || {};
-    const name = text(r.vod_name) || text(r.art_name) || '未命名';
-    const rawBody = String(r.art_url || r.vod_url || '');
-
-    // ---------- 图文（typeMid=2）：图片集 或 小说正文 ----------
-    if (mid === 2) {
-      const imgs = [];
-      const re = /<img[^>]+src=["']([^"']+)["']/gi;
-      let mm;
-      while ((mm = re.exec(rawBody)) !== null) {
-        const u = text(mm[1]);
-        if (u && !imgs.includes(u)) imgs.push(u);
-      }
-      let pic = realPic(r.art_pic) || imgs[0] || '';
-      let content = '';
-      const sources = [];
-      if (imgs.length) {
-        // 图片集：每张图作为一个可播放条目，封面取首图
-        content = `共 ${imgs.length} 张图片`;
-        sources.push({
-          name: '图片',
-          episodes: imgs.map((u, i) => ({ name: `第${i + 1}张`, playId: `xg:${u}` })),
-        });
-      } else {
-        // 小说：正文在 art_url 里，去掉标签
-        content = text(rawBody);
-        if (content) {
-          // 正文较长，只放前 800 字进简介，完整内容通过单一"条目"承载
-          sources.push({ name: '正文', episodes: [{ name: '开始阅读', playId: `xgtext:${raw}` }] });
-        }
-      }
-      const playFrom = sources.map((s) => s.name).join('$$$');
-      const playUrlField = sources.map((s) => s.episodes.map((e) => `${e.name}$${e.playId}`).join('#')).join('$$$');
-      log('info', `detail(图文) ${raw} name=${name.slice(0, 20)} 图=${imgs.length} 正文=${imgs.length ? 0 : content.length}`);
-      return {
-        list: [{
-          vod_id: raw,
-          vod_name: name,
-          vod_pic: pic,
-          vod_content: content.slice(0, 30000),
-          vod_remarks: imgs.length ? `${imgs.length}P` : '小说',
-          vod_play_from: playFrom,
-          vod_play_url: playUrlField,
-          vod_play_sources: sources,
-        }],
-      };
-    }
+    const name = text(r.vod_name) || '未命名';
 
     // ---------- 视频（typeMid=1）----------
     // 封面/播放地址都需要 getDataInit 的服务器前缀
@@ -437,15 +385,10 @@ async function play(params, context) {
   if (!playId) return { urls: [], flag: 'default', header: {}, parse: 1, danmaku: '' };
   const header = { 'User-Agent': UA, Referer: `${SITE}/`, Origin: SITE };
   try {
-    // 小说正文条目：宿主无阅读器，正文已在 detail 的 vod_content 中给出
-    if (playId.startsWith('xgtext:')) {
-      log('info', `play 小说正文条目，正文见 detail.vod_content`);
-      return { urls: [], flag: 'text', header, parse: 0, danmaku: '' };
-    }
     let url = playId;
     if (playId.startsWith('xg:')) url = playId.slice(3);
-    // 视频 m3u8/mp4 与 图文站内图片 都已是完整直链 → parse=0 直返
-    if (/^https?:\/\/.+/i.test(url) && /\.(m3u8|mp4|jpe?g|png|webp|gif)(\?|$)/i.test(url)) {
+    // 视频 m3u8/mp4 已是完整直链 → parse=0 直返
+    if (/^https?:\/\/.+/i.test(url) && /\.(m3u8|mp4)(\?|$)/i.test(url)) {
       log('info', `play 直链 ${url.slice(0, 110)}`);
       return { urls: [{ name: '默认线路', url }], flag: 'default', header, parse: 0, danmaku: '' };
     }
