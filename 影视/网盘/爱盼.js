@@ -4,7 +4,8 @@
 // v1.0.3 对齐人人电影.py：playId 改 JSON（drive-file + routeType 逐线路编码）；修复 addPlayHistory 在宿主不存在导致 TypeError 冒泡、已拿到直链却返回空 urls 的致命 bug；fallback 统一 parse:0
 // v1.0.4 夸克线路强制展开「本地代理 / 服务端代理 / 直连」三条，不受调用方过滤与 EXTERNAL_SERVER_PROXY_ENABLED 影响（FORCE_ALL_ROUTE_TYPES_CONFIG 可配）
 // v1.0.5 百度网盘只保留「直连」一条线路，不再展开代理（DIRECT_ONLY_ROUTE_TYPES_CONFIG 可配）
-// @version 1.0.5
+// v1.0.6 去掉「本地代理」线路，只保留「服务端代理 / 直连」
+// @version 1.0.6
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/网盘/爱盼.js
 // @dependencies cheerio
 
@@ -23,7 +24,7 @@ const HEADERS = {
 const PAGE_SIZE = Math.max(1, Math.min(100, parseInt(process.env.AIPAN_PAGE_SIZE || "30", 10) || 30));
 
 const DRIVE_TYPE_CONFIG = splitConfigList(process.env.DRIVE_TYPE_CONFIG || "quark;uc;guangya;baidu;xunlei");
-const SOURCE_NAMES_CONFIG = splitConfigList(process.env.SOURCE_NAMES_CONFIG || "本地代理;服务端代理;直连");
+const SOURCE_NAMES_CONFIG = splitConfigList(process.env.SOURCE_NAMES_CONFIG || "服务端代理;直连");
 const DRIVE_ORDER = splitConfigList(process.env.DRIVE_ORDER || "baidu;tianyi;quark;uc;115;xunlei;ali;123pan;guangya").map((s) => s.toLowerCase());
 const EXTERNAL_SERVER_PROXY_ENABLED = String(process.env.EXTERNAL_SERVER_PROXY_ENABLED || "false").toLowerCase() === "true";
 // 需要「强制展开全部代理线路」的网盘类型：夸克默认同时给出 本地代理 / 服务端代理 / 直连，
@@ -269,7 +270,7 @@ function getRouteTypes(context = {}, driveType = "") {
   const forceAll = Array.isArray(FORCE_ALL_ROUTE_TYPES_CONFIG) && FORCE_ALL_ROUTE_TYPES_CONFIG.includes(normalized);
   if (forceAll) {
     const all = Array.isArray(SOURCE_NAMES_CONFIG) ? SOURCE_NAMES_CONFIG.filter(Boolean) : [];
-    return all.length ? [...all] : ["本地代理", "服务端代理", "直连"];
+    return all.length ? [...all] : ["服务端代理", "直连"];
   }
   return filterSourceNamesForCaller(SOURCE_NAMES_CONFIG, resolveCallerSource({}, context), context);
 }
