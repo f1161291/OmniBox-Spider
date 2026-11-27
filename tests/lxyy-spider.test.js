@@ -5,7 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const repoRoot = path.resolve(__dirname, "..");
-const scriptPath = path.join(repoRoot, "影视", "影视库", "洛雪TV.js");
+const scriptPath = path.join(repoRoot, "影视", "影视库", "洛雪.js");
 const source = fs.readFileSync(scriptPath, "utf8");
 const fixtureDir = path.join(repoRoot, "tests", "fixtures", "lxyy");
 
@@ -79,7 +79,7 @@ function loadSpider(routes, env = {}) {
     process: { env: Object.assign({ LXYY_PROXY_MIN_INTERVAL: "0" }, env) },
     URL, URLSearchParams, Buffer, Date,
     setTimeout, clearTimeout, setImmediate, Promise, console,
-  }, { filename: "洛雪TV.js" });
+  }, { filename: "洛雪.js" });
 
   return { spider: spiderModule.exports, cache, logs, requested };
 }
@@ -98,17 +98,17 @@ function baseRoutes(overrides = []) {
   ]);
 }
 
-test("洛雪TV v2 declares annotations and OM format", () => {
-  assert.match(source, /\/\/ @name 洛雪TV/);
-  assert.match(source, /\/\/ @version 2\.0\.0/);
-  assert.match(source, /@downloadURL .*影视\/影视库\/洛雪TV\.js/);
+test("洛雪 v2 declares annotations and OM format", () => {
+  assert.match(source, /\/\/ @name 洛雪/);
+  assert.match(source, /\/\/ @version 2\.\d+\.\d+/);
+  assert.match(source, /@downloadURL .*影视\/影视库\/洛雪\.js/);
   assert.match(source, /module\.exports = \{ home, category, detail, search, play \}/);
   assert.match(source, /runner\.run\(module\.exports\)/);
   assert.doesNotMatch(source, /opt\.sites\.push/);
   assert.doesNotMatch(source, /app\.get\(meta\.api/);
 });
 
-test("洛雪TV uses /api/proxy.php as the playback backbone", () => {
+test("洛雪 uses /api/proxy.php as the playback backbone", () => {
   // v1.x 漏掉的主链路，必须存在
   assert.match(source, /\/api\/proxy\.php/);
   assert.match(source, /action=.*search|proxySearch/);
@@ -116,7 +116,7 @@ test("洛雪TV uses /api/proxy.php as the playback backbone", () => {
   assert.match(source, /buildProxyEpisodes/);
 });
 
-test("洛雪TV home mixes collect-source results and ranking", async () => {
+test("洛雪 home mixes collect-source results and ranking", async () => {
   const { spider } = loadSpider(baseRoutes());
   const result = await spider.home({}, { from: "web" });
 
@@ -130,7 +130,7 @@ test("洛雪TV home mixes collect-source results and ranking", async () => {
   assert.ok(rkItems.length > 0, "首页应包含榜单条目");
 });
 
-test("洛雪TV detail of collect item returns real episode list", async () => {
+test("洛雪 detail of collect item returns real episode list", async () => {
   const { spider } = loadSpider(baseRoutes());
   const result = await spider.detail({ videoId: "cs|qilin|26653" }, {});
 
@@ -144,20 +144,21 @@ test("洛雪TV detail of collect item returns real episode list", async () => {
   assert.ok(vod.vod_play_url.includes("$"), "应兼容 vod_play_url");
 });
 
-test("洛雪TV play decodes px playId into parse=1 urls", async () => {
-  const { spider, requested } = loadSpider(baseRoutes());
+test("洛雪 play keeps platform page when sniff and official parse both fail", async () => {
+  // v2.0.1 起平台播放页不再直接 parse=1：先走官方解析（4K）→ sniffVideo → 跨源兜底，
+  // 全失败时才回落到 parse=1。这里所有站点请求都 ENOTFOUND，验证兜底结构仍完整。
+  const { spider } = loadSpider(baseRoutes());
   const meta = { u: "https://www.mgtv.com/b/1/2.html", p: "https://svip.example/?url=", s: "qilin", i: "1", t: "测试", g: "mgtv" };
   const playId = `px|${Buffer.from(JSON.stringify(meta), "utf8").toString("base64")}`;
 
   const result = await spider.play({ playId }, { from: "web" });
-  assert.equal(result.parse, 1, "平台播放页应 parse=1");
+  assert.equal(result.parse, 1, "全链路失败时应回落 parse=1");
   assert.ok(result.urls.length >= 2, "应给出解析入口 + 原始播放页");
   assert.ok(result.urls[0].url.includes("svip.example"), "首条应为 player_api 解析入口");
   assert.ok(result.urls.some((u) => u.url.includes("mgtv.com")), "应保留原始播放页");
-  assert.equal(requested.length, 0, "playId 自带信息，不应再请求站点");
 });
 
-test("洛雪TV play handles direct media url", async () => {
+test("洛雪 play handles direct media url", async () => {
   const { spider } = loadSpider(baseRoutes());
   const meta = { u: "https://cdn.example.com/a.m3u8", p: "", t: "直链测试" };
   const playId = `px|${Buffer.from(JSON.stringify(meta), "utf8").toString("base64")}`;
@@ -166,7 +167,7 @@ test("洛雪TV play handles direct media url", async () => {
   assert.ok(result.urls[0].url.endsWith(".m3u8"));
 });
 
-test("洛雪TV search prefers collect source", async () => {
+test("洛雪 search prefers collect source", async () => {
   const { spider } = loadSpider(baseRoutes());
   const result = await spider.search({ keyword: "流浪地球", page: 1 }, {});
 
@@ -176,7 +177,7 @@ test("洛雪TV search prefers collect source", async () => {
   assert.ok(ids.every((id) => id.startsWith("cs|")), "搜索应优先返回采集站条目");
 });
 
-test("洛雪TV search falls back to TMDB when collect empty", async () => {
+test("洛雪 search falls back to TMDB when collect empty", async () => {
   const routes = baseRoutes([
     { match: (u) => u.includes("action=search"), body: () => JSON.stringify({ success: true, results: [] }) },
   ]);
@@ -186,7 +187,7 @@ test("洛雪TV search falls back to TMDB when collect empty", async () => {
   assert.ok(result.list.every((i) => i.vod_id.startsWith("tm|")));
 });
 
-test("洛雪TV category supports rank and tmdb discover", async () => {
+test("洛雪 category supports rank and tmdb discover", async () => {
   const { spider } = loadSpider(baseRoutes());
 
   const rank = await spider.category({ categoryId: "rank:电影", page: 1 }, {});
@@ -200,7 +201,7 @@ test("洛雪TV category supports rank and tmdb discover", async () => {
   assert.equal(unknown.list.length, 0);
 });
 
-test("洛雪TV detects proxy rate-limit and enters cooldown", async () => {
+test("洛雪 detects proxy rate-limit and enters cooldown", async () => {
   const routes = baseRoutes([
     {
       match: (u) => u.includes("action=search"),
@@ -216,7 +217,7 @@ test("洛雪TV detects proxy rate-limit and enters cooldown", async () => {
   );
 });
 
-test("洛雪TV reuses repo-standard PANSOU_* env vars", () => {
+test("洛雪 reuses repo-standard PANSOU_* env vars", () => {
   for (const key of [
     "PANSOU_API", "PANSOU_CHANNELS", "PANSOU_PLUGINS", "PANSOU_CLOUD_TYPES",
     "PANSOU_FILTER", "PANSOU_CACHE_EX_SECONDS",
@@ -229,7 +230,7 @@ test("洛雪TV reuses repo-standard PANSOU_* env vars", () => {
   assert.doesNotMatch(source, /PAN_API_BASE/);
 });
 
-test("洛雪TV never writes to stdout", () => {
+test("洛雪 never writes to stdout", () => {
   const head = source.slice(0, source.indexOf("const crypto"));
   assert.doesNotMatch(head, /console\.log/);
   assert.match(source, /Promise\.resolve\(OmniBox\.log/);

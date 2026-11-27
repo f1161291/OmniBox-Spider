@@ -1,8 +1,8 @@
-// @name 洛雪TV
+// @name 洛雪
 // @author OmniBox
-// @description 站点：tv.lxyy.club（洛雪TV）。v2.2.0 新增官方解析线路（洛雪4K/蓝光/臻享/789/麒麟）：官网的 4K/HDR 画质不在采集站里，而是把平台播放页交给站点解析接口换直链。接入完整四段链路 POST /api/playback-session.php 取 csrf+cookie → 带 X-CSRF-Token+Cookie 请求 detail 拿 episodes[].playback_grant → GET /json-player.php?route=&url=&source=&grant= 取 data-authorization → POST /api/json-parse.php 拿 {format,url}；官方线路在详情页排最前，play 时优先走解析、命中即 parse=0 直链（hls 与 dash/.mpd 都支持），失败再回落嗅探与跨源兜底。只对 qq/bilibili/rrmj/hmdj/mgtv 生成官方线路（优酷/爱奇艺实测洛雪4K 返回 noauth），native 格式实测是付费墙直接跳过。可用 LXYY_OFFICIAL_ENABLED/LXYY_OFFICIAL_ROUTES/LXYY_OFFICIAL_GROUPS 调整。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
-// @version 2.2.0
-// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/影视库/洛雪TV.js
+// @description 站点：tv.lxyy.club（洛雪）。v2.2.0 新增官方解析线路（洛雪4K/蓝光/臻享/789/麒麟）：官网的 4K/HDR 画质不在采集站里，而是把平台播放页交给站点解析接口换直链。接入完整四段链路 POST /api/playback-session.php 取 csrf+cookie → 带 X-CSRF-Token+Cookie 请求 detail 拿 episodes[].playback_grant → GET /json-player.php?route=&url=&source=&grant= 取 data-authorization → POST /api/json-parse.php 拿 {format,url}；官方线路在详情页排最前，play 时优先走解析、命中即 parse=0 直链（hls 与 dash/.mpd 都支持），失败再回落嗅探与跨源兜底。只对 qq/bilibili/rrmj/hmdj/mgtv 生成官方线路（优酷/爱奇艺实测洛雪4K 返回 noauth），native 格式实测是付费墙直接跳过。可用 LXYY_OFFICIAL_ENABLED/LXYY_OFFICIAL_ROUTES/LXYY_OFFICIAL_GROUPS 调整。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
+// @version 2.2.1
+// @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/影视库/洛雪.js
 
 /**
  * ============================================================================
@@ -1711,7 +1711,7 @@ async function play(params, context) {
   const rawId = String((params && (params.playId || params.id)) || "").trim();
   const from = (context && context.from) || "web";
   logInfo(`play 入口 playId=${rawId.slice(0, 70)} from=${from}`);
-  if (!rawId) return { urls: [], flag: "洛雪TV", parse: 0, header: {} };
+  if (!rawId) return { urls: [], flag: "洛雪", parse: 0, header: {} };
 
   const header = { "User-Agent": UA, Referer: `${HOST}/` };
 
@@ -1723,7 +1723,7 @@ async function play(params, context) {
         let directUrl = meta.u;
         if (/\.m3u8(\?|$)/i.test(meta.u)) directUrl = await expandMasterM3u8(meta.u, header);
         logInfo(`play 直链 ${meta.t || ""} ${directUrl.slice(0, 70)}`);
-        return { urls: [{ name: "直链", url: directUrl }], flag: meta.g || "洛雪TV", parse: 0, header };
+        return { urls: [{ name: "直链", url: directUrl }], flag: meta.g || "洛雪", parse: 0, header };
       }
 
       const urls = [];
@@ -1763,7 +1763,7 @@ async function play(params, context) {
               logInfo(`play 嗅探成功 ${String(sniffUrl).slice(0, 90)}`);
               return {
                 urls: [{ name: meta.g || "解析播放", url: sniffUrl }],
-                flag: meta.g || "洛雪TV",
+                flag: meta.g || "洛雪",
                 parse: 0,
                 header: Object.assign({}, header, sniffed.header || {}),
               };
@@ -1779,10 +1779,10 @@ async function play(params, context) {
       const direct = await findDirectFallback(meta);
       if (direct) {
         logInfo(`play 返回跨源直链 ${direct.url.slice(0, 80)}`);
-        return { urls: [{ name: direct.flag || "直链", url: direct.url }], flag: direct.flag || "洛雪TV", parse: 0, header: direct.header };
+        return { urls: [{ name: direct.flag || "直链", url: direct.url }], flag: direct.flag || "洛雪", parse: 0, header: direct.header };
       }
       // 直链兜底也失败：回退 parse=1（ok影视 可继续嗅探），解析入口排在原始页前面
-      return { urls, flag: meta.g || "洛雪TV", parse: 1, header };
+      return { urls, flag: meta.g || "洛雪", parse: 1, header };
     }
 
     // B) 兼容旧 playId：走盘搜
@@ -1804,17 +1804,17 @@ async function play(params, context) {
         "play 未取到播放地址：该条目缺少采集站分集信息，且未配置 PANSOU_API。"
         + "请从本源的详情页进入播放（分集自带解析入口），或配置 PANSOU_API 走盘搜",
       );
-      return { urls: [], flag: "洛雪TV", parse: 0, header };
+      return { urls: [], flag: "洛雪", parse: 0, header };
     }
     if (!keyword) {
       logError(`play 缺少搜索关键词 ${rawId.slice(0, 40)}`);
-      return { urls: [], flag: "洛雪TV", parse: 0, header };
+      return { urls: [], flag: "洛雪", parse: 0, header };
     }
 
     let items = await panSearch(keyword);
     if (!items || !items.length) {
       logInfo(`play 盘搜无结果 ${keyword}`);
-      return { urls: [], flag: "洛雪TV", parse: 0, header };
+      return { urls: [], flag: "洛雪", parse: 0, header };
     }
     items = await panCheckFilter(items);
 
@@ -1827,9 +1827,9 @@ async function play(params, context) {
       return { name: i > 0 ? `${name} (${i + 1})` : name, url: item.url };
     });
     logInfo(`play 盘搜 ${keyword} urls=${urls.length}`);
-    return { urls, flag: "洛雪TV", parse: 0, header };
+    return { urls, flag: "洛雪", parse: 0, header };
   } catch (error) {
     logError(`play 失败 ${rawId.slice(0, 50)}`, error);
-    return { urls: [], flag: "洛雪TV", parse: 0, header };
+    return { urls: [], flag: "洛雪", parse: 0, header };
   }
 }
