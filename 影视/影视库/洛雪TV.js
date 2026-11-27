@@ -1,7 +1,7 @@
 // @name 洛雪TV
 // @author OmniBox
-// @description 站点：tv.lxyy.club（洛雪TV）。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
-// @version 2.1.0
+// @description 站点：tv.lxyy.club（洛雪TV）。v2.2.0 新增官方解析线路（洛雪4K/蓝光/臻享/789/麒麟）：官网的 4K/HDR 画质不在采集站里，而是把平台播放页交给站点解析接口换直链。接入完整四段链路 POST /api/playback-session.php 取 csrf+cookie → 带 X-CSRF-Token+Cookie 请求 detail 拿 episodes[].playback_grant → GET /json-player.php?route=&url=&source=&grant= 取 data-authorization → POST /api/json-parse.php 拿 {format,url}；官方线路在详情页排最前，play 时优先走解析、命中即 parse=0 直链（hls 与 dash/.mpd 都支持），失败再回落嗅探与跨源兜底。只对 qq/bilibili/rrmj/hmdj/mgtv 生成官方线路（优酷/爱奇艺实测洛雪4K 返回 noauth），native 格式实测是付费墙直接跳过。可用 LXYY_OFFICIAL_ENABLED/LXYY_OFFICIAL_ROUTES/LXYY_OFFICIAL_GROUPS 调整。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
+// @version 2.2.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/影视库/洛雪TV.js
 
 /**
@@ -405,6 +405,50 @@ async function fetchJson(urlStr, options = {}) {
 const PROXY_MIN_INTERVAL = Number(process.env.LXYY_PROXY_MIN_INTERVAL || 700);
 const PROXY_COOLDOWN = Number(process.env.LXYY_PROXY_COOLDOWN || 300);
 
+/* -------------------------------------------------------------------------
+ * 官方解析接口（4K / HDR 画质的唯一来源）
+ *
+ * 站点采集站给的 episodes[].url 是**平台播放页**（腾讯/爱奇艺/B站/优酷…），
+ * 清晰度由平台自己决定；官网右侧「解析线路」面板（洛雪4K / 臻享 / 蓝光 / 789 /
+ * 麒麟 / 蝉窨）才是把平台页解析成 4K/HDR 直链的入口。旧版脚本没接这条链路，
+ * 所以只有 mj（4K60帧）这类自带 m3u8 的采集源能出高清，官方 4K 线路始终缺失。
+ *
+ * 完整链路（三段，缺一不可）：
+ *   1) POST /api/playback-session.php        → csrf + Cookie: sg_playback_access
+ *   2) GET  /api/proxy.php?action=detail&…   → episodes[].playback_grant（带 csrf+cookie 才下发）
+ *   3) GET  /json-player.php?route=<id>&url=&source=&grant=  → HTML 里的 data-authorization
+ *   4) POST /api/json-parse.php {route,url,source,authorization} → { success, format, url }
+ * 其中 grant 单次可复用（同一 csrf 会话内重复解析同一集结果稳定），
+ * authorization 绑定单次 grant，二次使用返回「播放授权已使用，请重新解析」。
+ * ------------------------------------------------------------------------- */
+const OFFICIAL_ROUTES = splitConfigList(
+  process.env.LXYY_OFFICIAL_ROUTES || "official_musbpyqz;official_muh2fkp2;official_muh2g0rz;official_mwieue15;official_mv83mv2y",
+);
+// 官网 player_codes 声明洛雪4K 只覆盖 qq/bilibili/rrmj/hmdj；其余平台不派给它，省一轮无效请求
+const OFFICIAL_ROUTE_CODES = {
+  official_musbpyqz: ["qq", "bilibili", "rrmj", "hmdj"],
+};
+// 只有这些平台线路才生成官方解析线路：其它平台（优酷/爱奇艺等）洛雪4K 实测返回 noauth，
+// 生成出来就是死线路。可用 LXYY_OFFICIAL_GROUPS 覆盖。
+const OFFICIAL_GROUPS = splitConfigList(
+  process.env.LXYY_OFFICIAL_GROUPS || "qq;bilibili;rrmj;hmdj;mgtv",
+).map((s) => s.toLowerCase());
+const OFFICIAL_ENABLED = String(process.env.LXYY_OFFICIAL_ENABLED || "true").toLowerCase() !== "false";
+const OFFICIAL_TIMEOUT = Number(process.env.LXYY_OFFICIAL_TIMEOUT || 25000);
+const OFFICIAL_CACHE_TTL = Number(process.env.LXYY_OFFICIAL_CACHE_TTL || 900);
+
+// 解析线路显示名，与官网「解析线路」面板一致
+const OFFICIAL_ROUTE_NAMES = {
+  official_musbpyqz: "洛雪4K",
+  official_muh2fkp2: "蓝光",
+  official_muh2g0rz: "臻享",
+  official_mwieue15: "789",
+  official_mv83mv2y: "麒麟",
+  official_mv49v5qz: "蝉窨",
+};
+
+let playbackSession = null; // { csrf, cookie, at }
+
 let proxyLastAt = 0;
 let proxyCooldownUntil = 0;
 let proxyBlockedLogged = false;
@@ -468,6 +512,192 @@ function proxyUrl(action, params = {}) {
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join("&");
   return `${HOST}/api/proxy.php?action=${encodeURIComponent(action)}${qs ? `&${qs}` : ""}`;
+}
+
+/* ==========================================================================
+ * 官方解析接口（4K / HDR 直链）
+ * ========================================================================== */
+
+function collectSetCookie(headers) {
+  const raw = headers && (headers["set-cookie"] || headers["Set-Cookie"]);
+  const list = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+  return list.map((c) => String(c).split(";")[0].trim()).filter(Boolean).join("; ");
+}
+
+/** 取播放会话（csrf + sg_playback_access cookie），进程内复用，过期自动重建。 */
+async function ensurePlaybackSession() {
+  const now = Date.now();
+  if (playbackSession && now - playbackSession.at < 20 * 60 * 1000) return playbackSession;
+  const res = await nodeRequest(`${HOST}/api/playback-session.php`, { method: "POST" }, {
+    "User-Agent": UA,
+    Referer: `${HOST}/`,
+    Origin: HOST,
+    Accept: "application/json, text/plain, */*",
+  });
+  let csrf = "";
+  try {
+    csrf = String(JSON.parse(res.body || "{}").csrf || "");
+  } catch (_) { /* 下面统一判空 */ }
+  if (!csrf) throw new Error(`播放会话获取失败 HTTP ${res.statusCode}`);
+  const cookie = collectSetCookie(res.headers);
+  playbackSession = { csrf, cookie, at: now };
+  logInfo(`官方解析 会话就绪 csrf=${csrf.slice(0, 10)} cookie=${cookie ? "有" : "无"}`);
+  return playbackSession;
+}
+
+/** 带 csrf + cookie 取详情：只有这种请求才会下发 episodes[].playback_grant。 */
+async function proxyDetailWithGrant(id, source) {
+  const session = await ensurePlaybackSession();
+  const headers = {
+    "User-Agent": UA,
+    Referer: `${HOST}/`,
+    Accept: "application/json, text/plain, */*",
+    "X-CSRF-Token": session.csrf,
+  };
+  if (session.cookie) headers.Cookie = session.cookie;
+  const res = await nodeRequest(proxyUrl("detail", { id: String(id), source: String(source) }), {}, headers);
+  if (Number(res.statusCode) < 200 || Number(res.statusCode) >= 300) {
+    throw new Error(`详情 HTTP ${res.statusCode}`);
+  }
+  let data;
+  try {
+    data = JSON.parse(res.body || "{}");
+  } catch (_) {
+    throw new Error("详情返回非 JSON");
+  }
+  const detail = (Array.isArray(data.details) ? data.details[0] : null) || null;
+  return detail;
+}
+
+/**
+ * 用官方解析接口把平台播放页解析成直链。
+ * @param {string} playPageUrl 平台播放页（采集站 episodes[].url）
+ * @param {string} source      采集站源名（qilin/mj/…）
+ * @param {object} opts        { grant, routeId, collectId, group }
+ * @returns {Promise<{url:string, format:string, routeId:string, routeName:string}|null>}
+ */
+async function parseOfficial(playPageUrl, source, opts = {}) {
+  if (!OFFICIAL_ENABLED) return null;
+  const target = String(playPageUrl || "").trim();
+  if (!target) return null;
+
+  let grant = String(opts.grant || "");
+  // playId 里没带 grant（旧 playId 或 detail 未取到）时，用采集站 id 重新换一次
+  if (!grant && opts.collectId) {
+    try {
+      const detail = await proxyDetailWithGrant(opts.collectId, source);
+      grant = findGrantByUrl(detail, target);
+    } catch (error) {
+      logInfo(`官方解析 取 grant 失败: ${error && error.message ? error.message : error}`);
+    }
+  }
+
+  const group = String(opts.group || "").toLowerCase();
+  const routeIds = opts.routeId
+    ? [String(opts.routeId)]
+    : OFFICIAL_ROUTES.filter((id) => {
+      const allow = OFFICIAL_ROUTE_CODES[id];
+      if (!allow || !allow.length) return true;
+      return allow.indexOf(group) >= 0;
+    });
+  if (!routeIds.length) return null;
+
+  const session = await ensurePlaybackSession();
+  for (const routeId of routeIds) {
+    const routeName = OFFICIAL_ROUTE_NAMES[routeId] || routeId;
+    try {
+      const playerUrl = `${HOST}/json-player.php?route=${encodeURIComponent(routeId)}`
+        + `&url=${encodeURIComponent(target)}`
+        + `&source=${encodeURIComponent(source || "")}`
+        + (grant ? `&grant=${encodeURIComponent(grant)}` : "");
+      const pageRes = await nodeRequest(playerUrl, {}, {
+        "User-Agent": UA,
+        Referer: `${HOST}/`,
+        ...(session.cookie ? { Cookie: session.cookie } : {}),
+      });
+      const html = String(pageRes.body || "");
+      const authMatch = html.match(/data-authorization="([^"]*)"/);
+      if (!authMatch || !authMatch[1]) {
+        const errMatch = html.match(/data-authorization-error="([^"]*)"/);
+        logInfo(`官方解析 ${routeName} 无授权: ${errMatch ? errMatch[1] : "unknown"}`);
+        continue;
+      }
+
+      const payload = JSON.stringify({
+        route: routeId,
+        url: target,
+        source: String(source || ""),
+        authorization: authMatch[1],
+      });
+      const parseRes = await nodeRequest(`${HOST}/api/json-parse.php`, { method: "POST", body: payload }, {
+        "User-Agent": UA,
+        Referer: `${HOST}/`,
+        Origin: HOST,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+        ...(session.cookie ? { Cookie: session.cookie } : {}),
+      });
+      let parsed;
+      try {
+        parsed = JSON.parse(parseRes.body || "{}");
+      } catch (_) {
+        logInfo(`官方解析 ${routeName} 返回非 JSON (HTTP ${parseRes.statusCode})`);
+        continue;
+      }
+      if (!parsed.success || !parsed.url) {
+        logInfo(`官方解析 ${routeName} 失败: ${parsed.message || parsed.error || "unknown"}`);
+        continue;
+      }
+      const mediaUrl = String(parsed.url);
+      const format = String(parsed.format || "").toLowerCase();
+      // native 实测 302 后是 402 付费墙（DEPLOYMENT_DISABLED），当直链返回只会让播放器报错
+      if (format === "native") {
+        logInfo(`官方解析 ${routeName} 返回 native（付费墙），跳过`);
+        continue;
+      }
+      logInfo(`官方解析 ${routeName} 成功 format=${format || "-"} url=${mediaUrl.slice(0, 90)}`);
+      return { url: mediaUrl, format, routeId, routeName };
+    } catch (error) {
+      logInfo(`官方解析 ${routeName} 异常: ${error && error.message ? error.message : error}`);
+    }
+  }
+  return null;
+}
+
+/** play() 用的官方解析入口：指定线路优先，未指定则按 OFFICIAL_ROUTES 顺序试。 */
+async function tryOfficial(meta) {
+  if (!OFFICIAL_ENABLED || !meta) return null;
+  // 未指定解析线路（即用户点的是采集站原始线路）时，只有平台在 OFFICIAL_GROUPS 里才顺带升级画质：
+  // 优酷/爱奇艺这类平台洛雪4K 返回 noauth，硬试只会给每次播放多加 4~5 次无效请求。
+  if (!meta.r) {
+    const group = String(meta.g || "").toLowerCase();
+    if (OFFICIAL_GROUPS.indexOf(group) < 0) return null;
+  }
+  try {
+    return await parseOfficial(meta.u, meta.s, {
+      grant: meta.n,
+      routeId: meta.r,
+      collectId: meta.i,
+      group: meta.g,
+    });
+  } catch (error) {
+    logInfo(`官方解析整体失败: ${error && error.message ? error.message : error}`);
+    return null;
+  }
+}
+
+/** 在 detail.episodes 里按 url 精确匹配，取该集的 playback_grant。 */
+function findGrantByUrl(detail, target) {
+  const groups = Array.isArray(detail && detail.episodes) ? detail.episodes : [];
+  for (const group of groups) {
+    const eps = Array.isArray(group && group.episodes) ? group.episodes : [];
+    for (const ep of eps) {
+      if (String((ep && ep.url) || "").trim() === String(target).trim()) {
+        return String((ep && ep.playback_grant) || "");
+      }
+    }
+  }
+  return "";
 }
 
 async function fetchSiteConfig() {
@@ -539,7 +769,7 @@ function normalizeEpisodeName(raw, index) {
   return name;
 }
 
-function buildEpisodeMeta(detail, url) {
+function buildEpisodeMeta(detail, url, extra) {
   // playId 精简：t(片名)/g(线路) 全剧每集都相同属冗余，去掉可显著缩短
   // vod_play_url（长剧 200+ 集时从 42KB 降到 ~20KB，避免宿主解析/显示异常）。
   // play() 里 meta.g 有 fallback，不影响播放。
@@ -550,24 +780,67 @@ function buildEpisodeMeta(detail, url) {
     i: String((detail && detail.id) || ""),
     t: normalizeText(detail && detail.name), // 剧名：嗅探失败时用于跨源搜索 m3u8 直链兜底
   };
+  if (extra && extra.g) meta.g = String(extra.g);       // 平台线路代码（qq/bilibili/…）
+  if (extra && extra.n) meta.n = String(extra.n);       // playback_grant，解析接口必带
+  if (extra && extra.r) meta.r = String(extra.r);       // 指定解析线路 id
   return `px|${Buffer.from(JSON.stringify(meta), "utf8").toString("base64")}`;
 }
 
 // 按站点线路分组拆成多条 vod_play_source：线路名（如 jlm3u8/jlplayer）体现在线路名上，
 // 不再拼进每个分集名——否则列表里每集都带 "jlm3u8 第N集"，看起来像乱码/异常。
+//
+// withOfficial=true 时额外为「官方解析线路」生成独立线路（洛雪4K/蓝光/臻享…）：
+// 官网这些线路是把平台播放页交给解析接口拿 4K/HDR 直链的，采集站本身不提供，
+// 所以必须单独列出来，否则用户看不到 4K 选项。
 function buildProxySources(detail, fallbackName) {
   const groups = Array.isArray(detail && detail.episodes) ? detail.episodes : [];
   const sources = [];
   groups.forEach((group, gi) => {
     const groupName = normalizeText(group && group.group) || `线路${gi + 1}`;
+    const groupCode = String((group && group.group) || "").toLowerCase();
     const eps = Array.isArray(group && group.episodes) ? group.episodes : [];
     const episodes = [];
     eps.forEach((ep, ei) => {
       const url = String((ep && ep.url) || "").trim();
       if (!url) return;
-      episodes.push({ name: normalizeEpisodeName(ep && ep.name, ei), playId: buildEpisodeMeta(detail, url) });
+      episodes.push({
+        name: normalizeEpisodeName(ep && ep.name, ei),
+        playId: buildEpisodeMeta(detail, url, { g: groupCode, n: ep && ep.playback_grant }),
+      });
     });
     if (episodes.length) sources.push({ name: normalizeText(fallbackName) || groupName, episodes });
+  });
+  return sources;
+}
+
+// 官方解析线路（洛雪4K/蓝光/臻享/789/麒麟）。
+// 官网这些线路是把平台播放页交给 /json-player.php + /api/json-parse.php 换 4K/HDR 直链，
+// 采集站本身不提供这些画质——不单独列出来，用户在播放器里就永远看不到 4K 选项。
+// 只对 OFFICIAL_GROUPS 里的平台生成：优酷/爱奇艺实测洛雪4K 返回 noauth，生成出来是死线路。
+function buildOfficialSources(detail) {
+  if (!OFFICIAL_ENABLED) return [];
+  const groups = Array.isArray(detail && detail.episodes) ? detail.episodes : [];
+  const sources = [];
+  groups.forEach((group) => {
+    const groupCode = String((group && group.group) || "").toLowerCase();
+    if (OFFICIAL_GROUPS.indexOf(groupCode) < 0) return;
+    const eps = Array.isArray(group && group.episodes) ? group.episodes : [];
+    if (!eps.length) return;
+    OFFICIAL_ROUTES.forEach((routeId) => {
+      const allow = OFFICIAL_ROUTE_CODES[routeId];
+      if (allow && allow.length && allow.indexOf(groupCode) < 0) return;
+      const routeName = OFFICIAL_ROUTE_NAMES[routeId] || routeId;
+      const routeEpisodes = [];
+      eps.forEach((ep, ei) => {
+        const url = String((ep && ep.url) || "").trim();
+        if (!url) return;
+        routeEpisodes.push({
+          name: normalizeEpisodeName(ep && ep.name, ei),
+          playId: buildEpisodeMeta(detail, url, { g: groupCode, n: ep && ep.playback_grant, r: routeId }),
+        });
+      });
+      if (routeEpisodes.length) sources.push({ name: `${routeName}·${groupCode}`, episodes: routeEpisodes });
+    });
   });
   return sources;
 }
@@ -1034,10 +1307,25 @@ async function matchTmdbByTitle(title, year) {
 }
 
 async function detailFromCollect(source, id, vodId) {
-  const d = await proxyDetail(id, source);
+  // 必须带 csrf + cookie 请求详情，否则 episodes[].playback_grant 不下发，
+  // 官方解析线路（4K/HDR）就无从换授权。拿不到会话时降级为普通详情，功能不受影响。
+  let d = null;
+  try {
+    d = await proxyDetailWithGrant(id, source);
+  } catch (error) {
+    logInfo(`[detail] 带授权取详情失败，降级普通详情: ${error && error.message ? error.message : error}`);
+  }
+  if (!d) d = await proxyDetail(id, source);
   if (!d) return null;
   let sources = buildProxySources(d);
+  // 集数只按采集站原始线路统计，不能把官方解析线路（同一批集的复制品）算进去
   const totalEps = sources.reduce((n, s) => n + s.episodes.length, 0);
+  const officialSources = buildOfficialSources(d);
+  if (officialSources.length) {
+    // 官方解析线路排最前：官网优先度也是「洛雪4K > 4K60帧 > 其它官采 > 普通线路」
+    sources = officialSources.concat(sources);
+    logInfo(`[detail] ${normalizeText(d.name)} 官方解析线路 ${officialSources.map((s) => s.name).join(",")}`);
+  }
   // 单线路用站点源名（官采蓝光）更友好；多线路保留各自分组名（jlm3u8/jlplayer）便于选择。
   if (sources.length === 1) sources = [{ ...sources[0], name: normalizeText(d.source_name) || sources[0].name }];
 
@@ -1347,7 +1635,9 @@ function driveLabel(drive) {
  * ========================================================================== */
 
 function isDirectMedia(url) {
-  return /\.(m3u8|mp4|flv|mkv|ts)(\?|$)/i.test(String(url || ""));
+  // mpd = MPEG-DASH 清单：B站/部分官采线路的 4K 只给 .mpd（format=dash），
+  // 缺这个后缀会被当成 HTML 页去做嗅探，白白丢掉 4K 直链。
+  return /\.(m3u8|mpd|mp4|flv|mkv|ts)(\?|$)/i.test(String(url || ""));
 }
 
 // 部分站点的 .m3u8 是「假 master」：只有一个 BANDWIDTH 变体，指向带动态 session
@@ -1442,6 +1732,20 @@ async function play(params, context) {
       urls.push({ name: "原始播放页", url: meta.u });
 
       logInfo(`play 解析入口=${playerPage ? "有" : "无"} src=${meta.s}/${meta.i} 线路=${meta.g || "-"} page=${meta.u.slice(0, 60)}`);
+
+      // 官方解析线路（洛雪4K/蓝光/臻享…）：站点把平台播放页交给解析接口换 4K/HDR 直链，
+      // 这是全站唯一能拿到 4K 的通道，且优先级最高——有就直接用，不必再嗅探。
+      // 命中 format=hls/dash 都是可播直链（dash 是 .mpd，需 DASH 引擎，宿主普遍支持）。
+      const official = await tryOfficial(meta);
+      if (official) {
+        logInfo(`play 官方解析命中 线路=${official.routeName} format=${official.format || "-"} ${official.url.slice(0, 90)}`);
+        return {
+          urls: [{ name: official.routeName, url: official.url }],
+          flag: official.routeName,
+          parse: 0,
+          header,
+        };
+      }
 
       // 平台播放页/解析页不是媒体直链；parse=1 仅 ok影视 有效，其它客户端会忽略导致加载失败。
       // 先用 SDK 嗅探真实媒体地址，命中直链即 parse=0 返回（兼容所有端）。
