@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.4.1：新增 SSR IPv4 直连兜底（hongguoduanju.com DNS 只返回 IPv6 时首页/分类/详情全部加载不出来的根因），缩短普通请求超时避免卡死。v2.4.0：REA 逆向 App video_detail 接口（/novel/player/video_detail/v1），detail 优先用它取完整分集（SSR 仅 3 集付费墙，App 接口实测 586 集全拿到且数字 vid 全部可播），失败回退 SSR。v2.3.0：REA 逆向 APK v7.4.5.32(code 74532)，签名基线/UA 从 74332 对齐到 APK 真实版本；放宽 vid 校验以接受 v1_ 加密 ID（APK GetVideoModelRequest.videoId 为 String）。逆向实证：播放端点 /novel/player/multi_video_model/{v1|player/v1}，请求体 snake_case 结构、Playback 签名头(x-khronos/helios/medusa)与枚举(VideoPlatformType.Mixed=1024、DeviceLevel=1/2/3)均已对齐；服务端对匿名身份仍返回空模型（需登录态），非脚本问题。v2.2.6 精简：移除 v3 遗留死代码，压缩头注释。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
-// @version 2.4.1
+// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.4.2：对齐 hongguoTV 0.16.20 PR#146，video_detail 全挂时兜底走 App directory/all_items 取完整有序分集（官网只下发 3 个混淆预览 ID 的场景），SSR 仅补元数据。v2.4.1：新增 SSR IPv4 直连兜底（hongguoduanju.com DNS 只返回 IPv6 时首页/分类/详情全部加载不出来的根因），缩短普通请求超时避免卡死。v2.4.0：REA 逆向 App video_detail 接口（/novel/player/video_detail/v1），detail 优先用它取完整分集（SSR 仅 3 集付费墙，App 接口实测 586 集全拿到且数字 vid 全部可播），失败回退 SSR。v2.3.0：REA 逆向 APK v7.4.5.32(code 74532)，签名基线/UA 从 74332 对齐到 APK 真实版本；放宽 vid 校验以接受 v1_ 加密 ID（APK GetVideoModelRequest.videoId 为 String）。逆向实证：播放端点 /novel/player/multi_video_model/{v1|player/v1}，请求体 snake_case 结构、Playback 签名头(x-khronos/helios/medusa)与枚举(VideoPlatformType.Mixed=1024、DeviceLevel=1/2/3)均已对齐；服务端对匿名身份仍返回空模型（需登录态），非脚本问题。v2.2.6 精简：移除 v3 遗留死代码，压缩头注释。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。
+// @version 2.4.2
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -2594,6 +2594,57 @@ async function appVideoDetail(seriesId) {
       await log('warn', `[hg][app-detail] ${new URL(apiBase).host} 失败: ${e.message.slice(0, 80)}`);
     }
   }
+  // v2.4.2（对齐 hongguoTV 0.16.20 PR#146）：video_detail 全挂时再试完整分集目录接口。
+  return appDirectoryDetail(id);
+}
+
+// v2.4.2（对齐 hongguoTV 0.16.20 PR#146）：2026-11-27 起官网可能只下发 3 个混淆
+// 预览 ID，App video_detail 若不可用，改走 /reading/bookapi/directory/all_items/v/
+// 取完整有序数字分集。用已有 v5 播放签名（GET，无需登录/设备注册），并按 PR#146
+// 校验：非空、全为 1~30 位数字、无重复，且数量 > 3（SSR 只给 3 集）。
+const DIRECTORY_APIS = [
+  'https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/directory/all_items/v/',
+  'https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/directory/all_items/v/',
+];
+async function appDirectoryDetail(seriesId) {
+  const id = String(seriesId || '');
+  if (!/^\d+$/.test(id)) return null;
+  const hit = appVideoDetailCache.get(id);
+  if (hit && hit.expires > Date.now()) return hit.data;
+  const device = getDevice();
+  const values = Object.assign({}, PLAYBACK_DEVICE_74332, {
+    device_id: device.device_id, iid: device.iid, cdid: device.cdid,
+    book_id: id, need_version: 'true',
+  });
+  for (const apiBase of DIRECTORY_APIS) {
+    try {
+      const signed = signPlaybackV5(apiBase, values, null, Date.now());
+      const headers = Object.assign({}, signed.headers, {
+        'User-Agent': PLAYBACK_UA,
+        'sdk-version': '2', 'x-xs-from-web': '0', 'x-ss-dp': '8662',
+        Accept: 'application/json; charset=utf-8,application/x-protobuf',
+      });
+      if (device.cookie) headers.Cookie = device.cookie;
+      const res = await httpRequest(signed.url, { method: 'GET', headers, timeout: 20000 });
+      const j = JSON.parse(res.data);
+      const success = j && (j.code === 0 || String(j.message || '').toUpperCase() === 'SUCCESS');
+      if (!success) continue;
+      const rows = safeArray(j?.data?.item_data_list);
+      const vids = rows.map((row) => text(row?.item_id)).filter(Boolean);
+      if (vids.length <= 3 || !vids.every((v) => /^[0-9]{1,30}$/.test(v)) || new Set(vids).size !== vids.length) continue;
+      const episodes = vids.map((vid, idx) => ({ vid, index: idx + 1, cover: '', duration: 0 }));
+      // 目录接口只给分集 ID，元数据留空；detail 主路径会用 SSR 补齐。
+      const data = {
+        series_id: id, series_name: '', series_cover: '', series_intro: '',
+        episode_cnt: vids.length, vid_list: vids, episodes,
+      };
+      appVideoDetailCache.set(id, { data, expires: Date.now() + SERIES_DETAIL_CACHE_TTL });
+      await log('info', `[hg][directory] sid=${id} 完整分集=${vids.length}（App directory/all_items，PR#146）`);
+      return data;
+    } catch (e) {
+      await log('warn', `[hg][directory] ${new URL(apiBase).host} 失败: ${e.message.slice(0, 80)}`);
+    }
+  }
   return null;
 }
 /** 官方现行 video_tab GET 接口（2026-11 播放恢复路径）：签名 GET，参数在 query，返回 data.video_model_data */
@@ -3582,11 +3633,28 @@ async function detail(params, context) {
   for (const id of ids) {
     try {
       // v2.4.0：优先用 App video_detail 接口拿完整分集（SSR 只给 3 集付费墙）。
+      // v2.4.2：appVideoDetail 内含 directory/all_items 兜底；若走兜底，元数据为空，
+      // 用 SSR 详情补齐剧名/封面/简介，只替换分集列表（PR#146 场景）。
       const appDetail = await appVideoDetail(id);
       let series;
       if (appDetail && appDetail.vid_list && appDetail.vid_list.length > 3) {
-        series = { ...appDetail, series_id: id, celebrities: [] };
-        cacheSeriesDetail(id, appDetail);
+        if (appDetail.series_name || appDetail.series_cover) {
+          series = { ...appDetail, series_id: id, celebrities: [] };
+        } else {
+          let ssr = {};
+          try {
+            const data = await pageData(`${SITE}/detail?series_id=${encodeURIComponent(id)}`);
+            const fetched = seriesFromDetailPage(detailPageFrom(data));
+            if (fetched && typeof fetched === 'object') ssr = fetched;
+          } catch (_) { /* SSR 仅用于补元数据，失败不阻断完整分集 */ }
+          // 只取分集字段，避免 appDetail 的空剧名/封面覆盖 SSR 元数据。
+          series = {
+            ...ssr, series_id: id, celebrities: ssr.celebrities || [],
+            episode_cnt: appDetail.episode_cnt, vid_list: appDetail.vid_list,
+            episodes: appDetail.episodes,
+          };
+        }
+        cacheSeriesDetail(id, series);
       } else {
         const data = await pageData(`${SITE}/detail?series_id=${encodeURIComponent(id)}`);
         const fetched = seriesFromDetailPage(detailPageFrom(data));
