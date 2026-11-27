@@ -159,7 +159,11 @@ test("洛雪 play keeps platform page when sniff and official parse both fail", 
 });
 
 test("洛雪 play handles direct media url", async () => {
-  const { spider } = loadSpider(baseRoutes());
+  const routes = baseRoutes([
+    // v2.2.6: 直链会先经 expandMasterM3u8 验证内容，mock 一个媒体列表响应
+    { match: (u) => u.includes("cdn.example.com/a.m3u8"), body: () => "#EXTM3U\n#EXTINF:10,\nseg0.ts\n" },
+  ]);
+  const { spider } = loadSpider(routes);
   const meta = { u: "https://cdn.example.com/a.m3u8", p: "", t: "直链测试" };
   const playId = `px|${Buffer.from(JSON.stringify(meta), "utf8").toString("base64")}`;
   const result = await spider.play({ playId }, {});
