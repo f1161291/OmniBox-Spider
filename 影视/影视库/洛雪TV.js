@@ -1,7 +1,7 @@
 // @name 洛雪TV
 // @author OmniBox
-// @description 站点：tv.lxyy.club（洛雪TV）。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
-// @version 2.0.6
+// @description 站点：tv.lxyy.club（洛雪TV）。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
+// @version 2.1.0
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/影视库/洛雪TV.js
 
 /**
@@ -626,13 +626,110 @@ function tmdbImage(path, size) {
  * 榜单 / 分类
  * ========================================================================== */
 
-const RANK_CHANNELS = [
-  { key: "电视剧", type_id: "rank:电视剧", type_name: "电视剧榜" },
-  { key: "电影", type_id: "rank:电影", type_name: "电影榜" },
-  { key: "综艺", type_id: "rank:综艺", type_name: "综艺榜" },
-  { key: "动漫", type_id: "rank:动漫", type_name: "动漫榜" },
+/* 官网权威分类：tv.lxyy.club/js/catalog-categories.js 的 CESHI_CATALOG_LISTS（37 个） */
+const MOVIE_BASE = {
+  sort_by: "popularity.desc",
+  "primary_release_date.lte": "today",
+  include_adult: "false",
+  include_video: "false",
+};
+const SERIES_BASE = {
+  sort_by: "popularity.desc",
+  "first_air_date.lte": "today",
+  include_null_first_air_dates: "false",
+  include_adult: "false",
+};
+const GROUP_NAMES = { movie: "电影", series: "剧集", anime: "动漫" };
+
+function mkCat(id, group, label, extra) {
+  const e = Object.assign({}, extra || {});
+  const countries = e.countries;
+  delete e.countries;
+  const isMovie = group === "movie";
+  const params = Object.assign({}, isMovie ? MOVIE_BASE : SERIES_BASE, e);
+  // 官网多国家用 | 分隔（HK|TW|MO→16267 条；逗号分隔只有 3 条）
+  if (Array.isArray(countries) && countries.length) params.with_origin_country = countries.join("|");
+  return {
+    type_id: id,
+    group,
+    tabTitle: label,
+    type_name: `${GROUP_NAMES[group]} · ${label}`,
+    mediaType: isMovie ? "movie" : "tv",
+    endpoint: isMovie ? "discover/movie" : "discover/tv",
+    params,
+  };
+}
+
+// 电影 16
+const CATALOG_MOVIES = [
+  mkCat("movie-all", "movie", "全部"),
+  mkCat("movie-popular", "movie", "热门"),
+  mkCat("movie-latest", "movie", "最新", { sort_by: "primary_release_date.desc" }),
+  mkCat("movie-rated", "movie", "高分", { sort_by: "vote_average.desc", vote_count_gte: "200" }),
+  mkCat("cn-movie", "movie", "国产", { with_original_language: "zh", with_origin_country: "CN" }),
+  mkCat("movie-hktw", "movie", "港澳台", { countries: ["HK", "TW", "MO"] }),
+  mkCat("movie-western", "movie", "欧美", { with_original_language: "en" }),
+  mkCat("movie-jpkr", "movie", "日韩", { countries: ["JP", "KR"] }),
+  mkCat("movie-action", "movie", "动作", { with_genres: "28" }),
+  mkCat("movie-comedy", "movie", "喜剧", { with_genres: "35" }),
+  mkCat("movie-romance", "movie", "爱情", { with_genres: "10749" }),
+  mkCat("movie-mystery", "movie", "悬疑", { with_genres: "9648" }),
+  mkCat("movie-scifi", "movie", "科幻", { with_genres: "878" }),
+  mkCat("movie-horror", "movie", "恐怖", { with_genres: "27" }),
+  mkCat("movie-animation", "movie", "动画", { with_genres: "16" }),
+  mkCat("movie-documentary", "movie", "纪录片", { with_genres: "99" }),
 ];
 
+// 剧集 16（官网叫「剧集」；genre 分类按官网排除动画 without_genres=16）
+const NO_ANIME = { without_genres: "16" };
+const CATALOG_SERIES = [
+  mkCat("series-all", "series", "全部", NO_ANIME),
+  mkCat("series-hot", "series", "热播", NO_ANIME),
+  mkCat("series-latest", "series", "最新", Object.assign({ sort_by: "first_air_date.desc" }, NO_ANIME)),
+  mkCat("series-rated", "series", "高分", Object.assign({ sort_by: "vote_average.desc", vote_count_gte: "200" }, NO_ANIME)),
+  mkCat("cn-tv", "series", "国产", Object.assign({ with_original_language: "zh", with_origin_country: "CN" }, NO_ANIME)),
+  mkCat("series-korea", "series", "韩剧", Object.assign({ with_origin_country: "KR" }, NO_ANIME)),
+  mkCat("series-japan", "series", "日剧", Object.assign({ with_origin_country: "JP" }, NO_ANIME)),
+  mkCat("series-western", "series", "欧美", Object.assign({ with_original_language: "en" }, NO_ANIME)),
+  mkCat("series-action", "series", "动作冒险", Object.assign({ with_genres: "10759" }, NO_ANIME)),
+  mkCat("series-comedy", "series", "喜剧", Object.assign({ with_genres: "35" }, NO_ANIME)),
+  mkCat("series-mystery", "series", "悬疑", Object.assign({ with_genres: "9648" }, NO_ANIME)),
+  mkCat("series-crime", "series", "犯罪", Object.assign({ with_genres: "80" }, NO_ANIME)),
+  mkCat("series-scifi", "series", "科幻奇幻", Object.assign({ with_genres: "10765" }, NO_ANIME)),
+  mkCat("series-animation", "series", "动画", { with_genres: "16" }),
+  mkCat("series-documentary", "series", "纪录片", Object.assign({ with_genres: "99" }, NO_ANIME)),
+  mkCat("western-animation", "series", "英文动画", { with_genres: "16", with_original_language: "en" }),
+];
+
+// 动漫 6
+const ANIME_BASE = { with_genres: "16" };
+const CATALOG_ANIME = [
+  mkCat("anime-all", "anime", "全部", ANIME_BASE),
+  mkCat("anime-cn", "anime", "国漫", Object.assign({}, ANIME_BASE, { with_original_language: "zh", with_origin_country: "CN" })),
+  mkCat("anime-japan", "anime", "日漫", Object.assign({}, ANIME_BASE, { with_origin_country: "JP" })),
+  mkCat("anime-western", "anime", "欧美", Object.assign({}, ANIME_BASE, { with_original_language: "en" })),
+  mkCat("anime-latest", "anime", "最新", Object.assign({}, ANIME_BASE, { sort_by: "first_air_date.desc" })),
+  mkCat("anime-rated", "anime", "高分", Object.assign({}, ANIME_BASE, { sort_by: "vote_average.desc", vote_count_gte: "100" })),
+];
+
+const DISCOVER_LISTS = [].concat(CATALOG_MOVIES, CATALOG_SERIES, CATALOG_ANIME);
+
+// 官网侧边栏影视浏览项：电影 / 剧集 / 动漫（官网叫「剧集」，不是「电视剧」）
+const CATALOG_GROUPS = [
+  { type_id: "cat:movie", type_name: "电影", group: "movie" },
+  { type_id: "cat:series", type_name: "剧集", group: "series" },
+  { type_id: "cat:anime", type_name: "动漫", group: "anime" },
+];
+
+// 官网 category-tabs 榜单：去「榜」字，quark 补「短剧」
+const RANK_CHANNELS = [
+  { type_id: "rank:quark", type_name: "夸克榜单", channels: ["电视剧", "电影", "综艺", "动漫", "短剧"] },
+  { type_id: "rank:trend", type_name: "TMDB趋势" },
+  { type_id: "rank:bilibili", type_name: "B站榜单" },
+  { type_id: "rank:netflix", type_name: "奈飞榜单" },
+];
+
+// 官网 config.sources 全部 8 个源（补 md 魔都 / fy 官方源）
 const SOURCE_CATEGORIES = [
   { type_id: "src:qilin", type_name: "官采蓝光" },
   { type_id: "src:mj", type_name: "4k60帧" },
@@ -640,36 +737,49 @@ const SOURCE_CATEGORIES = [
   { type_id: "src:360zy", type_name: "360资源" },
   { type_id: "src:dytt", type_name: "电影天堂" },
   { type_id: "src:ik", type_name: "ikun" },
-];
-
-const DISCOVER_LISTS = [
-  { type_id: "movie:now", type_name: "最新电影", endpoint: "discover/movie",
-    params: { sort_by: "primary_release_date.desc", "primary_release_date.lte": "today", include_adult: "false" } },
-  { type_id: "movie:popular", type_name: "热门电影", endpoint: "discover/movie",
-    params: { sort_by: "popularity.desc", include_adult: "false" } },
-  { type_id: "tv:now", type_name: "最新剧集", endpoint: "discover/tv",
-    params: { sort_by: "first_air_date.desc", "first_air_date.lte": "today", include_adult: "false" } },
-  { type_id: "tv:popular", type_name: "热门剧集", endpoint: "discover/tv",
-    params: { sort_by: "popularity.desc", include_adult: "false" } },
-  { type_id: "anime", type_name: "动漫", endpoint: "discover/tv",
-    params: { with_genres: "16", sort_by: "popularity.desc", include_adult: "false" } },
+  { type_id: "src:md", type_name: "魔都" },
+  { type_id: "src:fy", type_name: "官方源" },
 ];
 
 const CLASS_LIST = [
+  ...CATALOG_GROUPS.map((c) => ({ type_id: c.type_id, type_name: c.type_name })),
   ...RANK_CHANNELS.map((c) => ({ type_id: c.type_id, type_name: c.type_name })),
   ...SOURCE_CATEGORIES.map((c) => ({ type_id: c.type_id, type_name: c.type_name })),
-  ...DISCOVER_LISTS.map((c) => ({ type_id: c.type_id, type_name: c.type_name })),
 ];
 
-async function fetchRankChannel(channel) {
-  const key = buildCacheKey("rank", channel);
+/* spec: "quark:电视剧" | "trend" | "bilibili" | "netflix" | 旧「电视剧」（兼容） */
+async function fetchRankChannel(spec) {
+  const key = buildCacheKey("rank", spec);
   const cached = await getCachedJson(key);
   if (cached && Array.isArray(cached.items)) return cached.items;
-  const data = await fetchJson(`${HOST}/api/quark-ranking.php?channel=${encodeURIComponent(channel)}`);
-  const items = Array.isArray(data && data.items) ? data.items : [];
+  let url;
+  let field = "items";
+  const s = String(spec || "");
+  if (s.indexOf("quark:") === 0) {
+    url = `${HOST}/api/quark-ranking.php?channel=${encodeURIComponent(s.slice(6))}&limit=60`;
+  } else if (s === "trend" || s === "ranking") {
+    url = `${HOST}/api/ranking.php`;
+  } else if (s === "bilibili") {
+    url = `${HOST}/api/bilibili-ranking.php`;
+  } else if (s === "netflix") {
+    url = `${HOST}/api/netflix-ranking.php`;
+    field = "results";
+  } else {
+    url = `${HOST}/api/quark-ranking.php?channel=${encodeURIComponent(s)}`;
+  }
+  const data = await fetchJson(url);
+  const items = Array.isArray(data && data[field]) ? data[field] : [];
   await setCachedJson(key, { items }, RANK_CACHE_TTL);
-  logInfo(`榜单 ${channel} -> ${items.length}`);
+  logInfo(`榜单 ${spec} -> ${items.length}`);
   return items;
+}
+
+function pickFilters(p) {
+  for (const key of ["filters", "extend", "ext", "filter"]) {
+    const v = p && p[key];
+    if (v && typeof v === "object" && !Array.isArray(v)) return v;
+  }
+  return {};
 }
 
 /* ==========================================================================
@@ -691,18 +801,32 @@ function collectToVod(item) {
 }
 
 function rankToVod(item, channel) {
+  const title = normalizeText(item.title || item.name);
+  // trend / netflix 条目自带 TMDB id：直接用 tm| 前缀走 TMDB 详情（能拿完整播放列表）
+  const tmdbId = item.tmdbId || (item.id && (item.media_type || item.mediaType) ? item.id : null);
+  const mediaType = item.mediaType || item.media_type || (item.first_air_date ? "tv" : "movie");
+  if (tmdbId) {
+    const v = tmdbToVod({ id: tmdbId, media_type: mediaType,
+      title: item.title || item.name, name: item.name,
+      poster_path: item.posterPath || item.poster_path,
+      vote_average: item.score, first_air_date: item.first_air_date,
+      release_date: item.release_date }, mediaType);
+    return v;
+  }
   const parts = [];
   if (item.episodes) parts.push(String(item.episodes));
-  if (item.score && Number(item.score) > 0) parts.push(`★${item.score}`);
+  if (item.hot_score) parts.push(String(item.hot_score));
+  if (item.score && Number(item.score) > 0 && !String(item.score).includes("分")) parts.push(`★${item.score}`);
+  if (item.people) parts.push(`${item.people}人关注`);
   return {
-    vod_id: `rk|${channel}|${encodeURIComponent(normalizeText(item.title))}`,
-    vod_name: normalizeText(item.title) || "未知",
-    vod_pic: String(item.src || ""),
+    vod_id: `rk|${channel}|${encodeURIComponent(title)}`,
+    vod_name: title || "未知",
+    vod_pic: String(item.src || (item.poster_path ? tmdbImage(item.poster_path, "w500") : "")),
     vod_remarks: parts.join(" · "),
-    vod_year: String(item.year || "").slice(0, 4),
-    vod_content: normalizeText(item.desc),
+    vod_year: String(item.year || item.pub_date || "").slice(0, 4),
+    vod_content: normalizeText(item.desc || item.overview),
     vod_actor: normalizeText(item.actors),
-    type_name: normalizeText(item.category) || channel || "影视",
+    type_name: normalizeText(item.category || item.channel) || channel || "影视",
   };
 }
 
@@ -751,12 +875,12 @@ async function home(params, context) {
       logInfo(`home 采集站搜索失败: ${error.message}`);
     }
 
-    // 补充榜单
-    const channels = RANK_CHANNELS.slice(0, 2);
-    const settled = await Promise.allSettled(channels.map((c) => fetchRankChannel(c.key)));
+    // 补充榜单（官网推荐模式：夸克榜单，取电影 + 电视剧频道）
+    const channels = ["quark:电影", "quark:电视剧"];
+    const settled = await Promise.allSettled(channels.map((c) => fetchRankChannel(c)));
     settled.forEach((res, i) => {
       if (res.status !== "fulfilled") return;
-      res.value.slice(0, 6).forEach((item) => list.push(rankToVod(item, channels[i].key)));
+      res.value.slice(0, 6).forEach((item) => list.push(rankToVod(item, channels[i])));
     });
 
     logInfo(`home 结果 list=${list.length}`);
@@ -769,7 +893,32 @@ async function home(params, context) {
 
 function buildFilters() {
   const filters = {};
+  // 电影/剧集/动漫主分类：把官网 37 个目录分类做成二级 tab（值=catalogId）
+  for (const g of CATALOG_GROUPS) {
+    const items = DISCOVER_LISTS.filter((c) => c.group === g.group);
+    filters[g.type_id] = [
+      { key: "catalog", name: g.type_name, value: [
+        { name: "全部", value: "" },
+        ...items.map((c) => ({ name: c.tabTitle, value: c.type_id })),
+      ] },
+    ];
+  }
+  // 夸克榜单：5 个频道做成二级 tab
+  const quark = RANK_CHANNELS.find((c) => c.type_id === "rank:quark");
+  if (quark) {
+    filters["rank:quark"] = [
+      { key: "channel", name: "频道", value: [
+        { name: "电视剧", value: "电视剧" },
+        { name: "电影", value: "电影" },
+        { name: "综艺", value: "综艺" },
+        { name: "动漫", value: "动漫" },
+        { name: "短剧", value: "短剧" },
+      ] },
+    ];
+  }
+  // 其余分类保留排序占位
   for (const item of CLASS_LIST) {
+    if (filters[item.type_id]) continue;
     filters[item.type_id] = [
       { key: "sort", name: "排序", value: [
         { name: "默认", value: "" },
@@ -780,10 +929,25 @@ function buildFilters() {
   return filters;
 }
 
+async function categoryFromCatalog(conf, page) {
+  const data = await tmdbGet(conf.endpoint, Object.assign({}, conf.params, { page: String(page) }), LIST_CACHE_TTL, "list");
+  const results = Array.isArray(data.results) ? data.results : [];
+  const mediaType = conf.endpoint.indexOf("tv") >= 0 ? "tv" : "movie";
+  const realPages = Number(data.total_pages) || 0;
+  logInfo(`category(catalog) ${conf.type_id} p${page} list=${results.length} total_pages=${realPages}`);
+  return {
+    page,
+    pagecount: Math.max(page, Math.min(realPages > 0 ? realPages : page, 500)),
+    total: Number(data.total_results) || 0,
+    list: toVodList(results.map((x) => tmdbToVod(x, mediaType))),
+  };
+}
+
 async function category(params, context) {
-  const categoryId = String((params && params.categoryId) || "rank:电视剧");
+  const categoryId = String((params && params.categoryId) || "cat:movie");
   const page = Math.max(1, Number((params && params.page) || 1) || 1);
-  logInfo(`category 入口 categoryId=${categoryId} page=${page}`);
+  const f = pickFilters(params);
+  logInfo(`category 入口 categoryId=${categoryId} page=${page} filters=${JSON.stringify(f)}`);
 
   try {
     if (categoryId.indexOf("src:") === 0) {
@@ -800,33 +964,40 @@ async function category(params, context) {
     }
 
     if (categoryId.indexOf("rank:") === 0) {
-      const channel = categoryId.slice(5);
-      const items = await fetchRankChannel(channel);
+      let spec = categoryId.slice(5);
+      if (spec === "quark") {
+        const ch = normalizeText(f.channel || f.catalog || "电视剧") || "电视剧";
+        spec = `quark:${ch}`;
+      }
+      const items = await fetchRankChannel(spec);
       const start = (page - 1) * 20;
       const slice = items.slice(start, start + 20);
-      logInfo(`category(rank) ${channel} total=${items.length} list=${slice.length}`);
+      logInfo(`category(rank) ${spec} total=${items.length} list=${slice.length}`);
       return {
         page,
         pagecount: Math.max(1, Math.ceil(items.length / 20)),
         total: items.length,
-        list: toVodList(slice.map((x) => rankToVod(x, channel))),
+        list: toVodList(slice.map((x) => rankToVod(x, spec))),
       };
     }
 
-    const conf = DISCOVER_LISTS.find((c) => c.type_id === categoryId);
-    if (conf) {
-      const data = await tmdbGet(conf.endpoint, Object.assign({}, conf.params, { page: String(page) }), LIST_CACHE_TTL, "list");
-      const results = Array.isArray(data.results) ? data.results : [];
-      const mediaType = conf.endpoint.indexOf("tv") >= 0 ? "tv" : "movie";
-      const realPages = Number(data.total_pages) || 0;
-      logInfo(`category(tmdb) ${categoryId} p${page} list=${results.length} total_pages=${realPages}`);
-      return {
-        page,
-        pagecount: Math.max(page, Math.min(realPages > 0 ? realPages : page, 500)),
-        total: Number(data.total_results) || 0,
-        list: toVodList(results.map((x) => tmdbToVod(x, mediaType))),
-      };
+    // 官网主分组：电影 / 剧集 / 动漫，二级 tab 选具体目录分类
+    if (categoryId.indexOf("cat:") === 0) {
+      const group = categoryId.slice(4);
+      const chosen = normalizeText(f.catalog || f.sub || f.type || "");
+      let conf = chosen ? DISCOVER_LISTS.find((c) => c.type_id === chosen && c.group === group) : null;
+      if (!conf) conf = DISCOVER_LISTS.find((c) => c.group === group); // 默认该组第一个（全部）
+      if (conf) return await categoryFromCatalog(conf, page);
     }
+
+    // 直接用目录分类 id（movie-action / series-korea / anime-japan ...）
+    const conf = DISCOVER_LISTS.find((c) => c.type_id === categoryId);
+    if (conf) return await categoryFromCatalog(conf, page);
+
+    // 兼容旧分类名
+    const alias = { "movie:now": "movie-latest", "movie:popular": "movie-popular",
+      "tv:now": "series-latest", "tv:popular": "series-hot", anime: "anime-all" };
+    if (alias[categoryId]) return await categoryFromCatalog(DISCOVER_LISTS.find((c) => c.type_id === alias[categoryId]), page);
 
     logInfo(`category 未知分类 ${categoryId}`);
     return { page, pagecount: 0, total: 0, list: [] };
