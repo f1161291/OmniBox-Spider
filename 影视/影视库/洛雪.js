@@ -1,7 +1,7 @@
 // @name 洛雪
 // @author OmniBox
-// @description 站点：tv.lxyy.club（洛雪）。v2.2.2 修复官方解析在宿主上「无授权：请从本站影片播放页打开」：playback_grant 是绑会话的，而宿主 detail 与 play 是两次独立进程、不共享内存，play 新建会话后拿旧会话的 grant 必然被拒（本地单进程 vm 测试反而是通的，容易误判）。改为会话落宿主缓存让两次调用共享（20 分钟续期），并在授权缺失时自动换新会话重新换 grant 重试一次。v2.2.0 新增官方解析线路（洛雪4K/蓝光/臻享/789/麒麟）：官网的 4K/HDR 画质不在采集站里，而是把平台播放页交给站点解析接口换直链。接入完整四段链路 POST /api/playback-session.php 取 csrf+cookie → 带 X-CSRF-Token+Cookie 请求 detail 拿 episodes[].playback_grant → GET /json-player.php?route=&url=&source=&grant= 取 data-authorization → POST /api/json-parse.php 拿 {format,url}；官方线路在详情页排最前，play 时优先走解析、命中即 parse=0 直链（hls 与 dash/.mpd 都支持），失败再回落嗅探与跨源兜底。只对 qq/bilibili/rrmj/hmdj/mgtv 生成官方线路（优酷/爱奇艺实测洛雪4K 返回 noauth），native 格式实测是付费墙直接跳过。可用 LXYY_OFFICIAL_ENABLED/LXYY_OFFICIAL_ROUTES/LXYY_OFFICIAL_GROUPS 调整。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
-// @version 2.2.2
+// @description 站点：tv.lxyy.club（洛雪）。v2.2.3 修复 B站 4K DASH(.mpd) 在不支持 DASH 的宿主上「视频加载失败」：命中 format=dash 时保留 4K DASH 在第一位（支持 DASH 的端照常播 4K），同时嗅探一条 hls/mp4 兼容直链作为第二备选（宿主首个失败可降级）；嗅探不到就只返回 4K 单条，不做跨源重操作。v2.2.2 修复官方解析在宿主上「无授权：请从本站影片播放页打开」：playback_grant 是绑会话的，而宿主 detail 与 play 是两次独立进程、不共享内存，play 新建会话后拿旧会话的 grant 必然被拒（本地单进程 vm 测试反而是通的，容易误判）。改为会话落宿主缓存让两次调用共享（20 分钟续期），并在授权缺失时自动换新会话重新换 grant 重试一次。v2.2.0 新增官方解析线路（洛雪4K/蓝光/臻享/789/麒麟）：官网的 4K/HDR 画质不在采集站里，而是把平台播放页交给站点解析接口换直链。接入完整四段链路 POST /api/playback-session.php 取 csrf+cookie → 带 X-CSRF-Token+Cookie 请求 detail 拿 episodes[].playback_grant → GET /json-player.php?route=&url=&source=&grant= 取 data-authorization → POST /api/json-parse.php 拿 {format,url}；官方线路在详情页排最前，play 时优先走解析、命中即 parse=0 直链（hls 与 dash/.mpd 都支持），失败再回落嗅探与跨源兜底。只对 qq/bilibili/rrmj/hmdj/mgtv 生成官方线路（优酷/爱奇艺实测洛雪4K 返回 noauth），native 格式实测是付费墙直接跳过。可用 LXYY_OFFICIAL_ENABLED/LXYY_OFFICIAL_ROUTES/LXYY_OFFICIAL_GROUPS 调整。v2.1.0 对齐官网真实菜单分类：主分类改为官网侧边栏影视浏览项「电影/剧集/动漫」（官网叫剧集不叫电视剧）；电影/剧集/动漫的二级 tab 接入官网 catalog-categories.js 的 37 个真实目录分类（TMDB discover 参数完全对齐，多国家用 | 分隔）；榜单改为官网 category-tabs 的夸克/TMDB趋势/B站/奈飞四类（去「榜」字，夸克补「短剧」频道）；采集源补齐 md 魔都 / fy 官方源共 8 个；适配 trend/netflix 接口自带 TMDB id 直走 tm| 详情。v2.0.5 修复直链 m3u8 点了转圈：jimaoys 系 .m3u8 是「假 master」（单个 BANDWIDTH 变体指向带动态 session 的相对路径子列表），部分播放器卡在解析变体阶段转圈。服务端新增 expandMasterM3u8()：GET master 展开一层，直接返回绝对 session 子 m3u8 URL（内容为绝对 ts），播放器一步到位。实测 play 返回 ?session= 绝对直链。v2.0.4 修复 MPV 等外部播放器 "unrecognized file format"：平台播放页（如 svip.qlplayer.cyou/?url=…）是 HTML，MPV 当媒体打开必然失败。新增跨源直链兜底 findDirectFallback()：嗅探失败后按剧名搜 jl/mj/360zy 等源，取其 jlm3u8 线路的 .m3u8 直链 parse:0 返回，实测凡人修仙传 mgtv 播放页成功返回 jimaoys92.com 的 m3u8。v2.0.3 修复集数列表出现 "jlm3u8"：站点 jl 源有 jlm3u8/jlplayer 两个线路分组，旧版把它们合并成一条线路并把 group 名拼进每集名（"jlm3u8 第N集"）。改为按 group 拆成多条 vod_play_source，线路名体现在线路名/vod_play_from，分集名统一「第N集」不再带线路前缀。实测 jl 源拆成 jlm3u8(25集直链)/jlplayer(25集) 两条线路，jlm3u8 首集 parse:0 直链可播。v2.0.2：分集名纯数字补「第N集」、playId 精简、嗅探 Referer 按域名生成。v2.0.1 修复视频加载失败：平台播放页/解析页原先只返回 parse=1，改为先用 OmniBox.sniffVideo 嗅探真实媒体地址，命中即 parse:0 直链返回。主链路走站点自带采集站代理 /api/proxy.php，支持多源搜索、详情分集与在线播放解析；TMDB 元数据（榜单/发现）作为补充。盘搜与 PanCheck 环境变量与 影视/网盘/盘搜.js 完全统一（PANSOU_*/PANCHECK_*）。
+// @version 2.2.3
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/影视/影视库/洛雪.js
 
 /**
@@ -1771,6 +1771,32 @@ async function findDirectFallback(meta) {
   return null;
 }
 
+/**
+ * 嗅探一条 hls/mp4 兼容直链，用作 DASH(.mpd) 的降级备选。
+ * 只取 m3u8/mp4，跳过 .mpd（否则和官方 4K 线路重复，失去降级意义）。
+ */
+async function sniffCompatible(meta, header) {
+  if (typeof OmniBox.sniffVideo !== "function") return null;
+  const candidates = [];
+  const playerPage = buildPlayerPageUrl(meta.p, meta.u);
+  if (playerPage) candidates.push(playerPage);
+  candidates.push(meta.u);
+  for (const page of candidates.slice(0, 2)) {
+    try {
+      let referer = `${HOST}/`;
+      try { referer = `${new URL(page).origin}/`; } catch (_) { /* 保留默认 */ }
+      const sniffed = await OmniBox.sniffVideo(page, { ...header, Referer: referer });
+      const url = sniffed && (sniffed.url || sniffed.mediaUrl);
+      if (url && /^https?:\/\//i.test(String(url)) && !/\.mpd(\?|$)/i.test(String(url))) {
+        return { url: String(url), header: sniffed.header || {} };
+      }
+    } catch (_) { /* 单条失败继续下一条 */ }
+  }
+  // 不做跨源兜底：那是重操作（多轮 proxy 请求 + 可能触发站点限流），
+  // 且按剧名搜来的资源可能和当前剧集不是同一部，不宜当兼容备选。
+  return null;
+}
+
 async function play(params, context) {
   const rawId = String((params && (params.playId || params.id)) || "").trim();
   const from = (context && context.from) || "web";
@@ -1799,12 +1825,22 @@ async function play(params, context) {
 
       // 官方解析线路（洛雪4K/蓝光/臻享…）：站点把平台播放页交给解析接口换 4K/HDR 直链，
       // 这是全站唯一能拿到 4K 的通道，且优先级最高——有就直接用，不必再嗅探。
-      // 命中 format=hls/dash 都是可播直链（dash 是 .mpd，需 DASH 引擎，宿主普遍支持）。
+      // 命中 format=hls 直接返回；命中的是 format=dash(.mpd) 时，B站 4K 只有 DASH 一种格式，
+      // 而 TVBox/UZ/CatVod 及部分 web 内核不支持 DASH 清单（见 HStream.js 同类处理），
+      // 所以额外嗅探一条 hls/mp4 兼容备选，宿主首个失败时可降级，不牺牲支持 DASH 的端的 4K。
       const official = await tryOfficial(meta);
       if (official) {
         logInfo(`play 官方解析命中 线路=${official.routeName} format=${official.format || "-"} ${official.url.slice(0, 90)}`);
+        const resultUrls = [{ name: official.routeName, url: official.url }];
+        if (official.format === "dash") {
+          const compat = await sniffCompatible(meta, header);
+          if (compat && compat.url && compat.url !== official.url) {
+            resultUrls.push({ name: `${meta.g || "平台"}·兼容`, url: compat.url });
+            logInfo(`play 追加 DASH 兼容备选 ${compat.url.slice(0, 80)}`);
+          }
+        }
         return {
-          urls: [{ name: official.routeName, url: official.url }],
+          urls: resultUrls,
           flag: official.routeName,
           parse: 0,
           header,
