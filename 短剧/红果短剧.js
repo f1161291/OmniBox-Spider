@@ -3,8 +3,8 @@
 // 以便宿主在 play 阶段重新请求最新的媒体地址。
 // @name 红果短剧
 // @author OmniBox
-// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.4.2：对齐 hongguoTV 0.16.20 PR#146，video_detail 全挂时兜底走 App directory/all_items 取完整有序分集（官网只下发 3 个混淆预览 ID 的场景），SSR 仅补元数据。v2.4.3：详情页封面由 HEIC 改写成 byteimg JPEG（官网 series_cover 是 image/heic，宿主浏览器不支持，签名绑定路径改后缀会 403，改用同 ID 的公开 .image 端点）。v2.4.2：参考 hongguoTV 0.16.20 PR#146，video_detail 全挂时用 /reading/bookapi/directory/all_items/v/ 兜底取完整分集（网站只下发 3 个混淆预览 ID 场景）。v2.4.1：新增 SSR IPv4 直连兜底（hongguoduanju.com DNS 只返回 IPv6 时首页/分类/详情全部加载不出来的根因），缩短普通请求超时避免卡死。v2.4.0：REA 逆向 App video_detail 接口（/novel/player/video_detail/v1），detail 优先用它取完整分集（SSR 仅 3 集付费墙，App 接口实测 586 集全拿到且数字 vid 全部可播），失败回退 SSR。v2.3.0：REA 逆向 APK v7.4.5.32(code 74532)，签名基线/UA 从 74332 对齐到 APK 真实版本；放宽 vid 校验以接受 v1_ 加密 ID（APK GetVideoModelRequest.videoId 为 String）。逆向实证：播放端点 /novel/player/multi_video_model/{v1|player/v1}，请求体 snake_case 结构、Playback 签名头(x-khronos/helios/medusa)与枚举(VideoPlatformType.Mixed=1024、DeviceLevel=1/2/3)均已对齐；服务端对匿名身份仍返回空模型（需登录态），非脚本问题。v2.2.6 精简：移除 v3 遗留死代码，压缩头注释。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。v2.4.4：play 增加最外层 playSafe 兜底并把入口取值移入 try，确保任何异常都返回合法 JSON 对象，杜绝「自动下一集」偶发 "json: cannot unmarshal string into Go value of type map[string]interface {}"（逃逸异常被 runner 当字符串写进 stdout，宿主解析播放响应失败）。
-// @version 2.4.4
+// @description 红果短剧（hongguoduanju.com）：官网 SSR 分类/搜索/详情 + App 私有播放模型 + 内置 CENC Range 流服务（默认 0.0.0.0:10008，跨机配 HG_PROXY_BASE）。v2.4.2：对齐 hongguoTV 0.16.20 PR#146，video_detail 全挂时兜底走 App directory/all_items 取完整有序分集（官网只下发 3 个混淆预览 ID 的场景），SSR 仅补元数据。v2.4.3：详情页封面由 HEIC 改写成 byteimg JPEG（官网 series_cover 是 image/heic，宿主浏览器不支持，签名绑定路径改后缀会 403，改用同 ID 的公开 .image 端点）。v2.4.2：参考 hongguoTV 0.16.20 PR#146，video_detail 全挂时用 /reading/bookapi/directory/all_items/v/ 兜底取完整分集（网站只下发 3 个混淆预览 ID 场景）。v2.4.1：新增 SSR IPv4 直连兜底（hongguoduanju.com DNS 只返回 IPv6 时首页/分类/详情全部加载不出来的根因），缩短普通请求超时避免卡死。v2.4.0：REA 逆向 App video_detail 接口（/novel/player/video_detail/v1），detail 优先用它取完整分集（SSR 仅 3 集付费墙，App 接口实测 586 集全拿到且数字 vid 全部可播），失败回退 SSR。v2.3.0：REA 逆向 APK v7.4.5.32(code 74532)，签名基线/UA 从 74332 对齐到 APK 真实版本；放宽 vid 校验以接受 v1_ 加密 ID（APK GetVideoModelRequest.videoId 为 String）。逆向实证：播放端点 /novel/player/multi_video_model/{v1|player/v1}，请求体 snake_case 结构、Playback 签名头(x-khronos/helios/medusa)与枚举(VideoPlatformType.Mixed=1024、DeviceLevel=1/2/3)均已对齐；服务端对匿名身份仍返回空模型（需登录态），非脚本问题。v2.2.6 精简：移除 v3 遗留死代码，压缩头注释。历史与多实现对照见同目录《红果短剧-代码梳理报告.md》。v2.4.5：修复「运行时宿主面板不显示日志」——旧版为规避 stdout 污染把日志全改成只写 stderr，宿主调试面板只采集 OmniBox.log 所以一条都看不到；现 log() 改为 stderr + OmniBox.log 双写（fire-and-forget，任何时刻都不写 stdout），异步回调（预热/定时清扫）继续用 logStderr 纯 stderr。v2.4.4：play 增加最外层 playSafe 兜底并把入口取值移入 try，确保任何异常都返回合法 JSON 对象，杜绝「自动下一集」偶发 "json: cannot unmarshal string into Go value of type map[string]interface {}"（逃逸异常被 runner 当字符串写进 stdout，宿主解析播放响应失败）。
+// @version 2.4.5
 // @downloadURL https://gh-proxy.org/https://github.com/f1161291/OmniBox-Spider/raw/refs/heads/main/短剧/红果短剧.js
 // @dependencies
 // 说明：只依赖 Node 内置模块（crypto/zlib/http/https/fs/os/path/dgram/child_process），无需 axios/cheerio；无需同目录《红果短剧-代理.py》。详情页/play() 预热、模型短缓存、CDN 保活、首 Range 复用 moov 探测缓存以降低加载延迟；每 6 小时定时清扫内存缓存、日志与历史视频临时文件。
@@ -31,15 +31,27 @@ try {
   runner = { run() {} };
 }
 
-// OmniBox runner 用 stdout 传递 JSON 响应。部分宿主/SDK 的 OmniBox.log 会把日志
-// 序列化成 JSON 字符串写进同一 stdout；异步日志落在 play() 返回之后时，Go 宿主
-// 会把这个字符串当成播放响应解析，报
-// "json: cannot unmarshal string into Go value of type map[string]interface {}"，
-// 表现为「下一集偶发失败」。本源统一把日志同步写 stderr，绝不使用 stdout。
-function log(level, message) {
+// 日志双写：宿主调试面板只采集 OmniBox.log，stderr 只在本地终端 / 独立流服务
+// 日志文件里可见。旧版为了规避 stdout 污染（异步日志落在 play() 返回之后被 Go
+// 宿主当成播放响应解析，报 "json: cannot unmarshal string into Go value of type
+// map[string]interface {}"）把日志全部改成只写 stderr，代价是宿主面板再也看不到
+// 日志——用户反馈「运行的时候不跑日志了」即此。
+// 现在 v2.4.4 已加 playSafe 最外层兜底，改为双写：
+//   - 主链路 log()：同步写 stderr + 同一 tick 触发 OmniBox.log（fire-and-forget，
+//     不 await，避免宿主 log 卡住时拖死 handler），失败静默降级。与洛雪.js 的
+//     logInfo/logError 一致，宿主面板能正常采集。
+//   - play/detail 返回后才触发的异步回调（预热、定时清扫）继续用 logStderr 纯
+//     stderr，绝不走 OmniBox.log，避免时序污染。
+//   任何情况下都不写 stdout。
+async function log(level, message) {
+  try { process.stderr.write(`[${level}] ${message}\n`); } catch (_) { /* ignore */ }
+  if (OmniBox && typeof OmniBox.log === 'function') {
+    try { Promise.resolve(OmniBox.log(level, message)).catch(() => {}); } catch (_) { /* ignore */ }
+  }
+}
+function logStderr(level, message) {
   try { process.stderr.write(`[${level}] ${message}\n`); } catch (_) { /* ignore */ }
 }
-const logStderr = log;
 
 // ---------------------------------------------------------------------------
 // 环境变量（沿用旧《红果短剧.py》/《红果短剧-代理.py》的命名，便于直接替换）
